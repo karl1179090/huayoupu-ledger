@@ -8,25 +8,27 @@ import java.util.Calendar
 /** Small read models: no OCR bodies or image blobs cross the bridge in a list request. */
 class LedgerReadView(private val store:LedgerStore) {
     data class Window(val start:Long,val end:Long,val previous:Long)
-    fun window(month:String):Window {
+    fun window(month:String,zone:java.time.ZoneId=java.time.ZoneId.systemDefault()):Window {
         require(Regex("(?:20[0-9]{2}|2100)-(?:0[1-9]|1[0-2])").matches(month))
-        val c=Calendar.getInstance().apply { clear();set(month.take(4).toInt(),month.takeLast(2).toInt()-1,1) }
-        val start=c.timeInMillis;c.add(Calendar.MONTH,1);val end=c.timeInMillis
-        c.add(Calendar.MONTH,-2);return Window(start,end,c.timeInMillis)
+        val date=java.time.YearMonth.parse(month).atDay(1)
+        fun at(value:java.time.LocalDate)=value.atStartOfDay(zone).toInstant().toEpochMilli()
+        return Window(at(date),at(date.plusMonths(1)),at(date.minusMonths(1)))
     }
-    fun records(month:String,search:String="",offset:Int=0,limit:Int=200,direction:String="",category:String="",beforeAt:Long?=null,beforeId:Long?=null):JSONObject {
+    fun records(month:String,search:String="",offset:Int=0,limit:Int=200,direction:String="",category:String="",beforeAt:Long?=null,beforeId:Long?=null,contribution:Boolean=false,rangeStart:Long?=null,rangeEnd:Long?=null):JSONObject {
         val w=window(month);require(search.length<=200 && offset in 0..1_000_000 && limit in 1..200)
         require((beforeAt==null)==(beforeId==null))
         if(beforeAt!=null)require(beforeAt>0 && beforeId!!>0 && offset==0)
         require(direction.isEmpty()||direction in Direction.entries.map { it.name })
         val where=StringBuilder("NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)")
         val args=mutableListOf<String>()
-        if(search.isBlank()) { where.append(" AND r.occurred_at>=? AND r.occurred_at<?");args+=w.start.toString();args+=w.end.toString() }
-        else { where.append(" AND (r.merchant LIKE ? ESCAPE '\\' OR r.category LIKE ? ESCAPE '\\' OR r.note LIKE ? ESCAPE '\\' OR r.transaction_id LIKE ? ESCAPE '\\' OR CASE r.source WHEN 'OCR' THEN '摇一摇' WHEN 'IMAGE' THEN '图片导入' WHEN 'MANUAL' THEN '手动' WHEN 'SMS' THEN '自动 · 短信' WHEN 'NOTIFICATION' THEN '自动 · 通知' END LIKE ? ESCAPE '\\')")
-            val term="%"+search.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";repeat(5){args+=term} }
-        if(direction.isNotBlank()) { where.append(if(direction=="EXPENSE")" AND (r.direction=? OR r.direction IS NULL)" else " AND r.direction=?");args+=direction }
-        if(category.isNotBlank()) { where.append(" AND r.category=?");args+=category }
-        if(category.isNotBlank())where.append(" AND r.state='POSTED'")
+        if(search.isBlank()) { where.append(" AND r.occurred_at>=? AND r.occurred_at<?");args+=(rangeStart ?: w.start).toString();args+=(rangeEnd ?: w.end).toString() }
+        else { where.append(" AND (r.merchant LIKE ? ESCAPE '\\' OR r.category LIKE ? ESCAPE '\\' OR r.note LIKE ? ESCAPE '\\' OR r.transaction_id LIKE ? ESCAPE '\\' OR CASE r.source WHEN 'OCR' THEN '摇一摇' WHEN 'IMAGE' THEN '图片导入' WHEN 'MANUAL' THEN '手动' WHEN 'SMS' THEN '自动 · 短信' WHEN 'NOTIFICATION' THEN '自动 · 通知' END LIKE ? ESCAPE '\\' OR fa.name LIKE ? ESCAPE '\\' OR ta.name LIKE ? ESCAPE '\\' OR t.from_reference LIKE ? ESCAPE '\\' OR t.to_reference LIKE ? ESCAPE '\\' OR w.account_reference LIKE ? ESCAPE '\\')")
+            val term="%"+search.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";repeat(10){args+=term} }
+        if(contribution && direction=="EXPENSE")where.append(" AND (r.direction='EXPENSE' OR (r.direction='TRANSFER' AND t.fee_cents>0))")
+        else if(direction.isNotBlank()) { where.append(if(direction=="EXPENSE")" AND (r.direction=? OR r.direction IS NULL)" else " AND r.direction=?");args+=direction }
+        if(category==LedgerStatistics.TRANSFER_FEE_KEY)where.append(" AND r.direction='TRANSFER' AND t.fee_cents>0")
+        else if(category.isNotBlank()) { where.append(" AND r.category=? AND r.direction<>'TRANSFER'");args+=category.removePrefix("category:") }
+        if(category.isNotBlank()||contribution)where.append(" AND r.state='POSTED'")
         if(beforeAt!=null) {
             where.append(" AND (r.occurred_at<? OR (r.occurred_at=? AND r.id<?))")
             args+=beforeAt.toString();args+=beforeAt.toString();args+=beforeId.toString()
@@ -40,9 +42,16 @@ class LedgerReadView(private val store:LedgerStore) {
                 WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'微信')>0 AND instr(r.raw_text,'支付宝')=0 THEN 'wechat'
                 WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'支付宝')>0 AND instr(r.raw_text,'微信')=0 THEN 'alipay' END,
             w.eligibility,w.account_uid,w.selection_source,w.manual_locked,COALESCE((SELECT e.applied_cents FROM record_wallet_effects e WHERE e.record_uid=r.uid AND e.account_uid=w.account_uid),0),w.review_code,w.revision,
-            wa.name,wa.kind,wa.bank_code,wa.card_last4,wa.archived,r.standalone_refund
+            wa.name,wa.kind,wa.bank_code,wa.card_last4,wa.archived,r.standalone_refund,
+            t.record_uid tf_uid,t.from_account_uid tf_from,t.to_account_uid tf_to,t.fee_cents tf_fee,t.fee_mode tf_mode,
+            t.from_selection_source tf_from_source,t.to_selection_source tf_to_source,t.from_manual_locked tf_from_locked,
+            t.to_manual_locked tf_to_locked,t.fee_manual_locked tf_fee_locked,t.review_code tf_review,
+            t.from_reference tf_from_reference,t.to_reference tf_to_reference,fa.name tf_from_name,ta.name tf_to_name,
+            fa.archived tf_from_archived,ta.archived tf_to_archived,w.account_reference wallet_reference
             FROM records r LEFT JOIN merchant_icons i ON i.record_id=r.id LEFT JOIN merchant_icon_assets a ON a.merchant_key=i.merchant_key
             LEFT JOIN record_wallet_links w ON w.record_uid=r.uid LEFT JOIN accounts wa ON wa.uid=w.account_uid
+            LEFT JOIN record_transfer_details t ON t.record_uid=r.uid LEFT JOIN accounts fa ON fa.uid=t.from_account_uid
+            LEFT JOIN accounts ta ON ta.uid=t.to_account_uid
             WHERE $where ORDER BY r.occurred_at DESC,r.id DESC LIMIT ${limit+1} OFFSET $offset""",args.toTypedArray()).use { c ->
             while(c.moveToNext())rows.put(JSONObject().apply {
                 put("id",c.getLong(0));put("uid",c.getString(1));put("merchant",c.getString(2));put("category",c.getString(3));put("note",c.getString(4))
@@ -63,29 +72,36 @@ class LedgerReadView(private val store:LedgerStore) {
                     .put("kind",if(c.isNull(30))JSONObject.NULL else c.getString(30)).put("bankCode",if(c.isNull(31))JSONObject.NULL else c.getString(31))
                     .put("cardLast4",if(c.isNull(32))JSONObject.NULL else c.getString(32)).put("archived",c.getInt(33)==1))
                 put("standaloneRefund",if(c.isNull(34))JSONObject.NULL else JSONObject(c.getString(34)))
+                fun text(key:String):String?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it))null else c.getString(it) }
+                fun number(key:String):Long?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it))null else c.getLong(it) }
+                getJSONObject("wallet").put("accountReference",text("wallet_reference")?.let(::JSONObject) ?: JSONObject.NULL)
+                val fee=number("tf_fee")
+                val transfer=if(c.getString(6)=="TRANSFER" || c.isNull(6) && c.getString(8)=="REVIEW" && text("tf_uid")!=null)JSONObject().apply {
+                    put("fromAccountUid",text("tf_from") ?: JSONObject.NULL);put("toAccountUid",text("tf_to") ?: JSONObject.NULL)
+                    put("feeCents",fee ?: JSONObject.NULL);put("feeMode",text("tf_mode") ?: JSONObject.NULL)
+                    for(end in listOf("from","to")) {
+                        put(end,JSONObject().put("accountUid",text("tf_$end") ?: JSONObject.NULL).put("accountName",text("tf_${end}_name") ?: JSONObject.NULL)
+                            .put("archived",number("tf_${end}_archived")==1L).put("reference",text("tf_${end}_reference")?.let(::JSONObject) ?: JSONObject.NULL))
+                        put("${end}SelectionSource",text("tf_${end}_source") ?: JSONObject.NULL);put("${end}ManualLocked",number("tf_${end}_locked")==1L)
+                    }
+                    put("feeManualLocked",number("tf_fee_locked")==1L);put("reviewCode",text("tf_review") ?: JSONObject.NULL)
+                    val calculated=runCatching { net.ankio.ledger.core.TransferCalculator.calculate(c.getLong(5),requireNotNull(fee),net.ankio.ledger.core.FeeMode.valueOf(requireNotNull(text("tf_mode")))) }.getOrNull()
+                    put("debitCents",calculated?.debitCents ?: JSONObject.NULL);put("creditCents",calculated?.creditCents ?: JSONObject.NULL)
+                } else JSONObject.NULL
+                put("transfer",transfer)
+                if(contribution)put("contributionCents",(if(c.getString(6)=="TRANSFER")fee ?: 0L else c.getLong(5)).toString())
             })
         }
+        val pageUids=(0 until rows.length()).map { rows.getJSONObject(it).getString("uid") }
+        val effects=mutableMapOf<String,JSONObject>()
+        if(pageUids.isNotEmpty())store.readableDatabase.rawQuery("SELECT record_uid,account_uid,applied_cents FROM record_wallet_effects WHERE record_uid IN (${pageUids.joinToString(",") { "?" }})",pageUids.toTypedArray()).use { c->
+            while(c.moveToNext())effects.getOrPut(c.getString(0)) { JSONObject() }.put(c.getString(1),c.getLong(2))
+        }
+        for(index in 0 until rows.length()) { val row=rows.getJSONObject(index);val e=effects[row.getString("uid")] ?: JSONObject();row.put("walletEffects",e);row.optJSONObject("transfer")?.put("effects",e) }
         val more=rows.length()>limit;if(more)rows.remove(rows.length()-1)
         val last=rows.optJSONObject(rows.length()-1)
         return JSONObject().put("records",rows).put("hasMore",more).put("offset",offset).put("limit",limit)
             .put("nextCursor",if(more && last!=null)JSONObject().put("occurredAt",last.getLong("occurredAt")).put("id",last.getLong("id")) else JSONObject.NULL)
     }
-    fun summary(month:String):JSONObject {
-        val w=window(month);val result=JSONObject().put("month",month)
-        fun totals(start:Long,end:Long):JSONObject {
-            val total=JSONObject().put("expense",0).put("income",0).put("expenseCount",0).put("incomeCount",0)
-            store.readableDatabase.rawQuery("SELECT direction,COALESCE(SUM(amount),0),COUNT(*) FROM records r WHERE state='POSTED' AND occurred_at>=? AND occurred_at<? AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id) GROUP BY direction",arrayOf(start.toString(),end.toString())).use { c ->
-                while(c.moveToNext()){val key=if(c.getString(0)=="INCOME")"income" else "expense";total.put(key,c.getLong(1));total.put(key+"Count",c.getInt(2))}
-            };return total
-        }
-        result.put("totals",totals(w.start,w.end));result.put("previous",totals(w.previous,w.start))
-        val categories=JSONArray();store.readableDatabase.rawQuery("SELECT direction,category,SUM(amount),COUNT(*) FROM records r WHERE state='POSTED' AND occurred_at>=? AND occurred_at<? AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id) GROUP BY direction,category ORDER BY SUM(amount) DESC",arrayOf(w.start.toString(),w.end.toString())).use { c ->
-            while(c.moveToNext())categories.put(JSONObject().put("direction",c.getString(0)).put("name",c.getString(1)).put("amount",c.getLong(2)).put("count",c.getInt(3)))
-        };result.put("categories",categories)
-        val days=JSONArray();store.readableDatabase.rawQuery("SELECT strftime('%d',occurred_at/1000,'unixepoch','localtime'),direction,SUM(amount) FROM records r WHERE state='POSTED' AND occurred_at>=? AND occurred_at<? AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id) GROUP BY 1,2 ORDER BY 1",arrayOf(w.start.toString(),w.end.toString())).use { c ->
-            while(c.moveToNext())days.put(JSONObject().put("day",c.getString(0).toInt()).put("direction",c.getString(1)).put("amount",c.getLong(2)))
-        };result.put("days",days)
-        result.put("postedCount",store.readableDatabase.rawQuery("SELECT COUNT(*) FROM records r WHERE state='POSTED' AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)",null).use { it.moveToFirst();it.getInt(0) })
-        return result
-    }
+    fun summary(month:String):JSONObject = LedgerStatistics(store).month(month)
 }

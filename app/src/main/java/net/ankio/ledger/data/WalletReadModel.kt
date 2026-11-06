@@ -13,7 +13,7 @@ object WalletReadModel {
         put("cardLast4", account?.cardLast4 ?: JSONObject.NULL); put("archived", account?.archived ?: false)
         put("selectionSource", link?.selectionSource ?: JSONObject.NULL); put("manualLocked", link?.manualLocked ?: false)
         put("appliedCents", link?.appliedCents ?: 0); put("reviewCode", link?.reviewCode ?: JSONObject.NULL)
-        put("revision", link?.revision ?: 0)
+        put("revision", link?.revision ?: 0); put("accountReference",link?.accountReference?.let(::JSONObject) ?: JSONObject.NULL)
     }
     fun summary(store: LedgerStore, record: LedgerRecord): JSONObject =
         summary(record.wallet, record.wallet?.accountUid?.let(store::getAccountByUid))
@@ -24,7 +24,9 @@ object WalletReadModel {
             return JSONObject().put("accountUid",uid ?: JSONObject.NULL).put("accountName",account?.name ?: JSONObject.NULL)
                 .put("archived",account?.archived ?: false).put("reference",reference?.let(::JSONObject) ?: JSONObject.NULL)
         }
-        JSONObject().put("fromAccountUid",details.fromAccountUid ?: JSONObject.NULL)
+        val amounts=runCatching { net.ankio.ledger.core.TransferCalculator.calculate(requireNotNull(record.bill.amountCents),requireNotNull(details.feeCents),requireNotNull(details.feeMode)) }.getOrNull()
+        JSONObject().put("debitCents",amounts?.debitCents ?: JSONObject.NULL).put("creditCents",amounts?.creditCents ?: JSONObject.NULL)
+            .put("fromAccountUid",details.fromAccountUid ?: JSONObject.NULL)
             .put("toAccountUid",details.toAccountUid ?: JSONObject.NULL).put("feeCents",details.feeCents ?: JSONObject.NULL)
             .put("feeMode",details.feeMode?.name ?: JSONObject.NULL)
             .put("from",end(details.fromAccountUid,details.fromReference)).put("to",end(details.toAccountUid,details.toReference))

@@ -23,7 +23,7 @@ class CaptureWalletFixture:ExternalResource() {
         synchronized(app.store) {
             val db=app.store.writableDatabase
             assertFalse("The capture test must clean its synthetic records before the wallet",db.rawQuery(
-                "SELECT 1 FROM record_wallet_links WHERE account_uid=? OR applied_account_uid=? LIMIT 1",arrayOf(syntheticUid,syntheticUid)).use { it.moveToFirst() })
+                "SELECT 1 FROM record_wallet_links WHERE account_uid=? UNION ALL SELECT 1 FROM record_wallet_effects WHERE account_uid=? UNION ALL SELECT 1 FROM record_transfer_details WHERE from_account_uid=? OR to_account_uid=? LIMIT 1",Array(4) { syntheticUid }).use { it.moveToFirst() })
             db.beginTransaction()
             try {
                 db.delete("wallet_movements","account_uid=?",arrayOf(syntheticUid))

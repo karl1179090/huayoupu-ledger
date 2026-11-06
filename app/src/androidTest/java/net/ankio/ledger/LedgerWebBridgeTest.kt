@@ -174,6 +174,7 @@ class LedgerWebBridgeTest {
         .put("direction", "EXPENSE").put("merchant", "桥接合成测试商户")
         .put("category", "餐饮").put("occurredAt", System.currentTimeMillis())
         .put("note", "测试备注").put("confirmDuplicate", false)
+        .put("submissionToken",UUID.randomUUID().toString()).put("expectedRevision",app.store.get(id)?.wallet?.revision ?: 0)
 
     private fun withBridge(test: (LedgerWebBridge) -> Unit) {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->

@@ -5,6 +5,10 @@ import net.ankio.ledger.BuildConfig
 import net.ankio.ledger.capture.ChannelSettings
 import net.ankio.ledger.core.Capture
 import net.ankio.ledger.core.Direction
+import net.ankio.ledger.core.FeeMode
+import net.ankio.ledger.core.ExpensePeriod
+import net.ankio.ledger.data.RecordTransferDetails
+import net.ankio.ledger.data.LedgerStatistics
 import net.ankio.ledger.core.Money
 import net.ankio.ledger.core.AccountMoney
 import net.ankio.ledger.core.BankCodes
@@ -32,7 +36,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     private val app get() = activity.ledger
 
     @JavascriptInterface
-    fun snapshot(): String = buildSnapshot().toString()
+    fun snapshot(): String = synchronized(app.store) { buildSnapshot().toString() }
 
     /** Production list entry: exactly one bounded page, with a revision for continuation. */
     @JavascriptInterface
@@ -59,7 +63,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
 
     @JavascriptInterface
     fun snapshotView(month:String,search:String,limit:Int,direction:String,known:String):String =
-        snapshotViewData(month,search,limit,direction,known).toString()
+        synchronized(app.store) { snapshotViewData(month,search,limit,direction,known).toString() }
 
     private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String):JSONObject = try {
         val read=LedgerReadView(app.store)
@@ -139,7 +143,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("iconStatus",if(record.id in merchantIconKeys)"cached" else iconStatuses[record.id].orEmpty())
                 put("iconDetails",iconDetails[record.id].orEmpty())
                 put("duplicateId", record.duplicateId ?: JSONObject.NULL)
-                put("wallet", WalletReadModel.summary(app.store,record))
+                put("transfer",WalletReadModel.transfer(app.store,record));put("walletEffects",JSONObject(record.walletEffects));put("wallet", WalletReadModel.summary(app.store,record))
                 put("standaloneRefund",WalletReadModel.standalone(record.bill.standaloneRefund))
                 put("refundCandidateCount",if((record.bill.refund!=null || record.bill.standaloneRefund!=null) && record.state==RecordState.REVIEW)
                     app.store.refundCandidates(record.id).size else 0)
@@ -168,7 +172,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         }
         val custom = JSONObject()
         val categories = app.store.customCategories()
-        Direction.entries.forEach { direction ->
+        listOf(Direction.EXPENSE,Direction.INCOME).forEach { direction ->
             val names = JSONArray()
             categories.filter { it.direction == direction }.forEach { names.put(it.name) }
             custom.put(if (direction == Direction.EXPENSE) "expense" else "income", names)
@@ -219,7 +223,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
-            .put("wallet",WalletReadModel.summary(app.store,record)).put("paymentMethod",WalletReadModel.evidence(record.bill.paymentMethod))
+            .put("transfer",WalletReadModel.transfer(app.store,record)).put("walletEffects",JSONObject(record.walletEffects)).put("wallet",WalletReadModel.summary(app.store,record)).put("paymentMethod",WalletReadModel.evidence(record.bill.paymentMethod))
             .put("standaloneRefund",WalletReadModel.standalone(record.bill.standaloneRefund))
             .put("refund",record.bill.refund?.let { JSONObject().put("provider",it.provider).put("originalAmountCents",it.originalAmountCents).put("refundedCents",it.refundedCents).put("mode",it.mode).put("refundId",it.refundId?:JSONObject.NULL) }?:JSONObject.NULL))
             .put("rawText",record.capture.text).put("history",JSONArray().apply {
@@ -241,16 +245,32 @@ class LedgerWebBridge(private val activity: MainActivity) {
     @JavascriptInterface
     fun importBills()=onMain { activity.importBills() }
 
+    @JavascriptInterface fun importWallets()=onMain { activity.importWallets() }
+    @JavascriptInterface fun exportWallets()=onMain { activity.exportWallets() }
+    @JavascriptInterface fun exportImportTemplate(kind:String) { if(kind in setOf("bill","wallet"))onMain { activity.exportImportTemplate(kind) } }
+    @JavascriptInterface fun exportImportErrors()=onMain { activity.exportImportErrors() }
+
+    @JavascriptInterface fun statistics(period:String):String=try {
+        LedgerStatistics(app.store).query(ExpensePeriod.valueOf(period)).json().put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"统计读取失败，请重试").toString() }
+
+    @JavascriptInterface fun contributionRecords(period:String,category:String,direction:String,offset:Int):String=try {
+        val range=net.ankio.ledger.core.ExpensePeriodBuckets.create(ExpensePeriod.valueOf(period),java.time.Instant.now(),java.time.ZoneId.systemDefault())
+        LedgerReadView(app.store).records(java.time.YearMonth.now().toString(),offset=offset,direction=direction.also { checkInput(it in setOf("EXPENSE","INCOME"),"统计类型无效") },category=category,
+            contribution=true,rangeStart=range.startMillis,rangeEnd=range.endMillis).put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"开销明细读取失败").toString() }
+
     @JavascriptInterface
     fun categoryRecords(month:String,category:String,direction:String,offset:Int):String = try {
         checkInput(category.length<=1024,"分类无效")
-        LedgerReadView(app.store).records(month,offset=offset,direction=direction,category=category).put("ok",true).toString()
+        LedgerReadView(app.store).records(month,offset=offset,direction=direction,category=category,contribution=direction=="EXPENSE").put("ok",true).toString()
     } catch(error:Exception) { failure("明细读取失败",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun save(json: String): String = try {
         checkInput(json.length <= MAX_INPUT_LENGTH, "账单数据过大")
         val input = JSONObject(json)
+        checkInput(!input.has("eligibility") && !input.has("walletEffects") && !input.has("appliedCents"),"不能指定余额联动事实")
         val id = integer(input, "id", 0, MAX_SAFE_INTEGER)
         val taskId=if(input.has("recognitionTaskId")) integer(input,"recognitionTaskId",0,MAX_SAFE_INTEGER) else 0L
         if(taskId>0) checkInput(app.tasks.status(taskId) in setOf("FAILED","NO_BILL","CANCELLED","DUPLICATE"),"请等待识别完成，或重新打开识别记录")
@@ -261,7 +281,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val direction = when (string(input, "direction", 16)) {
             Direction.EXPENSE.name -> Direction.EXPENSE
             Direction.INCOME.name -> Direction.INCOME
-            else -> throw InvalidInput("请选择收入或支出")
+            Direction.TRANSFER.name -> Direction.TRANSFER
+            else -> throw InvalidInput("请选择支出、收入或转账")
         }
         val merchant = string(input, "merchant", 1024).trim().ifBlank { "未填写商户" }
         val category = string(input, "category", 1024).trim().ifBlank { "其他" }
@@ -275,6 +296,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")
+            if(direction==Direction.TRANSFER && (original?.bill?.refund!=null || original?.bill?.standaloneRefund!=null))throw WalletException("TRANSFER_REFUND_CONFLICT","含退款历史的消费不能直接改为转账，请先核对退款记录")
             val refund = original?.bill?.refund
             val validatedRefund = original != null && original.state == RecordState.POSTED && refund != null &&
                 refund.originalAmountCents > 0 && refund.refundedCents in 0..refund.originalAmountCents &&
@@ -296,15 +318,30 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     capture = Capture(Source.MANUAL, "manual", "", now),
                     bill = ParsedBill(null, null, "", "其他", now, null, true, ""),
                     state = RecordState.POSTED)
-                val saved = app.store.saveEdited(base.copy(
+                val transfer=if(direction==Direction.TRANSFER) {
+                    checkInput(refund==null && base.bill.standaloneRefund==null,"含退款历史的消费不能直接改为转账，请先核对退款记录")
+                    val data=input.optJSONObject("transfer") ?: throw InvalidInput("请选择转出与转入钱包")
+                    checkInput(!data.has("effects") && !data.has("eligibility"),"不能指定余额联动事实")
+                    fun uid(key:String):String?=if(data.has(key)&&!data.isNull(key))string(data,key,64).takeIf { it.isNotBlank() }?.also {
+                        checkInput(runCatching { java.util.UUID.fromString(it).toString()==it }.getOrDefault(false),"钱包标识无效")
+                    } else null
+                    if((base.bill.direction==Direction.TRANSFER || base.bill.transfer!=null || base.transfer!=null) && base.transfer?.feeCents==null)checkInput(
+                        data.has("fee") && string(data,"fee",32).isNotBlank() || data.has("feeCents") && !data.isNull("feeCents"),"请明确确认手续费，无费用填 0")
+                    val fee=if(data.has("fee"))Money.parseCents(string(data,"fee",32).ifBlank { "0" }) ?: throw InvalidInput("手续费需为非负金额，最多两位小数")
+                        else if(data.has("feeCents")&&!data.isNull("feeCents"))integer(data,"feeCents",0,Money.MAX_CENTS) else 0L
+                    val mode=runCatching { FeeMode.valueOf(string(data,"feeMode",16)) }.getOrElse { throw InvalidInput("请选择手续费方式") }
+                    (base.transfer ?: RecordTransferDetails(base.uid)).copy(fromAccountUid=uid("fromAccountUid"),toAccountUid=uid("toAccountUid"),feeCents=fee,feeMode=mode,
+                        reviewCode=null)
+                } else null
+                val saved = app.store.saveEdited(base.copy(transfer=transfer,
                     bill = base.bill.copy(amountCents = cents, direction = direction,
                         merchant = merchant, category = category, occurredAt = occurredAt,
-                        reliable = true, reason = "", timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
+                        reliable = true, reason = "", transfer=null, timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
                     note = note),
                     walletAccountUid=if(input.has("walletAccountUid")&&!input.isNull("walletAccountUid"))string(input,"walletAccountUid",64) else null,
                     manualWalletSelected=if(input.has("manualWalletSelected"))input.get("manualWalletSelected") as? Boolean ?: throw InvalidInput("钱包选择参数无效") else false,
-                    expectedRevision=if(input.has("expectedRevision"))integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else original?.wallet?.revision,
-                    submissionToken=if(input.has("submissionToken"))string(input,"submissionToken",160) else null)
+                    expectedRevision=if(original!=null)integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else null,
+                    submissionToken=string(input,"submissionToken",160).also { checkInput(it.isNotBlank(),"提交标识无效") })
                 if(taskId>0) {
                     app.tasks.image(taskId)?.let { app.store.attachScreenshot(saved.id,it) }
                     app.tasks.update(taskId,"SUCCEEDED","已手动补录账单",saved.id)
@@ -315,7 +352,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         }
         result.toString()
     } catch (error: WalletException) {
-        failure(error.message ?: "保存失败").put("code",error.code).toString()
+        structuredFailure(error,"保存失败").toString()
     } catch (error: IllegalArgumentException) {
         structuredFailure(error,"账单数据无效").toString()
     } catch (_: JSONException) {
@@ -378,6 +415,30 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(app.store.undoDelete(id),"撤销时间已过")
         app.changed();JSONObject().put("ok",true).toString()
     } catch(error:Exception) { structuredFailure(error,"撤销失败，请重试").toString() }
+
+    @JavascriptInterface fun mutateRecord(json:String):String=try {
+        checkInput(json.length<=2048,"操作参数过大")
+        val input=JSONObject(json);val id=integer(input,"id",1,MAX_SAFE_INTEGER)
+        val token=string(input,"submissionToken",160).also { checkInput(it.isNotBlank(),"提交标识无效") }
+        val revision=if(input.has("expectedRevision"))integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else null
+        val action=string(input,"action",16)
+        val result=synchronized(app.store) {
+            val changed=when(action) {
+                "DELETE"->app.store.softDelete(id,expectedRevision=revision,submissionToken=token)
+                "UNDO"->app.store.undoDelete(id,expectedRevision=revision,submissionToken=token)
+                else->throw InvalidInput("账单操作无效")
+            }
+            checkInput(changed,if(action=="DELETE")"账单已不存在" else "撤销时间已过")
+            app.changed()
+            JSONObject().put("ok",true).put("id",id).put("expiresAt",app.store.pendingDeletion()?.expiresAt ?: 0)
+                .put("expectedRevision",revision?.let { it+1 } ?: JSONObject.NULL)
+        }
+        if(action=="DELETE")app.scope.launch {
+            kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
+            app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord);app.changed()
+        }
+        result.toString()
+    } catch(error:Exception) { structuredFailure(error,"账单操作失败，请重试").toString() }
 
     @JavascriptInterface
     fun deleteTask(id:Long):String=try {
@@ -493,6 +554,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
 
     @JavascriptInterface
     fun addCategory(name: String, direction: String): String = try {
+        checkInput(name.trim()!="转账手续费","转账手续费为系统分类，请使用其他分类名称")
         val category = categoryInput(name, direction)
         val added = app.store.addCategory(category)
         app.changed()
@@ -688,10 +750,19 @@ class LedgerWebBridge(private val activity: MainActivity) {
     private fun failure(message:String,code:String="OPERATION_FAILED") = JSONObject().put("ok",false).put("error",message).put("code",code)
     private fun failureCode(error:Exception):String = when(error) {
         is WalletException -> error.code
-        is IllegalArgumentException,is JSONException -> "INVALID_INPUT"
+        is IllegalArgumentException -> error.message?.takeIf { it=="STATISTICS_OVERFLOW" } ?: "INVALID_INPUT"
+        is JSONException -> "INVALID_INPUT"
         else -> "OPERATION_FAILED"
     }
-    private fun structuredFailure(error:Exception,fallback:String):JSONObject = failure(error.message?:fallback,failureCode(error))
+    private fun structuredFailure(error:Exception,fallback:String):JSONObject {
+        val code=failureCode(error)
+        val messages=mapOf("TRANSFER_REVIEW_REQUIRED" to "请人工确认这笔转账后入账","TRANSFER_SAME_WALLET" to "转出与转入钱包不能相同","TRANSFER_WALLET_REQUIRED" to "请选择转出与转入钱包",
+            "TRANSFER_ACCOUNT_UNSUPPORTED" to "转账仅支持自己的资产钱包","TRANSFER_FEE_AMBIGUOUS" to "请确认手续费与扣费方式",
+            "TRANSFER_AMOUNT_CONFLICT" to "转账金额、手续费或到账金额不一致","TRANSFER_IDENTITY_CONFLICT" to "同一交易的信息有冲突，请核对原账单",
+            "TRANSFER_STATUS_REQUIRED" to "尚未确认转账完成，请核对终态","TRANSFER_PAYMENT_EVIDENCE_CONFLICT" to "新账户证据与原钱包冲突，请核对",
+            "TRANSFER_REFUND_CONFLICT" to "含消费退款记录，不能直接改为转账","STATISTICS_OVERFLOW" to "统计金额超过支持范围，请缩小时间范围")
+        return failure(messages[code] ?: error.message ?: fallback,code)
+    }
     private class InvalidInput(message: String) : IllegalArgumentException(message)
 
     private companion object {

@@ -47,13 +47,13 @@
       <i aria-hidden="true" class="fa-solid fa-chevron-down">
       </i>
      </button>
-     <nav aria-label="收支筛选" class="filter">
+     <nav aria-label="交易类型筛选" class="filter"><button data-filter="all">全部</button>
       <button class="active" data-filter="expense">
        支出
       </button>
       <button data-filter="income">
        收入
-      </button>
+      </button><button data-filter="transfer">转账</button>
      </nav>
     </div>
     <section class="summary balance">
@@ -202,7 +202,7 @@
        <input aria-label="商户" id="merchant" maxlength="120" placeholder="商户名称"/>
       </div>
       </div>
-      <input data-value="EXPENSE" id="direction" type="hidden"/>
+      <button data-value="EXPENSE" id="direction" type="button" aria-label="选择交易类型">支出</button>
       <span hidden="" id="source-label">
       </span>
       <div class="form-row edit amount-row">
@@ -219,7 +219,7 @@
       </div>
       <p id="refund-summary" class="refund-summary" hidden=""></p>
       <button type="button" id="record-wallet" class="wallet-choice" onclick="chooseWallet('record')"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>选择钱包</span><span class="chevron">›</span></button>
-      <p id="wallet-explanation" class="wallet-explanation"></p>
+      <div id="record-transfer" class="transfer-form" hidden></div><p id="wallet-explanation" class="wallet-explanation"></p>
       <div class="form-row edit note-row">
        <i class="fa-regular fa-address-book">
        </i>
@@ -379,6 +379,7 @@
       <button data-type="income">
        收入
       </button>
+      <button data-type="transfer">转账</button>
      </div>
      <button aria-label="管理分类" id="manage-category" type="button">
       <i aria-hidden="true" class="fa-solid fa-ellipsis">
@@ -403,6 +404,7 @@
        </span>
       </label>
       <button type="button" id="manual-wallet" class="wallet-choice" onclick="chooseWallet('manual')"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>选择钱包</span><span class="chevron">›</span></button>
+      <div id="manual-transfer" class="transfer-form" hidden></div><label class="manual-date">交易时间<input id="manual-occurred-at" type="datetime-local"/></label>
      </section>
      <section class="entry-import">
       <button aria-label="导入支付截图" onclick="newDraft();go('import');pickImage()" type="button">
@@ -489,6 +491,7 @@
       </button>
      </div>
     </header>
+    <div class="segmented" id="stats-period"><button data-period="WEEK">本周</button><button class="active" data-period="MONTH">本月</button><button data-period="YEAR">本年</button></div><div id="period-expense-chart" class="period-expense-chart" hidden></div>
     <div class="segmented" id="stats-type">
      <button class="active" data-type="expense">
       支出

@@ -1586,6 +1586,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized
     fun addCategory(category: CustomCategory): Boolean {
         category.validate()
+        require(category.name!="转账手续费") { "转账手续费为系统分类，请使用其他分类名称" }
         return writableDatabase.insertWithOnConflict("custom_categories", null, categoryValues(category),
             SQLiteDatabase.CONFLICT_IGNORE) != -1L
     }
