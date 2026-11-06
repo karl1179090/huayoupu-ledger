@@ -8,16 +8,16 @@ import org.json.JSONObject
 data class TransactionIdentity(val scope: String, val value: String)
 
 internal object TransactionIdentities {
-    private val reservedLabels=Regex("(?:商户\\s*(?:交易号|交易单号|订单号|订单编号)|原\\s*(?:交易号|交易单号|订单号|订单编号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})")
+    private val reservedLabels=Regex("(?:商户\\s*(?:交易号|交易单号|订单号|订单编号|转账单号|充值单号|提现单号)|原\\s*(?:交易号|交易单号|订单号|订单编号|转账单号|充值单号|提现单号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})")
     private val packageName=Regex("[A-Za-z0-9_.]+")
     private val paymentScopes=setOf("alipay","wechat")
     private val issuerPrefixes=listOf("商户","原","支付宝","微信","微信支付","淘宝")
     private val explicitLabels=listOf(
-        "alipay" to Regex("(?:支付宝\\s*交易号|支付宝\\s*交易单号)\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})"),
-        "wechat" to Regex("(?:微信\\s*支付单号|微信\\s*交易号|微信\\s*交易单号)\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})"),
+        "alipay" to Regex("(?:支付宝\\s*(?:交易号|交易单号|转账单号|转账号|充值单号|提现单号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})"),
+        "wechat" to Regex("(?:微信(?:支付)?\\s*(?:支付单号|交易号|交易单号|转账单号|转账号|充值单号|提现单号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})"),
         "app:com.taobao.taobao" to Regex("(?:淘宝\\s*订单号|淘宝\\s*订单编号)\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})"),
     )
-    private val paymentLabel=Regex("(?:(?<![\\p{L}\\p{N}_])(?:交易号|交易单号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})")
+    private val paymentLabel=Regex("(?:(?<![\\p{L}\\p{N}_])(?:交易号|交易单号|转账单号|转账号|充值单号|提现单号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})")
     private val orderLabel=Regex("(?:(?<![\\p{L}\\p{N}_])(?:订单编号|订单号码|订单号))\\s*[:：]?\\s*([A-Za-z0-9][A-Za-z0-9_-]{3,159})")
     fun reservedPrimary(capture:Capture,value:String)=reservedLabels.findAll(capture.text).any { it.groupValues[1]==value }
     private fun validScope(scope:String)=scope in paymentScopes ||

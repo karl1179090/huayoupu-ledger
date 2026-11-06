@@ -71,17 +71,18 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             val record=linked?.let(app.store::get)
             when {
                 record==null || result is IngestResult.Saved && result.record.id!=linked -> "账单已移除，未新增记账"
+                record.state==net.ankio.ledger.core.RecordState.POSTED && record.wallet?.reviewCode?.startsWith("TRANSFER_")==true -> net.ankio.ledger.data.TransferRecognitionEnricher.message(record.wallet.reviewCode)
                 record.state==net.ankio.ledger.core.RecordState.REVIEW -> if(record.wallet?.reviewCode=="WALLET_REQUIRED")"请选择钱包后入账" else record.reason.ifBlank { "金额待核对，请打开账单" }
                 record.state!=net.ankio.ledger.core.RecordState.POSTED || record.bill.amountCents==null -> "账单未入账，请重试"
                 result is IngestResult.Saved && result.updated && record.bill.refund!=null || app.tasks.message(id)=="退款已更新" -> "退款已更新"
-                else -> "已记账 ¥${net.ankio.ledger.core.Money.format(record.bill.amountCents!!)}"
+                else -> "已记账 ¥${net.ankio.ledger.core.Money.format(record.bill.amountCents!!)}${if(record.bill.direction==net.ankio.ledger.core.Direction.TRANSFER)"（钱包转账）" else ""}"
             }
         }
         IngestResult.Ignored -> "未识别到金额，请重试"
         is IngestResult.Skipped -> result.message
     }
     private fun deliver(id:Long,message:String,loading:Boolean) {
-        val linked=if(!loading && (message.startsWith("已记账 ¥") || message=="退款已更新"))app.tasks.recordId(id)?.takeIf { app.store.get(it)!=null } else null
+        val linked=if(!loading && (message.startsWith("已记账 ¥") || message=="退款已更新" || app.tasks.status(id)=="REVIEW"))app.tasks.recordId(id)?.takeIf { app.store.get(it)!=null } else null
         val display=if(!loading && (message.startsWith("已记账 ¥") || message=="退款已更新") && linked==null)"账单已移除，未新增记账" else message
         val service=ScreenCaptureService.current
         if(service!=null)service.showQueuedFeedback(display,loading,linked)

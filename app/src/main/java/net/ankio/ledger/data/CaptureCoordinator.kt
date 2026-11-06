@@ -10,8 +10,10 @@ class CaptureCoordinator(context: Context) {
     private val app = context.ledger
     private val mutex = Mutex()
 
-    suspend fun acceptRecognition(capture: Capture, bill: ParsedBill?, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, eventKey:String?=null, operationKey:String?=null, allowed: () -> Boolean): IngestResult = mutex.withLock {
+    suspend fun acceptRecognition(capture: Capture, bill: ParsedBill?, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, eventKey:String?=null, operationKey:String?=null,
+        policy:RecognitionPolicy=RecognitionPolicy.USER_INITIATED, allowed: () -> Boolean): IngestResult = mutex.withLock {
         if (!allowed() || bill == null) return@withLock IngestResult.Ignored
+        if(!policy.allows(bill,capture.origin))return@withLock IngestResult.Skipped("该交易需通过摇一摇或截图导入核对")
         synchronized(app.channels) {
             if (!allowed()) IngestResult.Ignored
             else (if(operationKey==null)app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon)

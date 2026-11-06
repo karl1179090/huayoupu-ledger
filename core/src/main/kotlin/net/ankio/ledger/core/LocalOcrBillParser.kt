@@ -28,7 +28,7 @@ object LocalOcrBillParser {
     private val refundIntent = Regex("累计(?:成功)?退款|退款总额|已(?:成功|部分|全部|全额)?退款|全额退款成功|已退金额|退款(?:成功|完成|已到账|到账成功|处理中|申请中|审核中|失败|金额|单号)|本次退款")
     private val merchantLabel = Regex("^(?:商[户戶](?:全称|名称|金称|各称)|商家名称|店铺名称|收款方(?:全称|名称)?(?!备注|服务)|付款方(?:全称|名称)?(?!备注|服务)|交易对方|对方账户|对方账号)[：:]?")
     private val paymentTimeLabel = Regex("^(?:原(?:支付|付款|交易|转账)时间|支付时间|付款时间|交易时间|转账时间)[：:]?")
-    private val idLabel = Regex("^(?:(?:原)?(?:微信|支付宝)?(?:支付|付款|交易|转账|订单))(?:编号|单号|号)[：:]?")
+    private val idLabel = Regex("^(?:(?:原)?(?:微信|支付宝)?(?:支付|付款|交易|转账|充值|提现|订单))(?:编号|单号|号)[：:]?")
     private val datePattern = Regex("(20[0-9]{2})[年/.-]([0-9]{1,2})[月/.-]([0-9]{1,2})日?\\s*([0-9]{1,2})[:：]([0-9]{2})(?:[:：]([0-9]{2}))?")
     private val uiText = Regex("支付成功|付款成功|转账成功|交易成功|账单详情|交易详情|转账详情|全部账单|返回商家|完成|当前状态|账单服务|收款方服务|支付方式|付款方式|零钱|余额|银行卡|对订单有疑惑|电子凭证|退款|返回|服务由|¥|^[+-]?[0-9,.]+$")
     private val ignoredMoney = Regex("优惠|红包|立减|折扣|优惠券|积分|余额|手续费|服务费|奖励|最多|最高|原价|订单金额|退款|已退")
@@ -79,11 +79,37 @@ object LocalOcrBillParser {
         livePaymentAt: Long? = null,
         expenseOnly: Boolean = false,
         origin: String = "",
+    ): ParsedBill? = parse(lines, width, height, capturedAt, livePaymentAt,
+        RecognitionPolicy.fromExpenseOnly(expenseOnly), origin)
+
+    fun parse(
+        lines: List<LocalOcrLine>, width: Int, height: Int, capturedAt: Long,
+        livePaymentAt: Long? = null, policy: RecognitionPolicy, origin: String = "",
     ): ParsedBill? {
+        val expenseOnly = policy == RecognitionPolicy.AUTOMATIC_PAYMENT
         val clean = lines.map { it.copy(text = normalize(it.text).trim().trim('|', '丨').trim()) }
             .filter { it.text.isNotBlank() }
         if (clean.isEmpty()) return null
         val text = clean.joinToString("\n") { it.text }
+        val transfer = TransferEvidenceParser.parse(clean, origin)
+        if (transfer != null && transfer.intent != TransferIntent.EXTERNAL) {
+            if (expenseOnly && !TransferEvidenceParser.automaticCandidate(transfer, origin)) return null
+            val times = labeledValues(clean, Regex("^(?:转账时间|充值时间|提现时间|交易时间|到账时间|完成时间)[：:]?"))
+                .mapNotNull { parseDate(it, capturedAt) }.distinct()
+            val observed = livePaymentAt?.takeIf { expenseOnly && it in 946_656_000_000L..capturedAt }
+            val codes = transfer.reviewCodes + if (times.size > 1) listOf("TRANSFER_AMOUNT_CONFLICT") else emptyList()
+            val evidence = transfer.copy(reviewCodes = codes.distinct())
+            val reliable = evidence.reviewCodes.isEmpty() && runCatching { TransferCalculator.validateEvidence(evidence) }.isSuccess
+            val reason = if (reliable) "已识别本人钱包互转，请核对双方账户" else transferReason(evidence.reviewCodes)
+            val merchant = when (evidence.scenario) {
+                TransferScenario.TOP_UP -> "钱包充值"
+                TransferScenario.WITHDRAWAL -> "余额提现"
+                else -> "本人钱包转账"
+            }
+            return ParsedBill(evidence.amountCents, if (evidence.intent == TransferIntent.SELF_TRANSFER) Direction.TRANSFER else null,
+                merchant, "转账", times.singleOrNull() ?: observed ?: capturedAt, transactionId(clean), reliable, reason,
+                times.size == 1, transfer = evidence)
+        }
         if(TransactionRejection.reason(text)!=null)return null
         val compact = text.filterNot(Char::isWhitespace)
         val isRefund = refundIntent.containsMatchIn(compact)
@@ -194,6 +220,16 @@ object LocalOcrBillParser {
             } else reasons.distinct().joinToString("；"),
             explicitTime != null, refund, PaymentMethodParser.parse(clean, direction, origin), standaloneRefund)
     }
+
+    private fun transferReason(codes: List<String>): String = codes.map { code -> when (code) {
+        "TRANSFER_ACCOUNT_UNSUPPORTED" -> "该账户或币种不支持钱包互转，请核对交易类型"
+        "TRANSFER_STATUS_REQUIRED" -> "转账尚未确认完成，请核对终态"
+        "TRANSFER_IDENTITY_CONFLICT" -> "请确认是否为本人钱包互转"
+        "TRANSFER_WALLET_REQUIRED" -> "请确认转出与转入钱包"
+        "TRANSFER_FEE_AMBIGUOUS" -> "请确认转账手续费及费用方式"
+        "TRANSFER_AMOUNT_CONFLICT", "INVALID_AMOUNT" -> "转账金额与扣款、到账或手续费不一致，请核对"
+        else -> "转账信息需核对"
+    } }.distinct().joinToString("；").ifBlank { "请核对转账信息" }
 
     private fun uniqueLabeledAmount(lines: List<LocalOcrLine>, label: Regex): Long? =
         labeledValues(lines, label).mapNotNull(::readMoney).distinct().singleOrNull()

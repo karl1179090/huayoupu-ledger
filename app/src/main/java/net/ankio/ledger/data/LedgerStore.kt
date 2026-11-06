@@ -44,6 +44,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     override fun onOpen(db:SQLiteDatabase) {
         super.onOpen(db)
         if(db.isReadOnly)return
+        TransferAccounting.ensureEvidenceColumn(db)
         // Migrate one durable reference before clearing each legacy BLOB; safe to resume after a crash.
         var migratedBytes=0L
         db.rawQuery("SELECT i.record_id,length(i.image),r.received_at FROM capture_images i JOIN records r ON i.record_id=r.id WHERE i.image IS NOT NULL",null).use { c ->
@@ -290,9 +291,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
 
     private fun withWallet(record: LedgerRecord): LedgerRecord {
         val link=WalletAccounting.link(readableDatabase,record.uid)
-        return record.copy(wallet=link,transfer=TransferAccounting.read(readableDatabase,record.uid),
+        val transfer=TransferAccounting.read(readableDatabase,record.uid)
+        return record.copy(wallet=link,transfer=transfer,
             walletEffects=WalletAccounting.effects(readableDatabase,record.uid),
-            bill=record.bill.copy(paymentMethod=decodePaymentEvidence(link?.paymentEvidence)))
+            bill=record.bill.copy(paymentMethod=decodePaymentEvidence(link?.paymentEvidence),
+                transfer=transfer?.recognitionEvidence?.let(TransferEvidenceCodec::decode)))
     }
 
     private fun encodePaymentEvidence(e: PaymentMethodEvidence?): String? = e?.let {
@@ -334,7 +337,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             reviewCode=if(isNew)null else "MISSING_WALLET_LINK")
         var final=record
         var transfer:RecordTransferDetails?=null
-        if(record.bill.direction==Direction.TRANSFER) {
+        if(record.bill.direction==Direction.TRANSFER || record.bill.direction==null && record.state==RecordState.REVIEW && record.transfer!=null) {
             if(record.bill.refund!=null || record.bill.standaloneRefund!=null)
                 throw WalletException("TRANSFER_REFUND_CONFLICT","转账不能包含消费退款记录")
             transfer=(record.transfer ?: oldTransfer ?: RecordTransferDetails(record.uid)).copy(recordUid=record.uid)
@@ -520,6 +523,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 })
                 db.delete("capture_events", "received_at < ?", arrayOf((capture.receivedAt - 7 * 86_400_000L).toString()))
             }
+            if((bill.direction==Direction.TRANSFER || bill.transfer!=null) && (bill.refund!=null || bill.standaloneRefund!=null))
+                throw WalletException("TRANSFER_REFUND_CONFLICT","转账不能包含消费退款记录")
             if(bill.standaloneRefund!=null) {
                 val result=ingestStandaloneRefund(db,capture,bill,screenshot,requireReview,merchantIcon)
                 db.setTransactionSuccessful();return result
@@ -531,8 +536,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             }
             val identified=identityMatch(db,capture,bill)
             if(identified!=null) {
-                val amountConflict=(identified.bill.refund?.originalAmountCents ?: identified.bill.amountCents)!=bill.amountCents
-                val directionConflict=identified.bill.direction!=bill.direction
+                val previousAmount=identified.bill.refund?.originalAmountCents ?: identified.bill.amountCents
+                val amountConflict=previousAmount!=bill.amountCents && !(identified.state==RecordState.REVIEW && previousAmount==null)
+                val directionConflict=identified.bill.direction!=bill.direction && !(identified.state==RecordState.REVIEW && identified.bill.direction==null)
                 val feeConflict=bill.transfer?.let { evidence->identified.transfer?.let { details->
                     evidence.feeCents!=null && details.feeCents!=null && evidence.feeCents!=details.feeCents ||
                         evidence.feeMode!=null && details.feeMode!=null && evidence.feeCents!=0L && evidence.feeMode!=details.feeMode
@@ -540,9 +546,23 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 if(amountConflict || directionConflict || feeConflict) {
                     val linked=identified.wallet?.copy(reviewCode="TRANSFER_IDENTITY_CONFLICT",revision=identified.wallet.revision+1)
                     if(linked!=null)WalletAccounting.saveLink(db,linked)
+                    identified.transfer?.let { TransferAccounting.save(db,it.copy(reviewCode="TRANSFER_IDENTITY_CONFLICT",
+                        recognitionEvidence=bill.transfer?.let(TransferEvidenceCodec::encode) ?: it.recognitionEvidence)) }
                     appendPaymentScreenshot(db,identified,capture,screenshot,"identity_conflict")
                     db.setTransactionSuccessful()
                     return IngestResult.Saved(requireNotNull(get(identified.id)),supplemented=true)
+                }
+                if(bill.transfer!=null && (bill.direction==Direction.TRANSFER || bill.direction==null && identified.state==RecordState.REVIEW)) {
+                    val candidate=enrichRecognizedTransfer(identified,bill,!requireReview)
+                    persistIdentities(db,identified.id,identified.identities)
+                    val supplemented=appendPaymentScreenshot(db,identified,capture,screenshot)
+                    if(candidate.bill!=identified.bill || candidate.state!=identified.state || candidate.reason!=identified.reason)
+                        check(db.update("records",values(candidate),"id=?",arrayOf(candidate.id.toString()))==1)
+                    val saved=syncWallet(db,candidate,changed=candidate!=identified,incomingEvidence=null)
+                    db.setTransactionSuccessful()
+                    return if(supplemented || saved!=identified)IngestResult.Saved(saved,
+                        updated=identified.state==RecordState.REVIEW && saved.state==RecordState.POSTED,supplemented=supplemented)
+                        else IngestResult.DuplicateSkipped
                 }
                 val enriched=identified.identities!=get(identified.id)?.identities
                 persistIdentities(db,identified.id,identified.identities)
@@ -631,11 +651,12 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 ?: automaticCandidate?.let { Duplicate.Possible(it.id) }
             val reason = if(refundedPaymentCandidate!=null) "疑似为已退款账单的原付款页面，请核对后保存"
                 else if (possible != null) "疑似与已有账单重复，请核对后保存" else bill.reason
-            val record = LedgerRecord(capture = capture, bill = bill.copy(reason = reason),
+            val draft = LedgerRecord(capture = capture, bill = bill.copy(reason = reason),
                 state = if (!requireReview && bill.reliable && bill.amountCents != null && bill.direction != null && possible == null)
                     RecordState.POSTED else RecordState.REVIEW,
                 reason = reason,
                 duplicateId = possible?.id)
+            val record=enrichRecognizedTransfer(draft,bill,!requireReview)
             val id = db.insertOrThrow("records", null, values(record))
             persistIdentities(db,id,identities(record))
             if (screenshot != null) {
@@ -650,10 +671,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         } finally { db.endTransaction() }
     }
 
+    private fun enrichRecognizedTransfer(record:LedgerRecord,bill:ParsedBill,allowPromotion:Boolean=true):LedgerRecord =
+        TransferRecognitionEnricher.enrich(record,bill,accounts().map {
+            WalletCandidate(it.uid,it.type.name,it.kind,it.bankCode,it.cardLast4,it.archived)
+        },WalletAccounting.settings(readableDatabase).appBindings,allowPromotion)
+
     /** Without an identifier only the identical captured payload can supplement a payment.
      * Merchant/amount/minute alone can describe two genuine purchases. */
     private fun uniqueRepeatedPayment(capture:Capture,bill:ParsedBill):LedgerRecord? {
-        if(!bill.reliable || bill.refund!=null || bill.reason.startsWith("已识别即时支付成功页") || capture.source !in setOf(Source.OCR,Source.IMAGE) ||
+        if(bill.direction==Direction.TRANSFER || bill.transfer!=null || !bill.reliable || bill.refund!=null || bill.reason.startsWith("已识别即时支付成功页") || capture.source !in setOf(Source.OCR,Source.IMAGE) ||
             bill.amountCents==null || bill.direction==null)return null
         val merchant=MerchantNames.key(bill.merchant)?:return null
         val provider=paymentProvider(capture)
@@ -710,6 +736,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             for(copy in ordered.drop(1)) {
                 // Conflicting user notes require an explicit edit; don't discard one.
                 val current=get(original.id)?:continue
+                if(current.bill.direction==Direction.TRANSFER || copy.bill.direction==Direction.TRANSFER)continue
                 if(current.note.isNotBlank() && copy.note.isNotBlank() && current.note!=copy.note)continue
                 db.beginTransaction()
                 try {
@@ -807,7 +834,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val old=previous?.transfer
             val fromChanged=details.fromAccountUid!=old?.fromAccountUid
             val toChanged=details.toAccountUid!=old?.toAccountUid
-            details.copy(fromManualLocked=details.fromManualLocked || fromChanged,
+            details.copy(reviewCode=null,fromManualLocked=details.fromManualLocked || fromChanged,
                 toManualLocked=details.toManualLocked || toChanged,
                 fromSelectionSource=if(fromChanged)"MANUAL" else details.fromSelectionSource,
                 toSelectionSource=if(toChanged)"MANUAL" else details.toSelectionSource,

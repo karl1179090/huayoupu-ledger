@@ -6,6 +6,8 @@ import kotlin.math.abs
 object PaymentMethodParser {
     private val debitLabel = Regex("^(付款方式|支付方式|扣款账户|扣款方式|付款账户|支付账户)[：:]?")
     private val creditLabel = Regex("^(收款方式|收款账户|到账账户|到账方式|入账账户|入账方式)[：:]?")
+    private val transferDebitLabel = Regex("^(转出账户|转出银行卡|转出方式|付款方式|支付方式|扣款账户|付款账户|充值方式|提现账户)[：:]?")
+    private val transferCreditLabel = Regex("^(转入账户|转入银行卡|到账银行卡|收款银行卡|提现银行卡|到账储蓄卡|到账账户|收款账户|入账账户)[：:]?")
     private val otherField = Regex("^(?:付款方|收款方|对方账户|对方账号|交易号|交易单号|订单号|订单编号|商户|商品|退款|支付时间|付款时间|交易时间|到账时间|金额|原付|累计|实付|优惠|电话)")
     private val unsupported = Regex("零钱通|余额宝|花呗|白条|信用卡|信用支付|先用后付|亲属卡|亲情卡")
     private val combined = Regex("组合(?:支付|付款)?|多种(?:方式|渠道)|分笔付款|[+＋]|及|和")
@@ -13,9 +15,19 @@ object PaymentMethodParser {
     private val cardHint = Regex("银行卡|储蓄卡|借记卡|卡尾号|尾号|卡号")
 
     fun parse(lines: List<LocalOcrLine>, direction: Direction, origin: String = ""): PaymentMethodEvidence? {
+        if (direction == Direction.TRANSFER) return null
+        return parseFields(lines, if (direction == Direction.INCOME) creditLabel else debitLabel,
+            if (direction == Direction.INCOME) "CREDIT" else "DEBIT", origin)
+    }
+
+    /** Called only after self-transfer intent is established; counterparty cards stay outside ordinary payment fields. */
+    fun parseTransferEnd(lines: List<LocalOcrLine>, role: String, origin: String = ""): PaymentMethodEvidence? {
+        require(role in setOf("DEBIT", "CREDIT"))
+        return parseFields(lines, if (role == "DEBIT") transferDebitLabel else transferCreditLabel, role, origin)
+    }
+
+    private fun parseFields(lines: List<LocalOcrLine>, label: Regex, role: String, origin: String): PaymentMethodEvidence? {
         val clean = lines.map { it.copy(text = normalize(it.text).trim()) }.filter { it.text.isNotBlank() }
-        val label = if (direction == Direction.INCOME) creditLabel else debitLabel
-        val role = if (direction == Direction.INCOME) "CREDIT" else "DEBIT"
         val sourcePlatform = when (WalletResolver.sourcePackage(origin)) {
             PaymentApps.WECHAT -> "wechat"
             PaymentApps.ALIPAY -> "alipay"
@@ -74,7 +86,8 @@ object PaymentMethodParser {
 
     private fun isField(value: String): Boolean {
         val compact = value.filterNot(Char::isWhitespace)
-        return debitLabel.containsMatchIn(compact) || creditLabel.containsMatchIn(compact) || otherField.containsMatchIn(compact)
+        return debitLabel.containsMatchIn(compact) || creditLabel.containsMatchIn(compact) ||
+            transferDebitLabel.containsMatchIn(compact) || transferCreditLabel.containsMatchIn(compact) || otherField.containsMatchIn(compact)
     }
 
     private fun decode(label: String, raw: String, context: String?, role: String): PaymentMethodEvidence {

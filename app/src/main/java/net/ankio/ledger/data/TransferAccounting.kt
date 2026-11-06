@@ -25,6 +25,7 @@ data class RecordTransferDetails(
     val evidenceVersion: Int = 1,
     val reviewCode: String? = null,
     val feeManualLocked: Boolean = false,
+    val recognitionEvidence: String? = null,
 ) {
     fun target() = TransferTarget(fromAccountUid, toAccountUid, feeCents, feeMode)
 }
@@ -36,9 +37,16 @@ internal object TransferAccounting {
             from_selection_source TEXT,to_selection_source TEXT,from_manual_locked INTEGER NOT NULL DEFAULT 0,
             to_manual_locked INTEGER NOT NULL DEFAULT 0,from_evidence TEXT,to_evidence TEXT,
             from_evidence_fingerprint TEXT,to_evidence_fingerprint TEXT,from_reference TEXT,to_reference TEXT,
-            evidence_version INTEGER NOT NULL DEFAULT 1,review_code TEXT,fee_manual_locked INTEGER NOT NULL DEFAULT 0)""")
+            evidence_version INTEGER NOT NULL DEFAULT 1,review_code TEXT,fee_manual_locked INTEGER NOT NULL DEFAULT 0,recognition_evidence TEXT)""")
         db.execSQL("CREATE INDEX transfer_from_account ON record_transfer_details(from_account_uid)")
         db.execSQL("CREATE INDEX transfer_to_account ON record_transfer_details(to_account_uid)")
+    }
+    /** Only an unreleased v10 development column is supplemented; financial facts are never inferred here. */
+    fun ensureEvidenceColumn(db: SQLiteDatabase) {
+        val exists = db.rawQuery("PRAGMA table_info(record_transfer_details)", null).use { c ->
+            var found = false; while(c.moveToNext()) if(c.getString(1)=="recognition_evidence") found=true; found
+        }
+        if(!exists)db.execSQL("ALTER TABLE record_transfer_details ADD COLUMN recognition_evidence TEXT")
     }
     fun read(db: SQLiteDatabase, uid: String): RecordTransferDetails? = db.query("record_transfer_details", null,
         "record_uid=?", arrayOf(uid), null, null, null).use { c ->
@@ -50,10 +58,11 @@ internal object TransferAccounting {
             text("fee_mode")?.let(FeeMode::valueOf), text("from_selection_source"), text("to_selection_source"),
             flag("from_manual_locked"), flag("to_manual_locked"), text("from_evidence"), text("to_evidence"),
             text("from_evidence_fingerprint"), text("to_evidence_fingerprint"), text("from_reference"), text("to_reference"),
-            c.getInt(c.getColumnIndexOrThrow("evidence_version")), text("review_code"), flag("fee_manual_locked"))
+            c.getInt(c.getColumnIndexOrThrow("evidence_version")), text("review_code"), flag("fee_manual_locked"), text("recognition_evidence"))
     }
     fun save(db: SQLiteDatabase, details: RecordTransferDetails) {
         require(details.evidenceVersion > 0)
+        details.recognitionEvidence?.let(TransferEvidenceCodec::decode)
         listOf(details.fromEvidence, details.toEvidence, details.fromReference, details.toReference).forEach {
             require(it == null || it.length <= 8192) { "转账引用过长" }
         }
@@ -67,6 +76,7 @@ internal object TransferAccounting {
             put("from_reference", details.fromReference); put("to_reference", details.toReference)
             put("evidence_version", details.evidenceVersion); put("review_code", details.reviewCode)
             put("fee_manual_locked", if (details.feeManualLocked) 1 else 0)
+            put("recognition_evidence", details.recognitionEvidence)
         }, SQLiteDatabase.CONFLICT_REPLACE).also { check(it != -1L) }
     }
 }

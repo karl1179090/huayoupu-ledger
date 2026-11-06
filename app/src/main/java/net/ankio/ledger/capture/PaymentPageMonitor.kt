@@ -136,7 +136,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         if(!ready())return@withLock null
         val result=readPage()
         val match=result.value?.takeIf { service.ledger.channels.autoAllowed(it.packageName) }?.let(visits::detect)
-        val reason=if(match!=null)"matched" else "not_completed_single_payment:${result.outcome}"
+        val reason=if(match!=null)"matched" else "not_completed_supported_payment:${result.outcome}"
         observation=JSONObject().put("activity",match?.activity?:lastActivity).put("package",match?.packageName.orEmpty())
             .put("outcome",reason).put("observedAt",System.currentTimeMillis())
         if(reason!=lastReason) { lastReason=reason;service.ledger.executionLog.event("payment_auto","page_probe",reason,diagnostics()) }

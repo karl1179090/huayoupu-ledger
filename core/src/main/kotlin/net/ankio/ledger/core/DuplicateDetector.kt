@@ -8,10 +8,11 @@ object DuplicateDetector {
     fun find(capture: Capture, bill: ParsedBill, existing: List<ExistingBill>): Duplicate {
         val currentProvider = identityScope(capture)
         val exact = existing.firstOrNull { old ->
-            if (bill.transactionId.isNullOrBlank() || bill.amountCents == null || bill.transactionId != old.transactionId ||
-                bill.direction != old.direction || bill.amountCents != old.amountCents) return@firstOrNull false
+            if (bill.transactionId.isNullOrBlank() || bill.transactionId != old.transactionId) return@firstOrNull false
             val oldProvider = identityScope(Capture(old.source, old.origin, old.text))
-            currentProvider != null && currentProvider == oldProvider
+            currentProvider != null && currentProvider == oldProvider &&
+                (bill.direction == Direction.TRANSFER || old.direction == Direction.TRANSFER ||
+                    bill.direction == old.direction && bill.amountCents != null && bill.amountCents == old.amountCents)
         }
         if (exact != null) return Duplicate.Exact(exact.id)
         if (bill.amountCents == null || bill.direction == null) return Duplicate.None
