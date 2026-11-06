@@ -1,7 +1,7 @@
 package net.ankio.ledger.core
 
 enum class Source { OCR, IMAGE, SMS, NOTIFICATION, MANUAL }
-enum class Direction { EXPENSE, INCOME }
+enum class Direction { EXPENSE, INCOME, TRANSFER }
 enum class RecordState { POSTED, REVIEW }
 
 data class Capture(
@@ -24,6 +24,7 @@ data class ParsedBill(
     val refund: RefundInfo? = null,
     val paymentMethod: PaymentMethodEvidence? = null,
     val standaloneRefund: StandaloneRefundEvidence? = null,
+    val transfer: TransferEvidence? = null,
 )
 
 /** A completed receipt with no original total stays pending until its original payment is verified. */
