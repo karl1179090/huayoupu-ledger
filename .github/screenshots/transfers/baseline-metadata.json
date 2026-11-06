@@ -1,0 +1,14 @@
+{
+  "baselineHead": "91aad555f01772e9f4c8f8e70e2da70a30f0879b",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "deviceScaleFactor": 1,
+  "reducedMotion": "reduce",
+  "timezoneId": "Asia/Shanghai",
+  "now": "2026-11-06T04:00:00.000Z",
+  "fixture": "scripts/check-wallet-whitelist.cjs::fixture (baseline HEAD)",
+  "errors": [],
+  "note": "Browser fixtures only. CSV import preview is a native Android dialog; this captures its file-tools entry, not the dialog."
+}
