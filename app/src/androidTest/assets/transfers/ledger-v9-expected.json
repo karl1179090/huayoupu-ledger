@@ -1,0 +1,83 @@
+{
+  "fixtureVersion": 1,
+  "synthetic": true,
+  "sourceHead": "91aad555f01772e9f4c8f8e70e2da70a30f0879b",
+  "accountBalances": {
+    "11111111-1111-4111-8111-111111111111": 100000,
+    "22222222-2222-4222-8222-222222222222": 20000,
+    "33333333-3333-4333-8333-333333333333": -5000,
+    "44444444-4444-4444-8444-444444444444": 10000
+  },
+  "links": [
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000001",
+      "eligibility": "ACTIVE",
+      "accountUid": "11111111-1111-4111-8111-111111111111",
+      "appliedCents": -10000,
+      "revision": 1,
+      "expectedEffects": {
+        "11111111-1111-4111-8111-111111111111": -10000
+      }
+    },
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000002",
+      "eligibility": "ACTIVE",
+      "accountUid": "22222222-2222-4222-8222-222222222222",
+      "appliedCents": 2000,
+      "revision": 2,
+      "expectedEffects": {
+        "22222222-2222-4222-8222-222222222222": 2000
+      }
+    },
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000003",
+      "eligibility": "LEGACY_EXCLUDED",
+      "accountUid": "33333333-3333-4333-8333-333333333333",
+      "appliedCents": 0,
+      "revision": 3,
+      "expectedEffects": {}
+    },
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000004",
+      "eligibility": "RESTORE_EXCLUDED",
+      "accountUid": "22222222-2222-4222-8222-222222222222",
+      "appliedCents": 0,
+      "revision": 4,
+      "expectedEffects": {}
+    },
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000005",
+      "eligibility": "ACTIVE",
+      "accountUid": "11111111-1111-4111-8111-111111111111",
+      "appliedCents": 0,
+      "revision": 5,
+      "expectedEffects": {}
+    },
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000006",
+      "eligibility": "ACTIVE",
+      "accountUid": "11111111-1111-4111-8111-111111111111",
+      "appliedCents": 0,
+      "revision": 6,
+      "expectedEffects": {}
+    },
+    {
+      "recordUid": "cccccccc-cccc-4ccc-8ccc-000000000007",
+      "eligibility": "ACTIVE",
+      "accountUid": null,
+      "appliedCents": 0,
+      "revision": 7,
+      "expectedEffects": {}
+    }
+  ],
+  "movementCount": 2,
+  "submissionCount": 1,
+  "deletedRecordIds": [
+    6
+  ],
+  "defaultAccountUid": "11111111-1111-4111-8111-111111111111",
+  "appBindings": {
+    "com.tencent.mm": "22222222-2222-4222-8222-222222222222"
+  },
+  "migrationMustNotCreateMovements": true
+}
