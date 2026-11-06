@@ -1,0 +1,27 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),{pathToFileURL}=require('node:url');
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const root=path.resolve(process.argv[2]||'.');
+const out=path.resolve(process.argv[3]||'output/transfers-baseline');
+const {execFileSync}=require('node:child_process'),crypto=require('node:crypto');
+const head=execFileSync('git',['-C',root,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
+if(head!=='91aad555f01772e9f4c8f8e70e2da70a30f0879b')throw Error('Use the unmodified S0 baseline checkout (91aad555)');
+const sourceFiles=['app/src/main/assets/web/index.html','app/src/main/assets/web/app.js','app/src/main/assets/web/app.css','scripts/check-wallet-whitelist.cjs'];
+for(const file of sourceFiles)if(execFileSync('git',['-C',root,'diff','HEAD','--',file],{encoding:'utf8'}))throw Error('Baseline source has local changes: '+file);
+const sourceHashes=Object.fromEntries(sourceFiles.map(file=>[file,crypto.createHash('sha256').update(fs.readFileSync(path.join(root,file))).digest('hex')]));
+fs.mkdirSync(out,{recursive:true});
+const source=fs.readFileSync(path.join(root,'scripts/check-wallet-whitelist.cjs'),'utf8');
+vm.runInThisContext(source.slice(source.indexOf('async function fixture(page)'),source.indexOf('(async()=>')));
+(async()=>{const browser=await chromium.launch({headless:true});try {
+const page=await browser.newPage({viewport:{width:390,height:844},deviceScaleFactor:1,reducedMotion:'reduce',timezoneId:'Asia/Shanghai'});
+const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.route('https://**',r=>r.abort());
+await page.clock.install({time:new Date('2026-11-06T04:00:00.000Z')});await fixture(page);
+await page.goto(pathToFileURL(path.join(root,'app/src/main/assets/web/index.html')).href);await page.evaluate(()=>document.fonts.ready);
+await page.screenshot({path:path.join(out,'ledger-before.png')});
+await page.evaluate(()=>beginManual());await page.waitForFunction(()=>!document.querySelector('#manual-panel')._morph);await page.screenshot({path:path.join(out,'manual-before.png')});
+await page.evaluate(()=>{closeManual(false);go('assets')});await page.screenshot({path:path.join(out,'assets-before.png')});
+await page.evaluate(()=>go('stats'));await page.screenshot({path:path.join(out,'statistics-before.png')});
+await page.evaluate(()=>{go('settings');showDataTools()});await page.waitForFunction(()=>!document.querySelector('#sheet')._morph);await page.screenshot({path:path.join(out,'bill-file-tools-before.png')});
+await page.evaluate(()=>{closeSheet(false);go('import')});await page.screenshot({path:path.join(out,'image-import-before.png')});
+fs.writeFileSync(path.join(out,'metadata.json'),JSON.stringify({baselineHead:head,sourceHashes,viewport:{width:390,height:844},deviceScaleFactor:1,reducedMotion:'reduce',timezoneId:'Asia/Shanghai',now:'2026-11-06T04:00:00.000Z',fixture:'scripts/check-wallet-whitelist.cjs::fixture (baseline HEAD)',errors,note:'Browser fixtures only. CSV import preview is a native Android dialog; this captures its file-tools entry, not the dialog.'},null,2));
+if(errors.length)throw Error(errors.join('\n'));console.log('Saved 6 synthetic baseline screenshots at '+out);
+}finally {await browser.close()}})().catch(e=>{console.error(e);process.exit(1)});

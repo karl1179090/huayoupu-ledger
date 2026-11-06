@@ -67,7 +67,8 @@ class WechatAutoPaymentTest {
         val homeActivity=if(packageName==PaymentApps.ALIPAY)"com.alipay.mobile.quinox.LauncherActivity" else "com.tencent.mm.ui.LauncherUI"
         fun setAuto(enabled:Boolean) { app.channels.setAutoPackage(packageName,enabled);app.channels.setAutomaticEnabled(enabled) }
         val before=app.store.all().map { it.id }.toSet()
-        val taskIds=(0 until app.tasks.snapshot().length()).map { app.tasks.snapshot().getJSONObject(it).getLong("id") }.toSet()
+        val receiptIsolation=CaptureReceiptIsolation(app)
+        val taskIds=receiptIsolation.entryTaskIds
         val calls=AtomicInteger()
         val releaseModel=java.util.concurrent.CountDownLatch(if(leaveDuringModel)1 else 0)
         fun waitFor(timeout:Long=10000,check:()->Boolean) {
@@ -141,7 +142,7 @@ class WechatAutoPaymentTest {
                     }
                     assertEquals("Sensitive/unknown pages must never call the screenshot API",initialRequests,ScreenCaptureService.current!!.screenshotRequests)
                     assertEquals(0,calls.get());assertEquals(before,app.store.all().map { it.id }.toSet())
-                    assertEquals(taskIds,(0 until app.tasks.snapshot().length()).map { app.tasks.snapshot().getJSONObject(it).getLong("id") }.toSet())
+                    assertEquals(taskIds,receiptIsolation.taskIds())
                     // An explicit shake may explain the privacy rejection; automatic checks stay silent.
                     if(!shakeOnBlocked)assertEquals("No automatic error/progress banner on a blocked page",initialStatus,app.channels.lastStatus())
                     return@use
@@ -230,11 +231,9 @@ class WechatAutoPaymentTest {
             ScreenCaptureService.current?.processorFactory={ CaptureProcessor(app) }
             CaptureRuntime.stopSafely()
             app.store.all().filter { it.id !in before }.forEach { app.store.delete(it.id) }
-            val tasks=app.tasks.snapshot()
-            for(i in 0 until tasks.length())tasks.getJSONObject(i).getLong("id").takeIf { it !in taskIds }?.let { id ->
-                app.tasks.paymentIdentity(id)?.let { app.store.writableDatabase.delete("capture_events","event_key=?",arrayOf(it)) }
-                app.tasks.delete(id)
-            }
+            val createdTaskIds=receiptIsolation.createdTaskIds()
+            receiptIsolation.clean(createdTaskIds)
+            createdTaskIds.forEach(app.tasks::delete)
             app.recognitionSession.invalidate()
             Settings.Secure.putString(resolver,"enabled_accessibility_services",previousServices)
             Settings.Secure.putInt(resolver,"accessibility_enabled",previousEnabled)

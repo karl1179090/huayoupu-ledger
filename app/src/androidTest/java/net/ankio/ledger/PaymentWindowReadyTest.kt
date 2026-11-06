@@ -55,7 +55,7 @@ class PaymentWindowReadyTest {
         val automatic=app.channels.automaticEnabled()
         val apps=app.channels.selectedAutoPackages()
         val before=app.store.all().map { it.id }.toSet()
-        val tasks=(0 until app.tasks.snapshot().length()).map { app.tasks.snapshot().getJSONObject(it).getLong("id") }.toSet()
+        val receiptIsolation=CaptureReceiptIsolation(app)
         val calls=AtomicInteger()
         fun waitFor(condition:()->Boolean) {
             val until=SystemClock.elapsedRealtime()+8000
@@ -167,11 +167,9 @@ class PaymentWindowReadyTest {
             app.channels.setAutomaticEnabled(false)
             ScreenCaptureService.current?.cancelRecognition();CaptureRuntime.stopSafely()
             app.store.all().filter { it.id !in before }.forEach { app.store.delete(it.id) }
-            val all=app.tasks.snapshot()
-            (0 until all.length()).map { all.getJSONObject(it).getLong("id") }.filter { it !in tasks }.forEach { id ->
-                app.tasks.paymentIdentity(id)?.let { app.store.writableDatabase.delete("capture_events","event_key=?",arrayOf(it)) }
-                app.tasks.delete(id)
-            }
+            val createdTaskIds=receiptIsolation.createdTaskIds()
+            receiptIsolation.clean(createdTaskIds)
+            createdTaskIds.forEach(app.tasks::delete)
             app.recognitionSession.invalidate()
             Settings.Secure.putString(resolver,"enabled_accessibility_services",services)
             Settings.Secure.putInt(resolver,"accessibility_enabled",enabled)
