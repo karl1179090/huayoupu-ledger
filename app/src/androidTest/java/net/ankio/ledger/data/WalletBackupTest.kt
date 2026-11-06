@@ -113,8 +113,10 @@ class WalletBackupTest {
         val document=LedgerCsvImport.Document("合成 CSV",listOf(incoming),emptyList(),1)
         val preview=LedgerCsvImport.preview(target,document)
         assertTrue(preview.walletImpacts.isEmpty());assertEquals(0,preview.pendingWallets);assertEquals(1,preview.posted)
+        val linkedBefore=LedgerCsvImport.preview(target,document,linkWalletBalances=true)
         target.setDefaultWallet(app.uid)
-        try { LedgerCsvImport.apply(target,document,preview.previewToken);fail("stale preview") }
+        assertEquals(preview.previewToken,LedgerCsvImport.preview(target,document).previewToken)
+        try { LedgerCsvImport.apply(target,document,linkedBefore.previewToken,linkWalletBalances=true);fail("stale preview") }
         catch(error:WalletException) { assertEquals("CSV_PREVIEW_STALE",error.code) }
         assertTrue(target.all().isEmpty())
         target.setDefaultWallet(card.uid)

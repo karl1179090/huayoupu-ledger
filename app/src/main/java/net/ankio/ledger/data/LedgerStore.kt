@@ -329,7 +329,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         manualAccountUid:String?=null,manualSelected:Boolean=false,incomingEvidence:PaymentMethodEvidence?=record.bill.paymentMethod,
         deleted:Boolean=false,changed:Boolean=true,sourcePackage:String?=record.capture.origin,
         strictTransfer:Boolean=false,deferredDeltas:MutableMap<String,Long>?=null,
-        initialEligibility:WalletEligibility=WalletEligibility.ACTIVE):LedgerRecord {
+        initialEligibility:WalletEligibility=WalletEligibility.ACTIVE,originalPosted:Boolean?=null):LedgerRecord {
         val previous=WalletAccounting.link(db,record.uid)
         val oldEffects=WalletAccounting.effects(db,record.uid)
         val oldTransfer=TransferAccounting.read(db,record.uid)
@@ -344,7 +344,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             if(transfer.feeCents==0L)transfer=transfer.copy(feeMode=FeeMode.EXTRA)
             link=link.copy(accountUid=null,selectionSource=null,manualLocked=false,paymentEvidence=null,evidenceFingerprint=null)
             try {
-                if(record.state==RecordState.POSTED && !deleted) validateTransfer(record,transfer,link.eligibility,oldTransfer,strictTransfer)
+                if(record.state==RecordState.POSTED && !deleted) validateTransfer(record,transfer,link.eligibility,oldTransfer.takeIf { originalPosted ?: (oldEffects.isNotEmpty() || !isNew && record.state==RecordState.POSTED && (link.eligibility!=WalletEligibility.ACTIVE || kind=="UNDO_DELETE")) },strictTransfer)
                 link=link.copy(reviewCode=transfer.reviewCode)
             } catch(error:WalletException) {
                 if(strictTransfer || !isNew || deferredDeltas!=null && error.code !in setOf("TRANSFER_WALLET_REQUIRED","INVALID_WALLET"))throw error
@@ -362,7 +362,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             }
             val settings=WalletAccounting.settings(db)
             if(manualSelected && manualAccountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
-            val resolution=WalletResolver.resolve(accounts().map {
+            val resolution=if(isNew && deferredDeltas!=null && previous?.selectionSource=="IMPORT")
+                WalletResolution(link.accountUid,"IMPORT",link.reviewCode,link.evidenceFingerprint,link.manualLocked)
+            else WalletResolver.resolve(accounts().map {
                 WalletCandidate(it.uid,it.type.name,it.kind,it.bankCode,it.cardLast4,it.archived)
             },sourcePackage,incomingEvidence,settings.defaultAccountUid,settings.appBindings,
                 if(manualSelected)manualAccountUid else null,
@@ -819,8 +821,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         previous?.let { require(it.uid==record.uid) { "账单标识无效" };checkRecordRevision(it,expectedRevision) }
         require(record.bill.standaloneRefund==null) { "请先关联原账单后确认退款" }
         require(record.bill.refund == null || record.id != 0L && previous?.state == RecordState.POSTED) { "请通过关联原账单确认退款" }
-        require(amount != null && (amount > 0 || amount == 0L && validRefundSummary(record.bill))) { "请输入有效金额" }
-        require(record.bill.refund == null || validRefundSummary(record.bill)) { "退款账单金额必须等于原付金额减累计退款" }
+        require(amount != null && (amount > 0 || amount == 0L && validRefundEvidence(record.bill))) { "请输入有效金额" }
+        require(record.bill.refund == null || validRefundEvidence(record.bill)) { "退款账单金额必须等于原付金额减累计退款" }
         if (record.id != 0L) {
             require(previous?.bill?.refund == null || record.bill.refund == previous.bill.refund && amount == previous.bill.amountCents) { "退款账单请保留实付金额" }
         }
@@ -855,7 +857,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             db.delete("merchant_icons", "record_id = ?", arrayOf(id.toString()))
             linkMerchantIcon(db, id, posted.bill.merchant, null)
             pruneIcon(db, previousKey)
-            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true)
+            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true,originalPosted=previous?.state==RecordState.POSTED)
             WalletAccounting.remember(db,token,"RECORD_SAVE",saved.uid)
             db.setTransactionSuccessful()
             return saved
@@ -1684,9 +1686,37 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         put("kind",m.kind);put("delta_cents",m.deltaCents);put("balance_before",m.balanceBefore);put("balance_after",m.balanceAfter)
         put("created_at",m.createdAt);put("summary",m.summary)
     }
+    /** Exclusion controls funding only; it never relaxes the stored business model. */
+    private fun validateImportedModel(record:LedgerRecord) {
+        val bill=record.bill;val amount=bill.amountCents;val direction=bill.direction
+        if(record.state==RecordState.POSTED && (amount==null || direction==null))throw WalletException("INVALID_AMOUNT","正式账单缺少金额或交易类型")
+        if(amount!=null && (amount !in 0..Money.MAX_CENTS || amount==0L && !validRefundEvidence(bill)))
+            throw WalletException("INVALID_AMOUNT","导入账单金额无效")
+        if(bill.refund!=null && (direction!=Direction.EXPENSE || !validRefundEvidence(bill)))
+            throw WalletException("TRANSFER_REFUND_CONFLICT","消费退款金额或交易类型不一致")
+        if(bill.standaloneRefund!=null && (record.state!=RecordState.REVIEW || amount!=null || bill.refund!=null || direction==Direction.TRANSFER))
+            throw WalletException("TRANSFER_REFUND_CONFLICT","未关联退款必须保留为待确认")
+        val details=record.transfer
+        if(direction==Direction.TRANSFER || direction==null && record.state==RecordState.REVIEW && details!=null) {
+            if(details==null || bill.refund!=null || bill.standaloneRefund!=null)throw WalletException("TRANSFER_REFUND_CONFLICT","转账资料或退款信息冲突")
+            if(details.feeCents!=null && details.feeCents !in 0..Money.MAX_CENTS)throw WalletException("TRANSFER_FEE_AMBIGUOUS","转账手续费无效")
+            if(record.state==RecordState.POSTED && (details.feeCents==null || details.feeMode==null))throw WalletException("TRANSFER_FEE_AMBIGUOUS","请确认手续费与费用方式")
+            if(amount!=null && details.feeCents!=null && details.feeMode!=null)try { TransferCalculator.calculate(amount,details.feeCents,details.feeMode) }
+                catch(error:IllegalArgumentException) { throw WalletException(error.message ?: "INVALID_AMOUNT","转账金额公式无效") }
+            if(details.fromAccountUid!=null && details.fromAccountUid==details.toAccountUid)throw WalletException("TRANSFER_SAME_WALLET","转账双方不能为同一钱包")
+            listOfNotNull(details.fromAccountUid,details.toAccountUid).forEach { uid->
+                val account=getAccountByUid(uid) ?: throw WalletException("TRANSFER_WALLET_REQUIRED","本地关联钱包已不存在")
+                if(account.type!=AccountType.ASSET)throw WalletException("TRANSFER_ACCOUNT_UNSUPPORTED","转账仅支持资产钱包")
+            }
+            if(direction==null && (details.fromAccountUid!=null || details.toAccountUid!=null || record.wallet?.accountUid!=null))
+                throw WalletException("TRANSFER_IDENTITY_CONFLICT","待确认交易类型不能预选本地转账钱包")
+        } else if(details!=null || bill.transfer!=null)throw WalletException("TRANSFER_IDENTITY_CONFLICT","普通账单不能包含转账专用信息")
+    }
+
     /** A CSV batch is atomic and validates final per-wallet net changes before moving any balance. */
     @Synchronized fun importTransactions(records:List<LedgerRecord>,linkWalletBalances:Boolean=false,
-        expectedConfigurationToken:String?=null,submissionToken:String?=null,fileSha256:String="",optionsDigest:String=""):List<LedgerRecord> {
+        expectedConfigurationToken:String?=null,submissionToken:String?=null,fileSha256:String="",optionsDigest:String="",
+        cancellationCheck:()->Unit={}):List<LedgerRecord> {
         val db=writableDatabase;db.beginTransaction()
         try {
             if(submissionToken!=null) {
@@ -1694,7 +1724,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 db.query("import_batches",arrayOf("kind","result_json"),"submission_token=?",arrayOf(submissionToken),null,null,null).use { c->
                     if(c.moveToFirst()) {
                         require(c.getString(0)=="BILLS") { "提交标识已用于其他操作" }
-                        val uids=org.json.JSONArray(c.getString(1))
+                        val json=c.getString(1)
+                        val uids=if(json.trimStart().startsWith("["))org.json.JSONArray(json) else org.json.JSONObject(json).getJSONArray("recordUids")
                         val recovered=(0 until uids.length()).mapNotNull { getByUid(uids.getString(it)) }
                         db.setTransactionSuccessful();return recovered
                     }
@@ -1705,10 +1736,12 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val batchUid=UUID.randomUUID().toString()
             val saved=mutableListOf<LedgerRecord>();val deltas=mutableMapOf<String,Long>()
             records.forEach { record->
+                cancellationCheck()
                 val exists=db.rawQuery("SELECT 1 FROM records WHERE uid=?",arrayOf(record.uid)).use { it.moveToFirst() }
                 val sameIdentity=identities(record).any { identity->db.rawQuery(
                     "SELECT 1 FROM record_identities WHERE scope=? AND value=?",arrayOf(identity.scope,identity.value)).use { it.moveToFirst() } }
                 if(!exists && !sameIdentity) {
+                    validateImportedModel(record)
                     require(record.bill.direction!=Direction.TRANSFER || record.bill.refund==null && record.bill.standaloneRefund==null) { "转账不能包含消费退款" }
                     val id=db.insertOrThrow("records",null,values(record.copy(id=0,duplicateId=null)))
                     persistIdentities(db,id,identities(record));linkMerchantIcon(db,id,record.bill.merchant,null)
@@ -1724,6 +1757,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     saved.add(final)
                 }
             }
+            cancellationCheck()
             WalletAccounting.moveAll(db,deltas,null,"BILL_IMPORT",batchUid,"导入账单批次")
             db.insertOrThrow("import_batches",null,ContentValues().apply {
                 put("batch_uid",batchUid);put("kind","BILLS");put("file_sha256",fileSha256)
@@ -1733,6 +1767,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             saved.forEach { record->db.insertOrThrow("import_batch_records",null,ContentValues().apply {
                 put("batch_uid",batchUid);put("record_uid",record.uid)
             }) }
+            cancellationCheck()
             db.setTransactionSuccessful();return saved
         } finally { db.endTransaction() }
     }
@@ -1741,16 +1776,16 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         buildMap { while(c.moveToNext())put(c.getString(c.getColumnIndexOrThrow("source_uid")),c.getString(c.getColumnIndexOrThrow("local_account_uid"))) }
     }
     /** Alias creation requires an explicit reviewed import mapping, never a same-name guess. */
-    @Synchronized fun saveWalletImportAlias(sourceUid:String,localAccountUid:String) {
+    @Synchronized fun saveWalletImportAlias(sourceUid:String,localAccountUid:String,replaceExisting:Boolean=false) {
         require(UUID.fromString(sourceUid).toString()==sourceUid) { "来源钱包标识无效" }
         val db=writableDatabase;db.beginTransaction()
         try {
             requireNotNull(getAccountByUid(localAccountUid)) { "映射钱包已不存在" }
             val previous=walletImportAliases()[sourceUid]
-            if(previous!=null && previous!=localAccountUid)throw WalletException("IMPORT_ACCOUNT_CONFLICT","来源钱包已有不同映射")
+            if(previous!=null && previous!=localAccountUid && !replaceExisting)throw WalletException("IMPORT_ACCOUNT_CONFLICT","来源钱包已有不同映射")
             db.insertWithOnConflict("wallet_import_aliases",null,ContentValues().apply {
                 put("source_uid",sourceUid);put("local_account_uid",localAccountUid)
-            },SQLiteDatabase.CONFLICT_IGNORE)
+            },if(replaceExisting)SQLiteDatabase.CONFLICT_REPLACE else SQLiteDatabase.CONFLICT_IGNORE)
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }

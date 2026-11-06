@@ -45,6 +45,8 @@ def main():
     for row in general:
         uuid.UUID(row['账单UID'])
         assert row['格式版本'] == '2' and row['币种'] == 'CNY'
+        identities = json.loads(row['交易身份集'])
+        assert identities['version'] == 1 and isinstance(identities['identities'], list)
         if row['类型'] == '转账':
             amount, fee = cents(row['金额']), cents(row['手续费'])
             debit = amount + fee if row['手续费方式'] == '额外扣费' else amount

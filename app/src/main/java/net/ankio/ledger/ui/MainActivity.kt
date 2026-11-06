@@ -36,7 +36,7 @@ class MainActivity : Activity() {
     lateinit var pageHost: FrameLayout
         private set
     internal var modelPage: EmbeddedModelPage? = null
-    private var csvPreviewSheet: MintDialog? = null
+    private val fileImports by lazy { NativeFileImports(this) }
     private var ready = false
     private var pendingCaptureRepair=false
     private var pendingRecordId:Long?=null
@@ -54,6 +54,7 @@ class MainActivity : Activity() {
         window.setDecorFitsSystemWindows(false)
         savedPageState = savedInstanceState?.getString("pageState")
         pendingChannel = savedInstanceState?.getString("pendingChannel")?.let { key -> ChannelSettings.Channel.entries.firstOrNull { it.key == key } }
+        fileImports.recover()
         savedInstanceState?.getString("permissionSetup")?.let { json -> runCatching { permissionSetup.restoreState(JSONObject(json)) } }
         previewBytes = ledger.importer.previewBytes
         val outer = FrameLayout(this).apply { setBackgroundColor(Color.rgb(248,250,252)) }
@@ -290,7 +291,7 @@ class MainActivity : Activity() {
         permissionSetup.saveState()?.let { outState.putString("permissionSetup",it.toString()) }
         super.onSaveInstanceState(outState)
     }
-    override fun onDestroy() { csvPreviewSheet?.dismiss();csvPreviewSheet=null;modelPage?.dismiss(false); uiScope.cancel(); webView.removeJavascriptInterface("LedgerNative"); webView.destroy(); super.onDestroy() }
+    override fun onDestroy() { fileImports.close();modelPage?.dismiss(false); uiScope.cancel(); webView.removeJavascriptInterface("LedgerNative"); webView.destroy(); super.onDestroy() }
 
     fun importImage() {
         if (ledger.importer.state.value == ImageImportState.Working) { message("正在识别，请稍候"); return }
@@ -299,59 +300,13 @@ class MainActivity : Activity() {
     fun exportBackup() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
         type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-${java.time.LocalDate.now()}.zip")
     }, EXPORT_REQUEST) }
-    fun exportBills(format:String) {
-        val selected=LedgerCsvExport.Format.fromKey(format)
-        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            type="text/csv";addCategory(Intent.CATEGORY_OPENABLE)
-            putExtra(Intent.EXTRA_TITLE,"花有谱-${if(selected==LedgerCsvExport.Format.QIANJI)"钱迹模板" else "全部账单"}-${java.time.LocalDate.now()}.csv")
-        },if(selected==LedgerCsvExport.Format.QIANJI)CSV_QIANJI_REQUEST else CSV_GENERAL_REQUEST)
-    }
-    fun importBills() { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-        type="*/*";putExtra(Intent.EXTRA_MIME_TYPES,arrayOf("text/csv","text/comma-separated-values","application/csv","application/octet-stream"))
-        addCategory(Intent.CATEGORY_OPENABLE)
-    }, CSV_IMPORT_REQUEST) }
-
-    private fun previewBills(document:LedgerCsvImport.Document,preview:LedgerCsvImport.Preview) {
-        if(isDestroyed || isFinishing)return
-        csvPreviewSheet?.dismiss()
-        val sheet=MintDialog(this,"导入账单预览",preview.format)
-        csvPreviewSheet=sheet
-        sheet.dialog.setOnDismissListener { if(csvPreviewSheet===sheet)csvPreviewSheet=null }
-        sheet.content.addView(sheet.text("共 ${preview.total} 笔 · 可导入 ${preview.ready} 笔",20,MintDialog.INK,true))
-        sheet.content.addView(sheet.text("重复 ${preview.duplicates} 笔 · 无效 ${preview.errors.size} 笔",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(8),0,sheet.dp(8)) })
-        sheet.content.addView(sheet.text("预计入账 ${preview.posted} 笔 · 待选择钱包 ${preview.pendingWallets} 笔",14,MintDialog.MUTED))
-        preview.walletImpacts.take(20).forEach { impact ->
-            sheet.content.addView(sheet.text("${impact.accountName ?: "待选择钱包"}  ${if(impact.deltaCents>0)"+" else ""}${net.ankio.ledger.core.Money.format(impact.deltaCents)} 元${if(impact.pending>0)" · ${impact.pending} 笔待确认" else ""}",13,MintDialog.INK))
-        }
-        sheet.content.addView(sheet.text("新导入的历史日期账单也会影响当前钱包余额；完整备份恢复不会重复扣款。",12,MintDialog.MUTED))
-        for(record in preview.samples)sheet.content.addView(sheet.text("${java.text.SimpleDateFormat("yyyy-MM-dd",java.util.Locale.ROOT).format(java.util.Date(record.bill.occurredAt))}  ${record.bill.merchant.take(20)}  ${if(record.bill.direction==net.ankio.ledger.core.Direction.INCOME)"收入" else "支出"} ¥${net.ankio.ledger.core.Money.format(record.bill.amountCents!!)}",13,MintDialog.INK))
-        if(preview.errors.isNotEmpty()) {
-            sheet.label("以下无效行将跳过")
-            preview.errors.take(4).forEach { sheet.content.addView(sheet.text("第 ${it.row} 行：${it.message}",13,MintDialog.MUTED)) }
-            if(preview.errors.size>4)sheet.content.addView(sheet.text("另有 ${preview.errors.size-4} 行无效",13,MintDialog.MUTED))
-        }
-        sheet.content.addView(sheet.text("按表头自动匹配字段；重复账单跳过，已有账单不覆盖。账户和图片不从 CSV 导入，识别开关保持当前设置。钱迹模板需为最终人民币金额；零金额退款请用花有谱通用 CSV。",12,MintDialog.MUTED).apply { setPadding(0,sheet.dp(16),0,0) })
-        if(preview.ready>0)sheet.action("确认导入 ${preview.ready} 笔",true) {
-            sheet.dismiss()
-            uiScope.launch {
-                dispatch("fileOperation",JSONObject.quote("正在导入账单"))
-                try {
-                    val result=withContext(Dispatchers.IO) { ensureActive();LedgerCsvImport.apply(ledger.store,document,preview.previewToken) }
-                    ledger.changed();message("已入账 ${result.posted} 笔，待选择钱包 ${result.pendingWallets} 笔，跳过 ${result.duplicates+result.invalid} 笔")
-                } catch(cancelled:CancellationException) { throw cancelled }
-                catch(error:net.ankio.ledger.data.WalletException) {
-                    if(error.code=="CSV_PREVIEW_STALE") {
-                        val refreshed=withContext(Dispatchers.IO) { LedgerCsvImport.preview(ledger.store,document) }
-                        previewBills(document,refreshed);message("钱包或余额已更新，请核对新的导入预览")
-                    } else message(error.message?:"导入失败，账单未修改")
-                }
-                catch(_:Exception) { message("导入失败，账单未修改") }
-                finally { dispatch("fileOperation","null") }
-            }
-        }
-        sheet.action(if(preview.ready>0)"取消" else "关闭") { sheet.dismiss() }
-        sheet.show()
-    }
+    fun exportBills(format:String) = fileImports.exportBills(format)
+    fun importBills() = fileImports.importBills()
+    fun importWallets() = fileImports.importWallets()
+    fun exportWallets() = fileImports.exportWallets()
+    fun exportImportTemplate(kind:String) = fileImports.exportTemplate(kind)
+    fun exportImportErrors() = fileImports.exportErrors()
+    internal fun fileProgress(message:String?) = dispatch("fileOperation",message?.let(JSONObject::quote) ?: "null")
     private fun exportDiagnostics() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
         type="application/json";addCategory(Intent.CATEGORY_OPENABLE)
         putExtra(Intent.EXTRA_TITLE,"花有谱识别诊断-${java.time.LocalDate.now()}.json")
@@ -362,21 +317,10 @@ class MainActivity : Activity() {
     @Deprecated("Native document picker result")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode,resultCode,data)
+        if(fileImports.onResult(requestCode,resultCode,data))return
         if (resultCode!=RESULT_OK) return
         val uri=data?.data ?: return
         when(requestCode) {
-            CSV_IMPORT_REQUEST -> uiScope.launch {
-                dispatch("fileOperation",JSONObject.quote("正在检查 CSV"))
-                try {
-                    val result=withContext(Dispatchers.IO) {
-                        val document=(contentResolver.openInputStream(uri) ?: error("无法读取文件")).use { LedgerCsvImport.read(it) }
-                        document to LedgerCsvImport.preview(ledger.store,document)
-                    }
-                    previewBills(result.first,result.second)
-                } catch(cancelled:CancellationException) { throw cancelled }
-                catch(error:Exception) { message(error.message?.take(70) ?: "CSV 无法读取，请检查格式") }
-                finally { dispatch("fileOperation","null") }
-            }
             DIAGNOSTICS_REQUEST -> uiScope.launch {
                 try {
                     withContext(Dispatchers.IO) {
@@ -390,7 +334,7 @@ class MainActivity : Activity() {
                 dispatch("navigate", JSONObject.quote("import"))
                 ledger.importer.start(uri)
             }
-            EXPORT_REQUEST,CSV_GENERAL_REQUEST,CSV_QIANJI_REQUEST -> uiScope.launch {
+            EXPORT_REQUEST -> uiScope.launch {
                 dispatch("fileOperation",JSONObject.quote(if(requestCode==EXPORT_REQUEST)"正在生成完整备份" else "正在导出全部账单"))
                 try {
                     val result=withContext(Dispatchers.IO) {
