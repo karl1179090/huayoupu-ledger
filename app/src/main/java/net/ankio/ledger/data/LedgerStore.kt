@@ -39,11 +39,19 @@ sealed class IngestResult {
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
 class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 10) {
+    private val backupContext=context.applicationContext
+    internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
+        check(mkdir()) { "无法准备备份临时目录" }
+    }
+    internal fun stageBackupScreenshot(recordId:Long,sequence:Int,directory:java.io.File):java.io.File? =
+        screenshots.stageFile(historyOwner(recordId,sequence),directory)
+
     private fun imageOwner(id: Long) = "ledger:$name:$id"
     private fun historyOwner(id: Long, sequence: Int) = if (sequence == 1) imageOwner(id) else "ledger:$name:$id:history:$sequence"
     override fun onOpen(db:SQLiteDatabase) {
         super.onOpen(db)
         if(db.isReadOnly)return
+        ImportAuditStore.create(db)
         TransferAccounting.ensureEvidenceColumn(db)
         // Migrate one durable reference before clearing each legacy BLOB; safe to resume after a crash.
         var migratedBytes=0L
@@ -1588,7 +1596,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         } }
         return WalletSnapshot(WalletAccounting.settings(db),links,movements,
             links.mapNotNull { TransferAccounting.read(db,it.recordUid) },
-            links.associate { it.recordUid to WalletAccounting.effects(db,it.recordUid) })
+            links.associate { it.recordUid to WalletAccounting.effects(db,it.recordUid) },walletImportAliases(),ImportAuditStore.read(db))
     }
 
     fun customCategories(): List<CustomCategory> = readableDatabase.query("custom_categories", null,
@@ -1647,60 +1655,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
 
     /** Snapshot restore is financially distinct from importing new transactions. */
     @Synchronized fun restoreBackup(backup:ValidatedBackup):Int=restoreBackupDetailed(backup).imported
-    @Synchronized fun restoreBackupDetailed(backup:ValidatedBackup):RestoreSummary {
-        backup.wallets?.let { WalletBackupCodec.validate(backup.records,backup.accounts,it) }
-        val db=writableDatabase;db.beginTransaction()
-        try {
-            val empty=db.rawQuery("SELECT (SELECT COUNT(*) FROM records)+(SELECT COUNT(*) FROM accounts)+(SELECT COUNT(*) FROM wallet_movements)",null)
-                .use { it.moveToFirst();it.getLong(0)==0L } && WalletAccounting.settings(db).let { it.defaultAccountUid==null && it.appBindings.isEmpty() }
-            val existing=db.rawQuery("SELECT uid FROM records",null).use { c->buildSet { while(c.moveToNext())add(c.getString(0)) } }
-            val existingAccounts=accounts().mapTo(mutableSetOf()) { it.uid }
-            val newAccounts=backup.accounts.mapTo(mutableSetOf()) { it.uid }.apply { removeAll(existingAccounts) }
-            val imported=merge(backup.records,backup.accounts,backup.categories)
-            val snapshot=backup.wallets
-            var excluded=0
-            if(snapshot!=null) {
-                val conflictedAccounts=snapshot.links.filter { it.recordUid in existing }.flatMap {
-                    listOfNotNull(it.accountUid,it.appliedAccountUid)
-                }.filterTo(mutableSetOf()) { it in newAccounts }
-                snapshot.links.filter { it.recordUid !in existing }.forEach { link->
-                    val references=listOfNotNull(link.accountUid,link.appliedAccountUid)
-                    val canRestore=empty || references.all { it in newAccounts && it !in conflictedAccounts }
-                    val restored=if(canRestore)link else link.copy(eligibility=WalletEligibility.RESTORE_EXCLUDED,appliedAccountUid=null,appliedCents=0)
-                    if(restored.eligibility==WalletEligibility.RESTORE_EXCLUDED)excluded++
-                    WalletAccounting.saveLink(db,restored)
-                    WalletAccounting.saveEffects(db,restored.recordUid,if(canRestore) snapshot.effects[restored.recordUid]
-                        ?: if(restored.appliedCents!=0L)mapOf(requireNotNull(restored.appliedAccountUid) to restored.appliedCents) else emptyMap() else emptyMap())
-                    snapshot.transfers.firstOrNull { it.recordUid==restored.recordUid }?.let { TransferAccounting.save(db,it) }
-                }
-                if(empty) {
-                    db.execSQL("UPDATE wallet_settings SET default_account_uid=?,revision=? WHERE singleton=1",
-                        arrayOf<Any?>(snapshot.settings.defaultAccountUid,snapshot.settings.revision))
-                    snapshot.settings.appBindings.forEach { (packageName,uid)->db.insertOrThrow("app_wallet_bindings",null,ContentValues().apply {
-                        put("package_name",packageName);put("account_uid",uid)
-                    }) }
-                }
-                snapshot.movements.filter { it.accountUid in newAccounts }.forEach { m->db.insertOrThrow("wallet_movements",null,movementValues(m)) }
-                backup.accounts.filter { it.uid in newAccounts }.forEach { account->
-                    val balance=account.amountCents
-                    db.insertOrThrow("wallet_movements",null,movementValues(WalletMovement(UUID.randomUUID().toString(),UUID.randomUUID().toString(),
-                        account.uid,null,"RESTORE_SNAPSHOT",0,balance,balance,System.currentTimeMillis(),"恢复钱包快照")))
-                }
-            } else {
-                backup.records.filter { it.uid !in existing }.forEach { record->
-                    WalletAccounting.saveLink(db,RecordWalletLink(record.uid,WalletEligibility.LEGACY_EXCLUDED,
-                        paymentEvidence=record.bill.paymentMethod?.let(::encodePaymentEvidence)))
-                }
-            }
-            db.setTransactionSuccessful()
-            return RestoreSummary(imported,excluded,backup.accounts.count { it.uid in existingAccounts },newAccounts.size)
-        } finally { db.endTransaction() }
-    }
-    private fun movementValues(m:WalletMovement)=ContentValues().apply {
-        put("movement_uid",m.movementUid);put("operation_uid",m.operationUid);put("account_uid",m.accountUid);put("record_uid",m.recordUid)
-        put("kind",m.kind);put("delta_cents",m.deltaCents);put("balance_before",m.balanceBefore);put("balance_after",m.balanceAfter)
-        put("created_at",m.createdAt);put("summary",m.summary)
-    }
+    @Synchronized fun restoreBackupDetailed(backup:ValidatedBackup):RestoreSummary = BackupRestore.restore(this,backup)
+
     /** Exclusion controls funding only; it never relaxes the stored business model. */
     private fun validateImportedModel(record:LedgerRecord) {
         val bill=record.bill;val amount=bill.amountCents;val direction=bill.direction

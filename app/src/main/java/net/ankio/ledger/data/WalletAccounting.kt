@@ -39,8 +39,10 @@ data class WalletMovement(
 
 data class WalletSettings(val defaultAccountUid: String? = null, val appBindings: Map<String, String> = emptyMap(), val revision: Long = 0)
 data class WalletSnapshot(val settings: WalletSettings, val links: List<RecordWalletLink>, val movements: List<WalletMovement>,
-    val transfers: List<RecordTransferDetails> = emptyList(), val effects: Map<String, Map<String, Long>> = emptyMap())
-data class RestoreSummary(val imported:Int,val excludedRecords:Int,val retainedAccounts:Int,val restoredAccounts:Int)
+    val transfers: List<RecordTransferDetails> = emptyList(), val effects: Map<String, Map<String, Long>> = emptyMap(),
+    val aliases: Map<String,String> = emptyMap(), val audits: List<ImportAudit> = emptyList())
+data class RestoreSummary(val imported:Int,val excludedRecords:Int,val retainedAccounts:Int,val restoredAccounts:Int,
+    val identityConflicts:Int=0,val aliasConflicts:Int=0,val skippedRecords:Int=0)
 class WalletException(val code: String, message: String): IllegalArgumentException(message)
 
 /** Called only while holding LedgerStore's write lock and a ledger.db transaction. */
@@ -77,6 +79,7 @@ internal object WalletAccounting {
         db.execSQL("CREATE INDEX import_records_record ON import_batch_records(record_uid)")
         db.execSQL("""CREATE TABLE wallet_import_aliases(source_uid TEXT PRIMARY KEY NOT NULL,local_account_uid TEXT NOT NULL)""")
         db.execSQL("CREATE INDEX wallet_aliases_account ON wallet_import_aliases(local_account_uid)")
+        ImportAuditStore.create(db)
     }
     /** SQLiteOpenHelper wraps the whole schema upgrade in its own transaction. No balance is recomputed. */
     fun migrateV10(db: SQLiteDatabase) {

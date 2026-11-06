@@ -298,7 +298,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="image/*"; addCategory(Intent.CATEGORY_OPENABLE) }, IMAGE_REQUEST)
     }
     fun exportBackup() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-${java.time.LocalDate.now()}.zip")
+        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-v5-${java.time.LocalDate.now()}.zip")
     }, EXPORT_REQUEST) }
     fun exportBills(format:String) = fileImports.exportBills(format)
     fun importBills() = fileImports.importBills()
@@ -348,13 +348,13 @@ class MainActivity : Activity() {
                             (contentResolver.openOutputStream(uri,"wt") ?: error("无法写入")).use { output -> temporary.inputStream().use { it.copyTo(output) } }
                             count
                         } finally { temporary.delete() }
-                    }; message(if(result==null)"完整备份已导出" else "已导出 $result 笔账单")
+                    }; message(if(result==null)"完整备份 v5 已导出" else "已导出 $result 笔账单")
                 } catch(cancelled:CancellationException) { throw cancelled }
                 catch(_:Exception) { message("导出失败，请检查文件位置或可用空间") }
                 finally { dispatch("fileOperation", "null") }
             }
             RESTORE_REQUEST -> AlertDialog.Builder(this).setTitle("恢复本地备份？")
-                .setMessage("将合并备份中的账单、账户、分类及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。旧版备份可能没有截图。")
+                .setMessage("将合并备份中的账单、账户、分类及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。支持 v1～v5 备份；钱包余额以快照恢复，资金影响不会重放。旧版备份可能没有截图。")
                 .setPositiveButton("恢复") { _,_ ->
                     // Pause both independent channels before taking the ledger write lock.
                     // A late native OCR response must lose its session before restore starts.
@@ -376,7 +376,7 @@ class MainActivity : Activity() {
                             ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
                             ledger.channels.resetShakeSelectionForRestore()
                             imported
-                        }; CaptureRuntime.stopSafely(); ledger.changed(); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔历史记录未参与余额联动，保留 ${count.retainedAccounts} 个本地账户。采集保持暂停，请重新选择摇一摇应用")
+                        }; CaptureRuntime.stopSafely(); ledger.changed(); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔保留为不联动历史；保留 ${count.retainedAccounts} 个本地钱包，跳过 ${count.skippedRecords} 笔重复（强身份 ${count.identityConflicts}）；${count.aliasConflicts} 个别名冲突保留本地映射。采集保持暂停，请重新选择摇一摇应用")
                     } catch(cancelled:CancellationException) { throw cancelled }
                     catch(_:Exception) { message("恢复失败，备份无效或已损坏，现有账单未修改") }
                     finally { dispatch("fileOperation","null") }

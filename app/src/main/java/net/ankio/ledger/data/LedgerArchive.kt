@@ -44,59 +44,32 @@ object LedgerArchive {
         }
     }
 
-    /** The caller owns output. A complete manifest is written only after all images succeed. */
-    fun write(store: LedgerStore, channels: ChannelSettings, output: OutputStream): Summary = synchronized(store) {
-        val records = store.all()
-        val ledger = JSONObject(LedgerBackup.encode(records, channels, store.accounts(), store.customCategories(),store.walletSnapshot()))
-        val histories = JSONObject()
-        val icons = JSONObject()
-        val stored = mutableSetOf<String>()
-        var bytes = 0L
-        ZipOutputStream(object : FilterOutputStream(output) {
-            override fun close() { flush() }
-        }).use { zip ->
-            fun attachment(image: ByteArray): String {
-                require(image.isNotEmpty() && image.size <= MAX_IMAGE_BYTES) { "账单图片大小无效" }
-                val hash = hash(image)
-                if (stored.add(hash)) {
-                    require(stored.size <= MAX_ATTACHMENTS) { "备份图片数量过多" }
-                    bytes += image.size
-                    require(bytes <= MAX_TOTAL_BYTES) { "备份图片超过 512 MB" }
-                    zip.putNextEntry(ZipEntry("images/$hash.bin"))
-                    zip.write(image)
-                    zip.closeEntry()
-                }
-                return hash
+    /** Ledger rows and media are fixed first; compression and destination I/O hold no ledger lock. */
+    fun write(store:LedgerStore,channels:ChannelSettings,output:OutputStream):Summary=StagedLedgerBackup.capture(store).use { snapshot->
+        val ledger=JSONObject(LedgerBackup.encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets))
+        val histories=JSONObject();val icons=JSONObject(snapshot.iconAssets)
+        snapshot.histories.forEach { (uid,entries)->histories.put(uid,JSONArray(entries.map { entry->
+            LedgerBackup.historyJson(entry).put("asset",snapshot.historyAssets[uid]?.get(entry.sequence) ?: JSONObject.NULL)
+        })) }
+        ledger.put("histories",histories)
+        val manifest=JSONObject().put("format","simple-ledger-archive").put("version",1).put("ledger",ledger).put("merchantIcons",icons).toString().toByteArray(Charsets.UTF_8)
+        require(manifest.size<=MAX_MANIFEST_BYTES) { "备份清单超过容量限制" }
+        snapshot.files.values.forEach(::validateImage)
+        var total=0L
+        ZipOutputStream(object:FilterOutputStream(output) { override fun close() { flush() } }).use { zip->
+            for((expected,file) in snapshot.files) {
+                zip.putNextEntry(ZipEntry("images/$expected.bin"));val digest=MessageDigest.getInstance("SHA-256");var bytes=0L
+                file.inputStream().use { input->val buffer=ByteArray(8192);while(true) {
+                    val count=input.read(buffer);if(count<0)break;bytes+=count;total+=count
+                    require(bytes<=MAX_IMAGE_BYTES && total+manifest.size<=MAX_TOTAL_BYTES) { "备份图片超过容量限制" }
+                    digest.update(buffer,0,count);zip.write(buffer,0,count)
+                } }
+                require(bytes==file.length() && hex(digest.digest())==expected) { "备份图片已损坏" }
+                zip.closeEntry()
             }
-            val grouped = store.captureHistories()
-            for (record in records) {
-                var history = grouped[record.id].orEmpty()
-                // Older imports may have a primary screenshot without an evidence-history row.
-                val legacyImage = if (history.isEmpty()) store.screenshot(record.id) else null
-                if (legacyImage != null) {
-                    val refund = record.bill.refund
-                    history = listOf(RecordCaptureHistory(1, record.capture.receivedAt,
-                        if (refund == null) "payment" else if (record.bill.amountCents == 0L) "full_refund" else "partial_refund",
-                        record.bill.amountCents, refund?.refundedCents ?: 0L, record.capture.text, true,
-                        "cumulative"))
-                }
-                val entries = JSONArray()
-                for (entry in history) {
-                    val image = if (legacyImage != null) legacyImage else store.historyScreenshot(record.id, entry.sequence)
-                    entries.put(LedgerBackup.historyJson(entry).put("asset", image?.let(::attachment) ?: JSONObject.NULL))
-                }
-                if (entries.length() > 0) histories.put(record.uid, entries)
-                store.merchantIcon(record.id)?.let { icons.put(record.uid, attachment(it)) }
-            }
-            ledger.put("histories", histories)
-            val manifest = JSONObject().put("format", "simple-ledger-archive").put("version", 1)
-                .put("ledger", ledger).put("merchantIcons", icons).toString().toByteArray(Charsets.UTF_8)
-            require(manifest.size <= MAX_MANIFEST_BYTES && bytes + manifest.size <= MAX_TOTAL_BYTES) { "备份内容超过容量限制" }
-            zip.putNextEntry(ZipEntry("manifest.json"))
-            zip.write(manifest)
-            zip.closeEntry()
+            zip.putNextEntry(ZipEntry("manifest.json"));zip.write(manifest);zip.closeEntry()
         }
-        Summary(records.size, stored.size, bytes)
+        Summary(snapshot.records.size,snapshot.files.size,total)
     }
 
     /** ZIP is staged and checked before restore; old JSON backups keep their original validation. */
@@ -210,18 +183,16 @@ object LedgerArchive {
 
     /** Repeated imports are idempotent. Existing edits, evidence and capture permissions survive. */
     fun restore(store: LedgerStore, prepared: PreparedBackup): Int = restoreDetailed(store,prepared).imported
-    fun restoreDetailed(store: LedgerStore, prepared: PreparedBackup): RestoreSummary = synchronized(store) {
+    fun restoreDetailed(store:LedgerStore,prepared:PreparedBackup):RestoreSummary {
         prepared.ensureOpen()
-        if (prepared.legacy) return@synchronized LedgerBackup.restoreDetailed(store, prepared.backup)
-        LedgerBackup.restoreDetailed(store, prepared.backup) { record ->
-            prepared.backup.histories[record.uid]?.let { entries ->
-                store.restoreHistory(record.id, entries) { restored ->
-                    prepared.historyAssets[record.uid]?.get(restored.entry.sequence)?.let { hash ->
-                        attachmentBytes(prepared, hash)
-                    }
-                }
-            }
-            prepared.iconAssets[record.uid]?.let { store.restoreMerchantIcon(record.id, attachmentBytes(prepared, it)) }
+        if(prepared.legacy)return LedgerBackup.restoreDetailed(store,prepared.backup)
+        // Recheck all staged media before any ledger mutation, including changes since ZIP preflight.
+        prepared.files.forEach { (hash,file)->attachmentBytes(prepared,hash);validateImage(file) }
+        return LedgerBackup.restoreDetailed(store,prepared.backup) { record->
+            prepared.backup.histories[record.uid]?.let { entries->store.restoreHistory(record.id,entries) { restored->
+                prepared.historyAssets[record.uid]?.get(restored.entry.sequence)?.let { attachmentBytes(prepared,it) }
+            } }
+            prepared.iconAssets[record.uid]?.let { store.restoreMerchantIcon(record.id,attachmentBytes(prepared,it)) }
         }
     }
 
@@ -237,15 +208,7 @@ object LedgerArchive {
         return hash
     }
 
-    private fun validateImage(file: File) {
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, options)
-        require(options.outWidth > 0 && options.outHeight > 0 && options.outWidth.toLong() * options.outHeight <= 50_000_000L) { "账单图片无法读取" }
-        var sample = 1
-        while (options.outWidth / sample > 1024 || options.outHeight / sample > 1024) sample *= 2
-        val decoded = BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample })
-        requireNotNull(decoded) { "账单图片无法读取" }.recycle()
-    }
+    private fun validateImage(file:File) = BackupMediaValidator.validate(file)
 
     private fun hash(bytes: ByteArray) = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
     private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
