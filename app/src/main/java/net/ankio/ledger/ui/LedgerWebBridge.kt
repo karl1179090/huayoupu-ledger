@@ -346,7 +346,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     app.tasks.image(taskId)?.let { app.store.attachScreenshot(saved.id,it) }
                     app.tasks.update(taskId,"SUCCEEDED","已手动补录账单",saved.id)
                 }
-                app.changed()
+                app.changed(true)
                 JSONObject().put("ok", true).put("id", saved.id).put("state",saved.state.name)
             }
         }
@@ -380,7 +380,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(pendingId in 1..MAX_SAFE_INTEGER && targetId in 1..MAX_SAFE_INTEGER, "账单编号无效")
         val saved = app.store.confirmRefund(pendingId, targetId)
         app.tasks.reassignRecord(pendingId, saved.record.id)
-        app.changed()
+        app.changed(true)
         JSONObject().put("ok", true).put("id", saved.record.id).put("updated", saved.updated).toString()
     } catch (error: Exception) {
         structuredFailure(error,"退款关联失败，请重新核对原账单").toString()
@@ -392,13 +392,13 @@ class LedgerWebBridge(private val activity: MainActivity) {
         synchronized(app.store) {
             checkInput(app.store.get(id) != null, "账单已不存在，请刷新后重试")
             checkInput(app.store.softDelete(id),"账单已不存在，请刷新后重试")
-            app.changed()
+            app.changed(true)
         }
         val deletion=app.store.pendingDeletion()
         app.scope.launch {
             kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
             app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord)
-            app.changed()
+            app.changed(true)
         }
         JSONObject().put("ok", true).put("id", id).put("expiresAt",deletion?.expiresAt?:0).toString()
     } catch (error: WalletException) {
@@ -413,7 +413,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     fun undoDelete(id:Long):String = try {
         checkInput(id in 1..MAX_SAFE_INTEGER,"账单编号无效")
         checkInput(app.store.undoDelete(id),"撤销时间已过")
-        app.changed();JSONObject().put("ok",true).toString()
+        app.changed(true);JSONObject().put("ok",true).toString()
     } catch(error:Exception) { structuredFailure(error,"撤销失败，请重试").toString() }
 
     @JavascriptInterface fun mutateRecord(json:String):String=try {
@@ -429,13 +429,13 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 else->throw InvalidInput("账单操作无效")
             }
             checkInput(changed,if(action=="DELETE")"账单已不存在" else "撤销时间已过")
-            app.changed()
+            app.changed(true)
             JSONObject().put("ok",true).put("id",id).put("expiresAt",app.store.pendingDeletion()?.expiresAt ?: 0)
                 .put("expectedRevision",revision?.let { it+1 } ?: JSONObject.NULL)
         }
         if(action=="DELETE")app.scope.launch {
             kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
-            app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord);app.changed()
+            app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord);app.changed(true)
         }
         result.toString()
     } catch(error:Exception) { structuredFailure(error,"账单操作失败，请重试").toString() }

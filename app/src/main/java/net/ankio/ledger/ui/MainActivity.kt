@@ -40,6 +40,7 @@ class MainActivity : Activity() {
     private var ready = false
     private var pendingCaptureRepair=false
     private var pendingRecordId:Long?=null
+    private var pendingStatisticsPeriod:net.ankio.ledger.core.ExpensePeriod?=null
     private var pendingChannel: ChannelSettings.Channel? = null
     internal val permissionSetup by lazy { PermissionSetupController(this) }
     @Volatile private var savedPageState: String? = null
@@ -48,6 +49,9 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ledger.startInteractiveMaintenance()
+        pendingStatisticsPeriod=savedInstanceState?.getString("pendingStatisticsPeriod")?.let { runCatching {net.ankio.ledger.core.ExpensePeriod.valueOf(it)}.getOrNull() }
+            ?:statisticsPeriod(intent)
         pendingCaptureRepair=intent.action==net.ankio.ledger.capture.CaptureHealth.REPAIR
         pendingRecordId=savedInstanceState?.getLong("pendingRecordId",0)?.takeIf { it>0 }
             ?:intent.takeIf { it.action==OPEN_RECORD }?.getLongExtra("recordId",0)?.takeIf { it>0 }
@@ -130,6 +134,7 @@ class MainActivity : Activity() {
                     permissionSetup.resume()
                     resumeCaptureRepair()
                     openPendingRecord()
+                    openPendingStatistics()
                 }
             }
         }
@@ -236,6 +241,7 @@ class MainActivity : Activity() {
     }
     override fun onResume() {
         super.onResume()
+        ledger.startInteractiveMaintenance()
         // Restore a previously enabled listener after an update/process stop. No new consent.
         captureRestoreResumed=true;restoreEnabledCapture(++captureRestoreEpoch)
         if(ledger.executionLog.active())ledger.executionLog.event("system","permissions","activity_resumed",net.ankio.ledger.data.RecognitionDiagnostics.permissions(ledger))
@@ -249,8 +255,25 @@ class MainActivity : Activity() {
     }
     override fun onNewIntent(intent:Intent) {
         super.onNewIntent(intent);setIntent(intent)
+        ledger.startInteractiveMaintenance()
+        if(intent.action==OPEN_STATISTICS) {pendingStatisticsPeriod=statisticsPeriod(intent);openPendingStatistics()}
         if(intent.action==net.ankio.ledger.capture.CaptureHealth.REPAIR) { pendingCaptureRepair=true;resumeCaptureRepair() }
         if(intent.action==OPEN_RECORD) { pendingRecordId=intent.getLongExtra("recordId",0).takeIf { it>0 };openPendingRecord() }
+    }
+    private fun statisticsPeriod(source:Intent):net.ankio.ledger.core.ExpensePeriod? {
+        if(source.action!=OPEN_STATISTICS)return null
+        val period=runCatching {net.ankio.ledger.core.ExpensePeriod.valueOf(source.getStringExtra(net.ankio.ledger.widget.ExpenseWidgetProvider.PERIOD)?:"")}.getOrNull()?:return null
+        val uri=source.data?:return null
+        val id=uri.pathSegments.getOrNull(0)?.toIntOrNull()?:return null
+        if(id !in net.ankio.ledger.widget.ExpenseWidgetProvider.ids(this) || uri.toString()!="ledger-statistics://widget/$id/${period.name}")return null
+        return period
+    }
+    private fun openPendingStatistics() {
+        if(!ready)return
+        val period=pendingStatisticsPeriod?:return
+        pendingStatisticsPeriod=null
+        intent.action=null;intent.data=null;intent.removeExtra(net.ankio.ledger.widget.ExpenseWidgetProvider.PERIOD)
+        dispatch("statisticsPeriod",JSONObject.quote(period.name))
     }
     private fun openPendingRecord() {
         if(!ready)return
@@ -286,6 +309,7 @@ class MainActivity : Activity() {
     }
     override fun onSaveInstanceState(outState: Bundle) {
         pendingRecordId?.let { outState.putLong("pendingRecordId",it) }
+        pendingStatisticsPeriod?.let {outState.putString("pendingStatisticsPeriod",it.name)}
         savedPageState?.let { outState.putString("pageState", it) }
         pendingChannel?.let { outState.putString("pendingChannel", it.key) }
         permissionSetup.saveState()?.let { outState.putString("permissionSetup",it.toString()) }
@@ -376,7 +400,7 @@ class MainActivity : Activity() {
                             ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
                             ledger.channels.resetShakeSelectionForRestore()
                             imported
-                        }; CaptureRuntime.stopSafely(); ledger.changed(); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔保留为不联动历史；保留 ${count.retainedAccounts} 个本地钱包，跳过 ${count.skippedRecords} 笔重复（强身份 ${count.identityConflicts}）；${count.aliasConflicts} 个别名冲突保留本地映射。采集保持暂停，请重新选择摇一摇应用")
+                        }; CaptureRuntime.stopSafely(); ledger.changed(true); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔保留为不联动历史；保留 ${count.retainedAccounts} 个本地钱包，跳过 ${count.skippedRecords} 笔重复（强身份 ${count.identityConflicts}）；${count.aliasConflicts} 个别名冲突保留本地映射。采集保持暂停，请重新选择摇一摇应用")
                     } catch(cancelled:CancellationException) { throw cancelled }
                     catch(_:Exception) { message("恢复失败，备份无效或已损坏，现有账单未修改") }
                     finally { dispatch("fileOperation","null") }
@@ -570,5 +594,5 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode,permissions,grantResults); refresh()
         if(permissionSetup.active)permissionSetup.resume()
     }
-    companion object { const val OPEN_RECORD="net.ankio.ledger.OPEN_RECORD";const val IMAGE_REQUEST=10; const val EXPORT_REQUEST=11; const val RESTORE_REQUEST=12; const val DIAGNOSTICS_REQUEST=13;const val CSV_GENERAL_REQUEST=14;const val CSV_QIANJI_REQUEST=15;const val CSV_IMPORT_REQUEST=16 }
+    companion object { const val OPEN_STATISTICS="net.ankio.ledger.OPEN_STATISTICS"; const val OPEN_RECORD="net.ankio.ledger.OPEN_RECORD";const val IMAGE_REQUEST=10; const val EXPORT_REQUEST=11; const val RESTORE_REQUEST=12; const val DIAGNOSTICS_REQUEST=13;const val CSV_GENERAL_REQUEST=14;const val CSV_QIANJI_REQUEST=15;const val CSV_IMPORT_REQUEST=16 }
 }

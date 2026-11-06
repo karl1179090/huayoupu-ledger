@@ -36,6 +36,7 @@ class CaptureRuntime private constructor(private val service:ScreenCaptureServic
                 app.channels.status("此设备无法监听摇动，请使用截图导入")
             }
         }
+        app.startInteractiveMaintenance()
         val wasRunning=running
         running=app.channels.captureEnabled()
         if(!running)stop()

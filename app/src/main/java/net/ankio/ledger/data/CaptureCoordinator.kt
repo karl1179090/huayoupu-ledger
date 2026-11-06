@@ -18,7 +18,7 @@ class CaptureCoordinator(context: Context) {
             if (!allowed()) IngestResult.Ignored
             else (if(operationKey==null)app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon)
                 else app.store.ingestRecognition(capture.copy(text=capture.text.take(32_768)),bill,operationKey,eventKey,screenshot,merchantIcon)).also {
-                if (it is IngestResult.Saved || it == IngestResult.DuplicateSkipped && merchantIcon!=null) app.changed()
+                if (it is IngestResult.Saved || it == IngestResult.DuplicateSkipped && merchantIcon!=null) app.changed(true)
             }
         }
     }

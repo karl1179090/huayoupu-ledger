@@ -38,7 +38,7 @@ internal class NativeFileImports(private val activity:MainActivity) {
         activity.uiScope.launch {
             val receipt=withContext(Dispatchers.IO) { store.importReceipt(token) }
             if(receipt!=null) {
-                activity.ledger.changed()
+                activity.ledger.changed(true)
                 val summary=runCatching {
                     val json=org.json.JSONObject(receipt)
                     if(json.has("recordUids"))LedgerCsvImport.Result.decode(receipt).let { "上次账单导入已完成：正式 ${it.posted}，待确认 ${it.pendingWallets}，重复 ${it.duplicates}，错误 ${it.invalid}" }
@@ -97,7 +97,7 @@ internal class NativeFileImports(private val activity:MainActivity) {
             activity.uiScope.launch {
                 activity.fileProgress("正在导入账单")
                 try { val result=withContext(Dispatchers.IO) { val context=currentCoroutineContext();context.ensureActive();remember(plan.submissionToken);LedgerCsvImport.applyPreview(store,document,preview) { context.ensureActive() } }
-                    activity.ledger.changed();activity.message("已入账 ${result.posted} 笔，待确认 ${result.pendingWallets} 笔，重复 ${result.duplicates}，错误 ${result.invalid}");done()
+                    activity.ledger.changed(true);activity.message("已入账 ${result.posted} 笔，待确认 ${result.pendingWallets} 笔，重复 ${result.duplicates}，错误 ${result.invalid}");done()
                 } catch(cancelled:CancellationException) { throw cancelled }
                 catch(error:Exception) { if(error is WalletException && error.code=="IMPORT_PREVIEW_STALE")refreshBills(document,preview.options)
                     activity.message(error.message?.take(100) ?: "导入失败，整批未提交") }
@@ -154,7 +154,7 @@ internal class NativeFileImports(private val activity:MainActivity) {
             activity.uiScope.launch {
                 activity.fileProgress("正在提交钱包快照")
                 try { val result=withContext(Dispatchers.IO) { val context=currentCoroutineContext();context.ensureActive();remember(preview.plan.submissionToken);WalletCsvImport.apply(store,preview) { context.ensureActive() } }
-                    activity.ledger.changed();activity.message("新增 ${result.imported} 个钱包，更新 ${result.updated}，保留 ${result.retained}，跳过 ${result.skipped}，错误 ${result.invalid}");done()
+                    activity.ledger.changed(true);activity.message("新增 ${result.imported} 个钱包，更新 ${result.updated}，保留 ${result.retained}，跳过 ${result.skipped}，错误 ${result.invalid}");done()
                 } catch(cancelled:CancellationException) { throw cancelled }
                 catch(error:Exception) { if(error is WalletException && error.code=="IMPORT_PREVIEW_STALE")refreshWallets(document,preview.choices)
                     activity.message(error.message?.take(100) ?: "钱包导入失败，整批未提交") }

@@ -28,9 +28,9 @@ class LedgerStatistics(private val store: LedgerStore) {
             .put("days", JSONArray().apply { days.forEach { put(JSONObject().put("day", it.day).put("date",it.date).put("direction", it.direction.name).put("amount", it.amountCents.toString())) } })
     }
 
-    fun query(period: ExpensePeriod, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()): Snapshot = synchronized(store) {
+    fun query(period: ExpensePeriod, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault(), includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown): Snapshot = synchronized(store) {
         val range = ExpensePeriodBuckets.create(period, now, zone)
-        readSnapshot { aggregate(range.startMillis, range.endMillis, zone, range) }
+        readSnapshot { aggregate(range.startMillis, range.endMillis, zone, range, includeBreakdown, includeDays) }
     }
 
     /** The old month entry and the current-period service use this exact same projection. */
@@ -49,7 +49,7 @@ class LedgerStatistics(private val store: LedgerStore) {
         try { val result = action(); db.setTransactionSuccessful(); return result } finally { db.endTransaction() }
     }
 
-    private fun aggregate(start: Long, end: Long, zone: ZoneId, range: ExpensePeriodRange? = null): Snapshot {
+    private fun aggregate(start: Long, end: Long, zone: ZoneId, range: ExpensePeriodRange? = null, includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown): Snapshot {
         var expense = 0L; var income = 0L; var expenses = 0L; var incomes = 0L; var transfers = 0L; var count = 0L
         val amounts = LongArray(range?.buckets?.size ?: 0)
         val categories = linkedMapOf<Pair<Direction, String>, Pair<Long, Long>>()
@@ -78,12 +78,16 @@ class LedgerStatistics(private val store: LedgerStore) {
                     expense = add(expense, cents); expenses = add(expenses, 1)
                     range?.bucketIndex(occurred)?.takeIf { it >= 0 }?.let { amounts[it] = add(amounts[it], cents) }
                 } else { income = add(income, cents); incomes = add(incomes, 1) }
+                if (includeBreakdown) {
                 val category = if (direction == Direction.TRANSFER) TRANSFER_FEE_KEY else "category:"+c.getString(2)
                 val key = contributionDirection to category
                 val prior = categories[key] ?: (0L to 0L)
                 categories[key] = add(prior.first, cents) to add(prior.second, 1)
+                }
+                if (includeDays) {
                 val day = Instant.ofEpochMilli(occurred).atZone(zone).toLocalDate() to contributionDirection
                 days[day] = add(days[day] ?: 0, cents)
+                }
             }
         }
         if (range != null) check(amounts.fold(0L, ::add) == expense)
