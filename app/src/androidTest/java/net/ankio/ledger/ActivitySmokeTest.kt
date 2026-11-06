@@ -8,6 +8,7 @@ import kotlinx.coroutines.runBlocking
 import net.ankio.ledger.core.*
 import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.data.LedgerStore
+import net.ankio.ledger.data.prepareSyntheticDefaultWallet
 import net.ankio.ledger.ui.MainActivity
 import org.junit.Assert.*
 import org.junit.Test
@@ -35,7 +36,7 @@ class ActivitySmokeTest {
     @Test fun remoteBillWritesToLocalLedgerAndKeepsDuplicateProtection() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "remote-test-${UUID.randomUUID()}.db"
-        val store = LedgerStore(context, name)
+        val store = LedgerStore(context, name).prepareSyntheticDefaultWallet()
         try {
             val raw = "支付成功 支付金额 28.50元 商户 示例咖啡店 交易时间 2026-10-16 12:30:00 交易单号 TEST20261016"
             val json = org.json.JSONObject().put("is_bill",true).put("raw_text",raw).put("amount","28.50")

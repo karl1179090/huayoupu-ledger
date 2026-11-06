@@ -36,6 +36,7 @@ PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/ch
 PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-tab-navigation.cjs
 PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-ledger-optimization.cjs
 PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-ledger-search.cjs
+PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-wallet-whitelist.cjs
 ```
 
 Windows 使用 `gradlew.bat`，通过 `$env:PLAYWRIGHT_MODULE` 设置模块路径。新依赖须说明用途、许可和包体影响；原生库或模型更新须同步锁文件、通知、复现步骤与回归结果。

@@ -13,6 +13,7 @@ import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.ui.MainActivity
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
@@ -20,6 +21,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class RefundHistoryUiTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun allInteractiveWebElementsHaveTransparentTapHighlights() {
@@ -73,7 +75,7 @@ class RefundHistoryUiTest {
                 val web=WebUiProbe(scenario);web.ready();web.run("openRecord(${record.id})")
                 web.await("document.querySelector('#refund-match').hidden")
                 assertEquals("true",web.value("!document.querySelector('#refund-summary').textContent.includes('待关联') && document.querySelector('#review-reason').textContent.includes('最终支出')"))
-                assertEquals("true",web.value("document.querySelector('#review-reason').hidden"))
+                assertEquals("false",web.value("document.querySelector('#review-reason').hidden"))
                 web.run("document.querySelector('#amount').focus()")
                 assertEquals("none",web.text("getComputedStyle(document.querySelector('#amount')).outlineStyle"))
             }

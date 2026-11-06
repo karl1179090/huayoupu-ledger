@@ -10,11 +10,12 @@ class CaptureCoordinator(context: Context) {
     private val app = context.ledger
     private val mutex = Mutex()
 
-    suspend fun acceptRecognition(capture: Capture, bill: ParsedBill?, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, eventKey:String?=null, allowed: () -> Boolean): IngestResult = mutex.withLock {
+    suspend fun acceptRecognition(capture: Capture, bill: ParsedBill?, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, eventKey:String?=null, operationKey:String?=null, allowed: () -> Boolean): IngestResult = mutex.withLock {
         if (!allowed() || bill == null) return@withLock IngestResult.Ignored
         synchronized(app.channels) {
             if (!allowed()) IngestResult.Ignored
-            else app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon).also {
+            else (if(operationKey==null)app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon)
+                else app.store.ingestRecognition(capture.copy(text=capture.text.take(32_768)),bill,operationKey,eventKey,screenshot,merchantIcon)).also {
                 if (it is IngestResult.Saved || it == IngestResult.DuplicateSkipped && merchantIcon!=null) app.changed()
             }
         }

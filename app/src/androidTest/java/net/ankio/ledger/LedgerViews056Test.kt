@@ -12,6 +12,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class LedgerViews056Test {
+    @get:org.junit.Rule val wallet = CaptureWalletFixture()
     @Test fun monthSearchStatisticsAndOneTapDeleteUndoUseNativeData() {
         val app=InstrumentationRegistry.getInstrumentation().targetContext.ledger
         val ids=mutableListOf<Long>()

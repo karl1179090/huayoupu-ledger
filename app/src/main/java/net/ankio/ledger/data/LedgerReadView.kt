@@ -38,8 +38,11 @@ class LedgerReadView(private val store:LedgerStore) {
             CASE WHEN lower(r.origin) LIKE '%com.tencent.mm%' OR r.origin IN ('微信','微信支付') THEN 'wechat'
                 WHEN lower(r.origin) LIKE '%com.eg.android.alipaygphone%' OR r.origin='支付宝' THEN 'alipay'
                 WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'微信')>0 AND instr(r.raw_text,'支付宝')=0 THEN 'wechat'
-                WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'支付宝')>0 AND instr(r.raw_text,'微信')=0 THEN 'alipay' END
+                WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'支付宝')>0 AND instr(r.raw_text,'微信')=0 THEN 'alipay' END,
+            w.eligibility,w.account_uid,w.selection_source,w.manual_locked,w.applied_cents,w.review_code,w.revision,
+            wa.name,wa.kind,wa.bank_code,wa.card_last4,wa.archived,r.standalone_refund
             FROM records r LEFT JOIN merchant_icons i ON i.record_id=r.id LEFT JOIN merchant_icon_assets a ON a.merchant_key=i.merchant_key
+            LEFT JOIN record_wallet_links w ON w.record_uid=r.uid LEFT JOIN accounts wa ON wa.uid=w.account_uid
             WHERE $where ORDER BY r.occurred_at DESC,r.id DESC LIMIT ${limit+1} OFFSET $offset""",args.toTypedArray()).use { c ->
             while(c.moveToNext())rows.put(JSONObject().apply {
                 put("id",c.getLong(0));put("uid",c.getString(1));put("merchant",c.getString(2));put("category",c.getString(3));put("note",c.getString(4))
@@ -52,6 +55,14 @@ class LedgerReadView(private val store:LedgerStore) {
                 put("historyRevision",c.getInt(19).toString());put("hasScreenshot",false);put("captureMode","");put("iconStatus",if(!c.isNull(18))"cached" else "")
                 put("transactionId",if(c.isNull(20))JSONObject.NULL else c.getString(20))
                 put("paymentProvider",if(c.isNull(21))JSONObject.NULL else c.getString(21))
+                put("wallet",JSONObject().put("eligibility",if(c.isNull(22))"LEGACY_EXCLUDED" else c.getString(22))
+                    .put("accountUid",if(c.isNull(23))JSONObject.NULL else c.getString(23))
+                    .put("selectionSource",if(c.isNull(24))JSONObject.NULL else c.getString(24)).put("manualLocked",c.getInt(25)==1)
+                    .put("appliedCents",c.getLong(26)).put("reviewCode",if(c.isNull(27))JSONObject.NULL else c.getString(27))
+                    .put("revision",c.getLong(28)).put("accountName",if(c.isNull(29))JSONObject.NULL else c.getString(29))
+                    .put("kind",if(c.isNull(30))JSONObject.NULL else c.getString(30)).put("bankCode",if(c.isNull(31))JSONObject.NULL else c.getString(31))
+                    .put("cardLast4",if(c.isNull(32))JSONObject.NULL else c.getString(32)).put("archived",c.getInt(33)==1))
+                put("standaloneRefund",if(c.isNull(34))JSONObject.NULL else JSONObject(c.getString(34)))
             })
         }
         val more=rows.length()>limit;if(more)rows.remove(rows.length()-1)

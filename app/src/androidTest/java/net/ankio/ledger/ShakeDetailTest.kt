@@ -11,6 +11,7 @@ import kotlinx.coroutines.runBlocking
 import net.ankio.ledger.ocr.*
 import net.ankio.ledger.capture.CaptureProcessor
 import net.ankio.ledger.core.Source
+import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.data.LedgerStore
 import net.ankio.ledger.ui.MainActivity
@@ -23,6 +24,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ShakeDetailTest {
+    @get:org.junit.Rule val wallet=CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun shakeImageSentToModelIsTheImageReopenedWithFilledFields() = runBlocking {
@@ -50,17 +52,23 @@ class ShakeDetailTest {
             // Reopen the database, then use a fresh page: this is not an in-memory import preview.
             val reopened = LedgerStore(app)
             try { assertArrayEquals(uploaded, reopened.screenshot(id)) } finally { reopened.close() }
+            val rowAttribute=if(saved.record.state==RecordState.POSTED)"data-record" else "data-pending"
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 val web = WebUiProbe(scenario); web.ready()
-                web.run("refresh();document.querySelector('[data-pending=\"$id\"]').click()")
+                web.run("refresh()")
+                web.await("document.querySelector('[$rowAttribute=\"$id\"]')")
+                web.run("document.querySelector('[$rowAttribute=\"$id\"]').click()")
                 web.await("document.querySelector('#merchant').value===${JSONObject.quote(merchant)} && document.querySelector('#amount').value==='28.5' && document.querySelector('#category').textContent==='餐饮'")
-                web.await("(()=>{const i=document.querySelector('#capture-preview');return !i.hidden&&i.complete&&i.naturalWidth===120&&i.src.endsWith('/record-capture/$id.jpg')})()")
-                web.run("go('ledger');document.querySelector('[data-pending=\"$id\"]').click()")
-                web.await("document.querySelector('#capture-preview').naturalWidth===120 && document.querySelector('#amount').value==='28.5'")
+                val thumbnail="(()=>{const i=document.querySelector('#capture-gallery .history-image img');return !document.querySelector('#capture-gallery').hidden&&i&&i.complete&&i.naturalWidth===120&&i.naturalHeight===240&&i.src.endsWith('/record-history/$id/1.jpg')})()"
+                web.await(thumbnail)
+                web.run("go('ledger');document.querySelector('[$rowAttribute=\"$id\"]').click()")
+                web.await("$thumbnail && document.querySelector('#amount').value==='28.5'")
                 scenario.recreate(); web.ready()
-                web.await("document.querySelector('#capture-preview').naturalWidth===120 && document.querySelector('#merchant').value===${JSONObject.quote(merchant)}")
-                web.run("document.querySelector('#raw-text-button').click()")
-                web.await("document.querySelector('#sheet-content').textContent.includes(${JSONObject.quote(merchant)})")
+                web.await("$thumbnail && document.querySelector('#merchant').value===${JSONObject.quote(merchant)}")
+                web.run("document.querySelector('#capture-gallery .history-image').click()")
+                web.await("document.querySelector('#sheet .capture-full').naturalWidth===120 && document.querySelector('#sheet .capture-full').naturalHeight===240 && document.querySelector('#sheet .raw-text').textContent===${JSONObject.quote(saved.record.capture.text)}")
+                web.run("closeSheet(false);document.querySelector('#raw-text-button').click()")
+                web.await("document.querySelector('#sheet .raw-text').textContent===${JSONObject.quote(saved.record.capture.text)}")
             }
             app.store.delete(id)
             assertNull(app.store.screenshot(id))

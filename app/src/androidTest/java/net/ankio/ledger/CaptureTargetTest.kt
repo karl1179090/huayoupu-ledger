@@ -115,10 +115,10 @@ class CaptureTargetTest {
         assertEquals("com.example.other",resolveCaptureTarget { "com.example.other" })
         assertNull(resolveCaptureTarget { "com.android.systemui" })
     }
-    @Test fun firstTransitionCanReturnThePreviousApplicationBeforePaymentWindow() = runBlocking {
+    @Test fun aKnownPreviousApplicationCannotAuthorizeALaterPaymentWindow() = runBlocking {
         var reads=0
-        assertEquals(alipay,resolveCaptureTarget { if(++reads<3) "net.ankio.ledger" else alipay })
-        assertEquals(3,reads)
+        assertNull(resolveCaptureTarget { if(++reads<3) "net.ankio.ledger" else alipay })
+        assertEquals(1,reads)
     }
     @Test fun slowBinderReadDoesNotBlockUiOrQueueMoreRootQueries() = runBlocking {
         val probe=CaptureProbe()

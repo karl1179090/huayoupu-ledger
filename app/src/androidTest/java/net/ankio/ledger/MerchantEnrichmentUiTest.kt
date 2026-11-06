@@ -8,6 +8,7 @@ import net.ankio.ledger.core.*
 import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.ui.MainActivity
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
@@ -15,6 +16,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class MerchantEnrichmentUiTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     @Test fun secondRecognitionRefreshesOpenDetailAndKeepsUnsavedUserInput() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
         val bitmap=Bitmap.createBitmap(128,128,Bitmap.Config.ARGB_8888)

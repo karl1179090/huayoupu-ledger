@@ -17,6 +17,7 @@ import net.ankio.ledger.data.*
 import net.ankio.ledger.ui.MainActivity
 import net.ankio.ledger.ui.MintDialog
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
@@ -24,6 +25,7 @@ import java.util.UUID
 /** A document result must show preview before writing, then confirm through the real native sheet. */
 @RunWith(AndroidJUnit4::class)
 class CsvImportFlowTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private fun views(view:View):List<View> = listOf(view)+(if(view is ViewGroup)(0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList())
     @Test fun chosenCsvWaitsForConfirmationAndRepeatedImportShowsDuplicateCount() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
@@ -59,7 +61,7 @@ class CsvImportFlowTest {
                     assertTrue(views(preview.content).filterIsInstance<TextView>().any { "可导入 1 笔" in it.text })
                     views(preview.content).filterIsInstance<Button>().single { it.text.toString()=="确认导入 1 笔" }.performClick()
                 }
-                web.await("window.__importMessage.startsWith('已导入 1 笔')")
+                web.await("window.__importMessage.startsWith('已入账 1 笔，待选择钱包 0 笔')")
                 assertEquals(9876L,app.store.all().single { it.uid==original.uid }.bill.amountCents)
                 val repeated=select()
                 scenario.onActivity {

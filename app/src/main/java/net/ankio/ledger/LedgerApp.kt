@@ -20,6 +20,7 @@ class LedgerApp : Application() {
         }
         scope.launch {
             try {
+                RecognitionCommitRecovery.recoverAll(tasks,store)
                 tasks.recoverInterrupted(preserveCurrentSession=true)
                 taskRecovery.complete(Unit)
             } catch (error: Throwable) {

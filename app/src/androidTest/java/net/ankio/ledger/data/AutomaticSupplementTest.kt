@@ -18,7 +18,7 @@ class AutomaticSupplementTest {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val namespace="auto-supplement-${UUID.randomUUID()}"
     private val images=ScreenshotStore(context,namespace)
-    private val store=LedgerStore(context,"$namespace-ledger.db",images)
+    private val store=LedgerStore(context,"$namespace-ledger.db",images).prepareSyntheticDefaultWallet()
     private val at=1_790_000_000_000L
     private val first=byteArrayOf(21,22,23)
     private val second=byteArrayOf(24,25,26)

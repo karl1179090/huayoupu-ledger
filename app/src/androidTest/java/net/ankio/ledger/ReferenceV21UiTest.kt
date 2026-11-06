@@ -9,12 +9,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import net.ankio.ledger.ui.MainActivity
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ReferenceV21UiTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
     @Test fun keypadPreservesCentsAcrossRecreationAndSearchFindsTheSavedNote() {
         val note="V21-${UUID.randomUUID()}"

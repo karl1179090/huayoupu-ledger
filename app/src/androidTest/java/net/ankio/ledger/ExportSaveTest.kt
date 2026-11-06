@@ -11,6 +11,7 @@ import net.ankio.ledger.core.*
 import net.ankio.ledger.data.*
 import net.ankio.ledger.ui.MainActivity
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
@@ -18,6 +19,7 @@ import java.util.UUID
 /** Exercise the Activity's real asynchronous document-result save path, not just the serializers. */
 @RunWith(AndroidJUnit4::class)
 class ExportSaveTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     @Test fun selectedDocumentReceivesBothCsvFormatsAndCompleteZip() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
         val at=System.currentTimeMillis()-70L*86400000
@@ -49,6 +51,7 @@ class ExportSaveTest {
                             assertEquals(code==MainActivity.CSV_QIANJI_REQUEST,csv.lineSequence().first().contains("二级分类"))
                             assertTrue(csv.contains("收入"))
                         }
+                        web.await("!document.querySelector('#sheet').open")
                         assertEquals("false",web.value("document.querySelector('#sheet').open"))
                     } finally { app.contentResolver.delete(uri,null,null) }
                 }

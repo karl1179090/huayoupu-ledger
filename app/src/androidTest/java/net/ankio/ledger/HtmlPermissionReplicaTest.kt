@@ -11,6 +11,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class HtmlPermissionReplicaTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     @Test fun configuredModelOpensThreeStepsWithRestrictedSettingsAsAnExplicitBranch() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
         val enabled=app.channels.enabled(ChannelSettings.Channel.OCR)

@@ -18,7 +18,7 @@ class ScreenshotStorageTest {
     private val images=ScreenshotStore(context,namespace)
     private val ledgerName="$namespace-ledger.db"
     private val taskName="$namespace-task.db"
-    private var ledger=LedgerStore(context,ledgerName,images)
+    private var ledger=LedgerStore(context,ledgerName,images).prepareSyntheticDefaultWallet()
     private var tasks=RecognitionTasks(context,taskName,images)
     private val now=System.currentTimeMillis()
 
@@ -97,13 +97,18 @@ class ScreenshotStorageTest {
         val bytes=ByteArray(3*1024*1024) { (it%251).toByte() }
         val record=bill(byteArrayOf(1))
         ledger.writableDatabase.execSQL("UPDATE capture_images SET image=? WHERE record_id=?",arrayOf(bytes,record.id))
-        ledger.writableDatabase.version=5;ledger.close()
+        ledger.rebuildPreWalletSchemaForTest(5);ledger.close()
         val id=tasks.create(Source.OCR,"shake:com.tencent.mm")
         tasks.writableDatabase.execSQL("UPDATE tasks SET image=?,status='FAILED' WHERE id=?",arrayOf(bytes,id))
+        tasks.writableDatabase.execSQL("""CREATE TABLE tasks_v2(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,origin TEXT NOT NULL,
+            created_at INTEGER NOT NULL,status TEXT NOT NULL,message TEXT NOT NULL,record_id INTEGER,image BLOB,diagnostic TEXT NOT NULL DEFAULT '{}')""")
+        tasks.writableDatabase.execSQL("INSERT INTO tasks_v2 SELECT id,source,origin,created_at,status,message,record_id,image,diagnostic FROM tasks")
+        tasks.writableDatabase.execSQL("DROP TABLE tasks")
+        tasks.writableDatabase.execSQL("ALTER TABLE tasks_v2 RENAME TO tasks")
         tasks.writableDatabase.version=2;tasks.close()
         ledger=LedgerStore(context,ledgerName,images);tasks=RecognitionTasks(context,taskName,images)
         assertArrayEquals(bytes,ledger.screenshot(record.id));assertArrayEquals(bytes,tasks.image(id))
-        assertEquals(8,ledger.readableDatabase.version);assertEquals(3,tasks.readableDatabase.version)
+        assertEquals(9,ledger.readableDatabase.version);assertEquals(5,tasks.readableDatabase.version)
         assertEquals(0,ledger.readableDatabase.rawQuery("SELECT COUNT(*) FROM capture_images WHERE image IS NOT NULL",null).use { it.moveToFirst();it.getInt(0) })
         assertEquals(0,tasks.readableDatabase.rawQuery("SELECT COUNT(*) FROM tasks WHERE image IS NOT NULL",null).use { it.moveToFirst();it.getInt(0) })
         images.cleanup(now);assertEquals(1,images.stats().getInt("count"))
@@ -117,11 +122,11 @@ class ScreenshotStorageTest {
         val imported=tasks.create(Source.IMAGE,"导入截图");tasks.prepared(imported,byteArrayOf(3))
         val capturing=tasks.create(Source.OCR,"payment_auto:com.tencent.mm")
         tasks.recoverInterrupted()
-        assertEquals("QUEUED",tasks.status(queued));assertEquals("QUEUED",tasks.status(running))
+        assertEquals("QUEUED",tasks.status(queued));assertEquals("CANCELLED",tasks.status(running))
         assertEquals("FAILED",tasks.status(imported));assertEquals("FAILED",tasks.status(capturing))
-        assertEquals(listOf(queued,running),tasks.pendingQueued().map { it.first })
+        assertEquals(listOf(queued),tasks.pendingQueued().map { it.first })
         images.cleanup(now+365*DAY,0)
-        assertNotNull(tasks.image(queued));assertNotNull(tasks.image(running))
+        assertNotNull(tasks.image(queued));assertNull(tasks.image(running))
     }
 
     @Test fun restartingTaskDatabaseRetainsQueuedImageAndCancelledEntryCannotBeRequeued() {

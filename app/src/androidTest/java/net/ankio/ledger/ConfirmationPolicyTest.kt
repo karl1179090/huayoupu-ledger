@@ -16,6 +16,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ConfirmationPolicyTest {
+    @get:org.junit.Rule val wallet = CaptureWalletFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun reopeningNeverPromotesHistoricalRemindersWithoutUserConfirmation() {

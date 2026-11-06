@@ -17,7 +17,7 @@ import java.io.ByteArrayOutputStream
 class LedgerIdentity056Test {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val name="identity056-${UUID.randomUUID()}.db"
-    private val store=LedgerStore(context,name)
+    private val store=LedgerStore(context,name).prepareSyntheticDefaultWallet()
     private val now=System.currentTimeMillis()
     private fun capture(text:String,origin:String="com.taobao.taobao")=Capture(Source.OCR,origin,text,now)
     private fun bill(id:String?)=ParsedBill(2250,Direction.EXPENSE,"测试店铺","购物",now,id,true,"",true)
@@ -73,12 +73,10 @@ class LedgerIdentity056Test {
     @Test fun versionSevenMigrationRecoversScopedAliasesFromStoredCaptureEvidence() {
         val original=(store.ingest(capture("淘宝订单号 TBORDER0001\n支付宝交易号 APTRADE0001","com.eg.android.AlipayGphone"),bill("APTRADE0001")) as IngestResult.Saved).record
         val db=store.writableDatabase
-        // Reconstruct v7's actual column set, without the v8 alias and undo tables.
-        db.execSQL("CREATE TABLE records_v7 AS SELECT id,uid,source,origin,raw_text,received_at,amount,direction,merchant,category,occurred_at,transaction_id,reliable,time_explicit,state,reason,duplicate_id,note,refund_provider,refund_original,refund_amount,refund_mode,refund_id FROM records")
-        db.execSQL("DROP TABLE records");db.execSQL("ALTER TABLE records_v7 RENAME TO records")
-        db.execSQL("DROP TABLE record_identities");db.execSQL("DROP TABLE record_deletions");db.version=7;store.close()
+        store.rebuildPreWalletSchemaForTest(7);store.close()
         LedgerStore(context,name).use { upgraded->
-            assertEquals(8,upgraded.readableDatabase.version)
+            assertEquals(9,upgraded.readableDatabase.version)
+            assertEquals(WalletEligibility.LEGACY_EXCLUDED,upgraded.get(original.id)!!.wallet!!.eligibility)
             assertEquals(original.uid,upgraded.get(original.id)!!.uid)
             assertEquals(2,upgraded.get(original.id)!!.identities.size)
             assertEquals(original.id,upgraded.matchingIdentity(capture("订单编号 TBORDER0001"),bill("TBORDER0001"))!!.id)

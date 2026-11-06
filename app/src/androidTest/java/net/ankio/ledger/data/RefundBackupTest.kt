@@ -18,6 +18,7 @@ class RefundBackupTest {
         val now=System.currentTimeMillis()
         fun record()=LedgerRecord(capture=Capture(Source.MANUAL,"manual","",now),
             bill=ParsedBill(1200,Direction.EXPENSE,"合成商户","其他",now,null,true,"",true),state=RecordState.POSTED)
+        store.prepareSyntheticDefaultWallet()
         val active=store.saveEdited(record().copy(note="本地修改"))
         val hidden=store.saveEdited(record())
         val fresh=record()
@@ -32,7 +33,8 @@ class RefundBackupTest {
             assertNull(store.get(hidden.id))
             assertEquals(0,LedgerBackup.restore(store,backup) { fail("existing record visited") })
             assertTrue(store.undoDelete(hidden.id,now+1))
-            assertEquals(hidden,store.get(hidden.id))
+            assertEquals(hidden.copy(wallet=store.get(hidden.id)!!.wallet),store.get(hidden.id))
+            assertTrue(store.get(hidden.id)!!.wallet!!.revision>hidden.wallet!!.revision)
         } finally { store.purgeExpiredDeletes(Long.MAX_VALUE);store.all().forEach { store.delete(it.id) };store.close();context.deleteDatabase(name) }
     }
 
@@ -56,7 +58,7 @@ class RefundBackupTest {
     @Test fun backupRestoresNetAmountBothImagesAndPreservesLaterLocalEdit() {
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val names=listOf("refund-backup-${UUID.randomUUID()}.db","refund-restore-${UUID.randomUUID()}.db")
-        val first=LedgerStore(context,names[0]);val second=LedgerStore(context,names[1])
+        val first=LedgerStore(context,names[0]).prepareSyntheticDefaultWallet();val second=LedgerStore(context,names[1])
         val at=1_792_302_196_000L
         val original=ParsedBill(10000,Direction.EXPENSE,"合成退款商户","交通",at,"synthetic-original",true,"",true)
         val image1=byteArrayOf(1,2,3);val image2=byteArrayOf(4,5,6)

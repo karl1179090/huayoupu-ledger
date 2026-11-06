@@ -18,8 +18,10 @@ object LedgerCsvImport {
     private val qianji = listOf("时间","分类","二级分类","类型","金额","账户1","账户2","备注","账单标记","手续费","优惠券","标签","账单图片")
     data class RowError(val row:Int, val message:String)
     data class Document(val format:String, val records:List<LedgerRecord>, val errors:List<RowError>, val totalRows:Int)
-    data class Preview(val format:String, val total:Int, val ready:Int, val duplicates:Int, val errors:List<RowError>, val samples:List<LedgerRecord>)
-    data class Result(val imported:Int, val duplicates:Int, val invalid:Int)
+    data class WalletImpact(val accountUid:String?,val accountName:String?,val deltaCents:Long,val pending:Int=0)
+    data class Preview(val format:String, val total:Int, val ready:Int, val duplicates:Int, val errors:List<RowError>, val samples:List<LedgerRecord>,
+        val pendingWallets:Int=0,val posted:Int=0,val walletImpacts:List<WalletImpact> = emptyList(),val previewToken:String="")
+    data class Result(val imported:Int, val duplicates:Int, val invalid:Int,val posted:Int=imported,val pendingWallets:Int=0)
 
     fun read(input:InputStream):Document {
         val bytes=ByteArrayOutputStream()
@@ -66,23 +68,43 @@ object LedgerCsvImport {
 
     fun preview(store:LedgerStore,document:Document):Preview=synchronized(store) {
         val selected=select(store,document.records)
-        Preview(document.format,document.totalRows,selected.size,document.records.size-selected.size,document.errors,selected.take(3))
+        val balances=store.accounts().associate { it.uid to it.amountCents }.toMutableMap()
+        val names=store.accounts().associate { it.uid to it.name }
+        val effects=linkedMapOf<String?,Long>();val pendingCounts=linkedMapOf<String?,Int>()
+        var pending=0
+        selected.forEach { record->
+            val resolution=store.previewWallet(record)
+            val uid=resolution.accountUid
+            val target=WalletEffectCalculator.target(record.bill.amountCents,record.bill.direction,record.state==RecordState.POSTED)
+            val next=uid?.let { Math.addExact(balances.getValue(it),target) }
+            if(uid==null || next==null || next !in -Money.MAX_CENTS..Money.MAX_CENTS) {
+                pending++;pendingCounts[uid]=pendingCounts.getOrDefault(uid,0)+1
+            } else {
+                balances[uid]=next;effects[uid]=Math.addExact(effects.getOrDefault(uid,0L),target)
+            }
+        }
+        val impacts=(effects.keys+pendingCounts.keys).map { uid->WalletImpact(uid,names[uid],effects[uid] ?: 0L,pendingCounts[uid] ?: 0) }
+        Preview(document.format,document.totalRows,selected.size,document.records.size-selected.size,document.errors,selected.take(3),
+            pending,selected.size-pending,impacts,store.walletConfigurationToken())
     }
 
     /** Recheck under the store monitor: recognition may finish while the preview is open. */
-    fun apply(store:LedgerStore,document:Document):Result=synchronized(store) {
+    fun apply(store:LedgerStore,document:Document,expectedPreviewToken:String?=null):Result=synchronized(store) {
         val db=store.writableDatabase
         db.beginTransaction()
         try {
+            if(expectedPreviewToken!=null && expectedPreviewToken!=store.walletConfigurationToken())
+                throw WalletException("CSV_PREVIEW_STALE","钱包或余额已更新，请刷新导入预览")
             val selected=select(store,document.records)
-            val count=store.merge(selected)
+            val saved=store.importTransactions(selected)
             db.setTransactionSuccessful()
-            Result(count,document.records.size-count,document.errors.size)
+            Result(saved.size,document.records.size-saved.size,document.errors.size,
+                saved.count { it.state==RecordState.POSTED },saved.count { it.state==RecordState.REVIEW })
         } finally { db.endTransaction() }
     }
 
     private fun select(store:LedgerStore,incoming:List<LedgerRecord>):List<LedgerRecord> {
-        val existing=store.all()
+        val existing=store.importIdentityRecords()
         val uids=existing.mapTo(mutableSetOf()) { it.uid }
         fun identities(record:LedgerRecord)=record.identities+TransactionIdentities.from(record.capture,record.bill)
         val byIdentity=mutableMapOf<TransactionIdentity,MutableList<LedgerRecord>>()
@@ -90,12 +112,8 @@ object LedgerCsvImport {
         existing.forEach(::index)
         return incoming.filter { record ->
             val keys=identities(record)
-            val duplicate=keys.flatMap { byIdentity[it].orEmpty() }.distinctBy { it.uid }.any { old ->
-                val oldKeys=identities(old)
-                keys.any { it in oldKeys } && old.bill.amountCents==record.bill.amountCents &&
-                    old.bill.direction==record.bill.direction &&
-                    keys.none { key -> oldKeys.any { it.scope==key.scope && it.value!=key.value } }
-            }
+            // A changed amount, direction or refund net cannot turn an existing order into new money.
+            val duplicate=keys.any { byIdentity[it].orEmpty().isNotEmpty() }
             if(record.uid in uids || duplicate)false
             else { uids.add(record.uid);index(record);true }
         }

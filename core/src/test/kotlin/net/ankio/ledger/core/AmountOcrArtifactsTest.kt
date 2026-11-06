@@ -82,7 +82,11 @@ class AmountOcrArtifactsTest {
 
     @Test fun standaloneOrFullyRefundedReceiptIsStillNotNewExpense() {
         assertTrue(StandaloneRefundReceipt.matches("退款成功\n退款方式:零钱\n退款金額:20.00"))
-        assertNull(parse("退款成功", "退款方式:零钱", "退款金額:20.00", origin = PaymentApps.WECHAT))
-        assertNull(refund("原付款金額", "累计退款金額", "已全额退款"))
+        val pending = parse("退款成功", "退款方式:零钱", "退款金額:20.00", origin = PaymentApps.WECHAT)!!
+        assertFalse(pending.reliable); assertNull(pending.amountCents)
+        assertEquals(2000L, pending.standaloneRefund!!.refundedCents)
+        // A status word alone cannot replace the verified cumulative amount.
+        val conflicting = refund("原付款金額", "累计退款金額", "已全额退款")!!
+        assertEquals(8000L, conflicting.amountCents); assertFalse(conflicting.reliable)
     }
 }

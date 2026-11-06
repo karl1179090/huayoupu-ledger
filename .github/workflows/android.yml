@@ -51,6 +51,7 @@ jobs:
           node scripts/check-tab-navigation.cjs
           node scripts/check-ledger-optimization.cjs
           node scripts/check-ledger-search.cjs
+          node scripts/check-wallet-whitelist.cjs
 
   verify:
     runs-on: ubuntu-24.04
@@ -98,7 +99,16 @@ jobs:
           arch: x86_64
           profile: pixel_3a
           disable-animations: true
-          script: bash ./gradlew -PledgerAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=net.ankio.ledger.LicenseDisclosureTest,net.ankio.ledger.ExecutionLogTest,net.ankio.ledger.ocr.LocalModeSettingsTest,net.ankio.ledger.data.LedgerCursorOptimizationTest,net.ankio.ledger.data.LedgerCandidateOptimizationTest,net.ankio.ledger.data.RecognitionRecoveryOptimizationTest,net.ankio.ledger.data.LedgerQuery056Test,net.ankio.ledger.data.AutomaticSupplementTest,net.ankio.ledger.data.RefundPersistenceTest,net.ankio.ledger.data.LedgerIdentity056Test,net.ankio.ledger.data.MerchantEnrichmentTest,net.ankio.ledger.data.LedgerUndo056Test,net.ankio.ledger.data.CaptureSupplementTest,net.ankio.ledger.PaymentRecognitionQueueTest,net.ankio.ledger.PaymentVisitsTest,net.ankio.ledger.BackgroundSettingsSyncTest,net.ankio.ledger.PermissionTrimTest,net.ankio.ledger.CaptureReadinessTest,net.ankio.ledger.CaptureRestoreTest,net.ankio.ledger.RecognitionBannerFallbackTest,net.ankio.ledger.SetupStepsTest,net.ankio.ledger.ocr.IconGeneralityTest,net.ankio.ledger.ocr.LocalHeaderIconTest,net.ankio.ledger.IconLocationRegressionTest,net.ankio.ledger.MerchantIconTest,net.ankio.ledger.ocr.LocalRecognitionClientTest' :app:connectedDebugAndroidTest --stacktrace
+          script: bash ./gradlew -PledgerAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=net.ankio.ledger.LicenseDisclosureTest,net.ankio.ledger.ExecutionLogTest,net.ankio.ledger.ocr.LocalModeSettingsTest,net.ankio.ledger.data.LedgerCursorOptimizationTest,net.ankio.ledger.data.LedgerCandidateOptimizationTest,net.ankio.ledger.data.RecognitionRecoveryOptimizationTest,net.ankio.ledger.data.RecognitionCommitRecoveryTest,net.ankio.ledger.data.LedgerQuery056Test,net.ankio.ledger.data.AutomaticSupplementTest,net.ankio.ledger.data.RefundPersistenceTest,net.ankio.ledger.data.LedgerIdentity056Test,net.ankio.ledger.data.MerchantEnrichmentTest,net.ankio.ledger.data.LedgerUndo056Test,net.ankio.ledger.data.CaptureSupplementTest,net.ankio.ledger.PaymentRecognitionQueueTest,net.ankio.ledger.PaymentVisitsTest,net.ankio.ledger.BackgroundSettingsSyncTest,net.ankio.ledger.PermissionTrimTest,net.ankio.ledger.CaptureReadinessTest,net.ankio.ledger.CaptureRestoreTest,net.ankio.ledger.RecognitionBannerFallbackTest,net.ankio.ledger.SetupStepsTest,net.ankio.ledger.ocr.IconGeneralityTest,net.ankio.ledger.ocr.LocalHeaderIconTest,net.ankio.ledger.IconLocationRegressionTest,net.ankio.ledger.MerchantIconTest,net.ankio.ledger.ocr.LocalRecognitionClientTest,net.ankio.ledger.data.WalletAccountingTest,net.ankio.ledger.data.WalletMigrationTest,net.ankio.ledger.data.WalletBackupTest,net.ankio.ledger.data.WalletStandaloneRefundTest,net.ankio.ledger.data.WalletAcceptanceTest,net.ankio.ledger.WalletUiTest,net.ankio.ledger.WalletUiAcceptanceTest,net.ankio.ledger.ShakeWhitelistTest,net.ankio.ledger.ShakeWhitelistWindowTest,net.ankio.ledger.ShakeWhitelistQueueTest,net.ankio.ledger.ShakeWhitelistCaptureTest,net.ankio.ledger.ShakeTimingTest' :app:connectedDebugAndroidTest --stacktrace
+      - name: Android 14 window screenshot and whitelist revocation regressions
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_3a
+          disable-animations: true
+          script: bash ./gradlew -PledgerAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=net.ankio.ledger.ShakeWhitelistTest,net.ankio.ledger.ShakeWhitelistWindowTest,net.ankio.ledger.ShakeWhitelistQueueTest,net.ankio.ledger.ShakeWhitelistCaptureTest,net.ankio.ledger.ShakeTimingTest,net.ankio.ledger.WalletUiTest,net.ankio.ledger.WalletUiAcceptanceTest' :app:connectedDebugAndroidTest --stacktrace
       - uses: actions/upload-artifact@v4
         if: always()
         with:

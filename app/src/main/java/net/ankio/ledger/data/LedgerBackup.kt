@@ -10,7 +10,8 @@ import java.util.UUID
 
 data class ValidatedBackup(val records: List<LedgerRecord>, val channels: Map<ChannelSettings.Channel, Boolean>,
     val accounts: List<LedgerAccount> = emptyList(), val categories: List<CustomCategory> = emptyList(),
-    val histories:Map<String,List<RestoredCaptureHistory>> = emptyMap())
+    val histories:Map<String,List<RestoredCaptureHistory>> = emptyMap(),
+    val wallets:WalletSnapshot? = null, val metadataVersion:Int = 3)
 
 object LedgerBackup {
     const val MAX_BYTES = 16 * 1024 * 1024
@@ -52,7 +53,7 @@ object LedgerBackup {
     }
     fun encode(store: LedgerStore, channels: ChannelSettings): String = synchronized(store) {
         val records=store.all()
-        val root=JSONObject(encode(records, channels, store.accounts(), store.customCategories()))
+        val root=JSONObject(encode(records, channels, store.accounts(), store.customCategories(),store.walletSnapshot()))
         val histories=JSONObject()
         val grouped=store.captureHistories()
         var imageBytes=0L
@@ -71,21 +72,28 @@ object LedgerBackup {
         root.toString().also { require(it.toByteArray(Charsets.UTF_8).size<=MAX_BYTES) { "备份及截图超过 16 MB" } }
     }
 
-    /** Only newly imported UUIDs receive history; restoring must not overwrite later local edits. */
     fun restore(store:LedgerStore,backup:ValidatedBackup,restoreMedia:(LedgerRecord)->Unit={ record ->
         backup.histories[record.uid]?.let { store.restoreHistory(record.id,it) }
-    }):Int=synchronized(store) {
+    }):Int=restoreDetailed(store,backup,restoreMedia).imported
+
+    /** Only newly imported UUIDs receive history; restoring must not overwrite later local edits. */
+    fun restoreDetailed(store:LedgerStore,backup:ValidatedBackup,restoreMedia:(LedgerRecord)->Unit={ record ->
+        backup.histories[record.uid]?.let { store.restoreHistory(record.id,it) }
+    }):RestoreSummary=synchronized(store) {
         val old=store.activeRecordIdsByUid()
         val db=store.writableDatabase
         db.beginTransaction()
         try {
-            val count=store.merge(backup.records,backup.accounts,backup.categories)
+            val count=store.restoreBackupDetailed(backup)
             for((uid,id) in store.activeRecordIdsByUid())if(uid !in old)restoreMedia(requireNotNull(store.get(id)))
             db.setTransactionSuccessful();count
         } catch(error:Throwable) {
             // ScreenshotStore uses a separate database. Release all imported owners while
-            // the uncommitted history rows still identify them, before rolling back the batch.
-            store.activeRecordIdsByUid().filterKeys { it !in old }.values.forEach(store::delete)
+            // uncommitted history rows still identify them. Financial rows roll back with
+            // this transaction; deleting a restored bill could overflow a calibrated balance.
+            runCatching {
+                store.releaseImportedMedia(store.activeRecordIdsByUid().filterKeys { it !in old }.values)
+            }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
         } finally { db.endTransaction() }
     }
@@ -96,7 +104,7 @@ object LedgerBackup {
         .put("refundAmountCents",e.refundAmountCents?:JSONObject.NULL).put("image",JSONObject.NULL)
 
     fun encode(records: List<LedgerRecord>, channels: ChannelSettings,
-               accounts: List<LedgerAccount> = emptyList(), categories: List<CustomCategory> = emptyList()): String {
+               accounts: List<LedgerAccount> = emptyList(), categories: List<CustomCategory> = emptyList(),wallets:WalletSnapshot?=null): String {
         val settings = JSONObject()
         ChannelSettings.Channel.entries.forEach { settings.put(it.key, channels.enabled(it)) }
         val array = JSONArray()
@@ -111,6 +119,8 @@ object LedgerBackup {
             put("state", r.state.name); put("reason", r.reason)
             put("note", r.note)
             put("identities",JSONArray(TransactionIdentities.encode(r.identities)))
+            r.bill.paymentMethod?.let { put("paymentMethod",WalletBackupCodec.evidenceJson(it)) }
+            r.bill.standaloneRefund?.let { put("standaloneRefund",WalletBackupCodec.standaloneJson(it)) }
             r.bill.refund?.let { refund -> put("refund",JSONObject().put("provider",refund.provider)
                 .put("originalAmountCents",refund.originalAmountCents).put("refundedCents",refund.refundedCents)
                 .put("mode",refund.mode).put("refundId",refund.refundId?:JSONObject.NULL)) }
@@ -120,7 +130,9 @@ object LedgerBackup {
             account.validate()
             accountArray.put(JSONObject().put("uid", account.uid).put("name", account.name)
                 .put("description", account.description).put("amountCents", account.amountCents)
-                .put("kind", account.kind).put("type", account.type.name))
+                .put("kind", account.kind).put("type", account.type.name)
+                .put("bankCode",account.bankCode?:JSONObject.NULL).put("cardLast4",account.cardLast4?:JSONObject.NULL)
+                .put("archived",account.archived).put("revision",account.revision))
         }
         val custom = JSONObject()
         Direction.entries.forEach { direction ->
@@ -128,7 +140,12 @@ object LedgerBackup {
             categories.filter { it.direction == direction }.forEach { it.validate(); names.put(it.name) }
             custom.put(if (direction == Direction.EXPENSE) "expense" else "income", names)
         }
-        return JSONObject().put("format", "simple-ledger").put("version", 3)
+        // The list overload has no committed balance snapshot. Export its records as excluded history.
+        val snapshot=wallets ?: WalletSnapshot(WalletSettings(),records.map { record ->
+            RecordWalletLink(record.uid,WalletEligibility.RESTORE_EXCLUDED,paymentEvidence=record.bill.paymentMethod?.let { WalletBackupCodec.evidenceJson(it).toString() })
+        },emptyList())
+        WalletBackupCodec.validate(records,accounts,snapshot)
+        return JSONObject().put("format", "simple-ledger").put("version", 4).put("wallets",WalletBackupCodec.encode(snapshot))
             .put("channels", settings).put("records", array).put("accounts", accountArray)
             .put("customCategories", custom).toString(2)
     }
@@ -149,7 +166,7 @@ object LedgerBackup {
     /** Reuse the legacy schema validation for ZIP metadata, whose image bytes live separately. */
     internal fun decodeMetadata(root: JSONObject): ValidatedBackup {
         val version = root.get("version")
-        require(root.get("format") == "simple-ledger" && version is Int && version in 1..3) { "备份格式或版本不支持" }
+        require(root.get("format") == "simple-ledger" && version is Int && version in 1..4) { "备份格式或版本不支持" }
         val array = root.getJSONArray("records")
         require(array.length() <= 100_000) { "备份记录过多" }
         val uids = mutableSetOf<String>()
@@ -185,7 +202,9 @@ object LedgerBackup {
             LedgerRecord(uid = uid,
                 capture = Capture(Source.valueOf(text("source")), text("origin"), text("text", 32_768), positiveTime("receivedAt")),
                 bill = ParsedBill(amount, direction, text("merchant"), text("category"), positiveTime("occurredAt"),
-                    if (obj.isNull("transactionId")) null else text("transactionId"), bool("reliable"), text("reason"), bool("timeExplicit"),refund),
+                    if (obj.isNull("transactionId")) null else text("transactionId"), bool("reliable"), text("reason"), bool("timeExplicit"),refund,
+                    if(obj.isNull("paymentMethod"))null else WalletBackupCodec.evidence(obj.getJSONObject("paymentMethod")),
+                    if(obj.isNull("standaloneRefund"))null else WalletBackupCodec.standalone(obj.getJSONObject("standaloneRefund"))),
                 state = state, reason = text("reason"), note = text("note", 500),
                 identities=obj.optJSONArray("identities")?.let { TransactionIdentities.decode(it.toString()) } ?: emptyList())
         }
@@ -206,8 +225,13 @@ object LedgerBackup {
                 require(amount is Int || amount is Long) { "账户余额必须为整数分" }
                 val account = LedgerAccount(uid = text("uid", 36), name = text("name", 40),
                     description = text("description", 80), amountCents = (amount as Number).toLong(),
-                    kind = text("kind", 16), type = AccountType.valueOf(text("type", 16)))
+                    kind = text("kind", 16), type = AccountType.valueOf(text("type", 16)),
+                    bankCode=if(version==4 && !obj.isNull("bankCode"))text("bankCode",32) else AccountBanks.codeForKind(text("kind",16)),
+                    cardLast4=if(version==4 && !obj.isNull("cardLast4"))text("cardLast4",4) else null,
+                    archived=if(version==4)(obj.get("archived") as? Boolean ?: error("归档状态格式错误")) else false,
+                    revision=if(version==4) { val revision=obj.get("revision");require(revision is Int || revision is Long);(revision as Number).toLong() } else 0)
                 account.validate()
+                require(version==4 || account.amountCents>=0) { "旧版备份账户余额不能为负" }
                 require(accountUids.add(account.uid)) { "账户标识重复" }
                 account
             }
@@ -255,6 +279,9 @@ object LedgerBackup {
                 }
             }
         }
-        return ValidatedBackup(records, channels, accounts, categories,histories)
+        val wallets=if(version==4)WalletBackupCodec.decode(root.getJSONObject("wallets")) else null
+        if(wallets!=null)WalletBackupCodec.validate(records,accounts,wallets)
+        val links=wallets?.links?.associateBy { it.recordUid }
+        return ValidatedBackup(records.map { it.copy(wallet=links?.get(it.uid)) }, channels, accounts, categories,histories,wallets,version)
     }
 }

@@ -70,6 +70,7 @@ internal class PermissionSetupController(private val activity:MainActivity,
     }
     private fun batteryExempt()=activity.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(activity.packageName)
     private fun currentStep():String? = when {
+        !automatic && app.channels.selectedShakePackages().isEmpty() -> "applications"
         !app.channels.permitted(ChannelSettings.Channel.OCR) -> "accessibility"
         net.ankio.ledger.capture.ScreenCaptureService.current==null -> "connection"
         else -> backgroundKeys.firstOrNull { !addressed(it) }
@@ -84,17 +85,18 @@ internal class PermissionSetupController(private val activity:MainActivity,
             .put("systemBatteryExempt",if(key=="battery")batteryExempt() else JSONObject.NULL)) }
         val next=currentStep()
         if(kind=="done" && next!=null)kind="shake"
-        val stage=when { kind=="core"->"restricted";next in setOf("accessibility","connection")->"accessibility";focusStep!=null || next!=null->"background";kind=="done"->"done";else->"review" }
+        val stage=when { next=="applications"->"applications";kind=="core"->"restricted";next in setOf("accessibility","connection")->"accessibility";focusStep!=null || next!=null->"background";kind=="done"->"done";else->"review" }
         val target=pendingPackage?.let { pkg->net.ankio.ledger.core.PaymentApps.entries.firstOrNull { it.packageName==pkg }?.label }
         activity.showSetup(JSONObject().put("kind",kind).put("stage",stage).put("channel",channel!!.key).put("coreOpened",coreOpened)
             .put("guide",net.ankio.ledger.capture.DevicePermissionGuidance.payload(guidance))
             .put("rows",rows).put("next",next?:JSONObject.NULL).put("focusStep",focusStep?.takeIf { stage=="background" }?:next?:JSONObject.NULL)
-            .put("message",message.ifBlank { if(next=="connection")"已授权，服务连接中，请稍候" else "" }).put("enableAfter",enableAfter).put("automatic",automatic)
+            .put("message",message.ifBlank { when(next) { "applications"->"请选择允许摇一摇记账的应用";"connection"->"已授权，服务连接中，请稍候";else->"" } }).put("enableAfter",enableAfter).put("automatic",automatic)
             .put("target",if(automatic)target?.plus("自动记账")?:"支付自动识别" else "摇一摇识别")
             .put("permitted",app.channels.permitted(ChannelSettings.Channel.OCR))
             .put("batteryExempt",batteryExempt()))
     }
     private fun complete() {
+        if(!automatic && app.channels.selectedShakePackages().isEmpty()) { kind="shake";render();return }
         if(!app.channels.permitted(ChannelSettings.Channel.OCR)) { kind="shake";render();return }
         background.edit().putBoolean("completed",batteryExempt() && backgroundKeys.drop(1).all { background.getBoolean(it,false) }).apply()
         if(automatic) {

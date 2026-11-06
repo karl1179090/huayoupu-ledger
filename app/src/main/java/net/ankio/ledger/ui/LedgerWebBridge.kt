@@ -6,6 +6,8 @@ import net.ankio.ledger.capture.ChannelSettings
 import net.ankio.ledger.core.Capture
 import net.ankio.ledger.core.Direction
 import net.ankio.ledger.core.Money
+import net.ankio.ledger.core.AccountMoney
+import net.ankio.ledger.core.BankCodes
 import net.ankio.ledger.core.ParsedBill
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.core.Source
@@ -16,6 +18,8 @@ import net.ankio.ledger.data.AccountType
 import net.ankio.ledger.data.AccountBanks
 import net.ankio.ledger.data.CustomCategory
 import net.ankio.ledger.data.LedgerReadView
+import net.ankio.ledger.data.WalletReadModel
+import net.ankio.ledger.data.WalletException
 import net.ankio.ledger.data.paymentProvider
 import net.ankio.ledger.ledger
 import org.json.JSONArray
@@ -51,7 +55,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 else result.toString()
             }
         }
-    } catch(_:Exception) { failure("更多账单读取失败，请重试").toString() }
+    } catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun snapshotView(month:String,search:String,limit:Int,direction:String,known:String):String =
@@ -74,7 +78,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             view.put("summary",read.summary(month)).put("month",month)
             buildSnapshot(view).put("viewKey",key)
         }
-    } catch(_:Exception) { failure("账本读取失败，请重试") }
+    } catch(error:Exception) { failure("账本读取失败，请重试",failureCode(error)) }
 
     private fun buildSnapshot(view:JSONObject?=null):JSONObject = try {
         val records = JSONArray()
@@ -135,7 +139,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("iconStatus",if(record.id in merchantIconKeys)"cached" else iconStatuses[record.id].orEmpty())
                 put("iconDetails",iconDetails[record.id].orEmpty())
                 put("duplicateId", record.duplicateId ?: JSONObject.NULL)
-                put("refundCandidateCount",if(record.bill.refund!=null && record.state==RecordState.REVIEW)
+                put("wallet", WalletReadModel.summary(app.store,record))
+                put("standaloneRefund",WalletReadModel.standalone(record.bill.standaloneRefund))
+                put("refundCandidateCount",if((record.bill.refund!=null || record.bill.standaloneRefund!=null) && record.state==RecordState.REVIEW)
                     app.store.refundCandidates(record.id).size else 0)
                 put("refund", record.bill.refund?.let { refund ->
                     JSONObject().put("provider", refund.provider)
@@ -156,7 +162,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
         app.store.accounts().forEach { account ->
             accounts.put(JSONObject().put("id", account.id).put("uid", account.uid)
                 .put("name", account.name).put("description", account.description)
-                .put("amountCents", account.amountCents).put("kind", account.kind).put("type", account.type.name))
+                .put("amountCents", account.amountCents).put("kind", account.kind).put("type", account.type.name)
+                .put("bankCode",account.bankCode?:JSONObject.NULL).put("cardLast4",account.cardLast4?:JSONObject.NULL)
+                .put("archived",account.archived).put("revision",account.revision))
         }
         val custom = JSONObject()
         val categories = app.store.customCategories()
@@ -179,6 +187,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("pendingDeletion",app.store.pendingDeletion()?.let { JSONObject().put("id",it.id).put("expiresAt",it.expiresAt) }?:JSONObject.NULL)
             .put("records", records).put("recognitionTasks",tasks).put("channels", channels)
             .put("accounts", accounts).put("customCategories", custom)
+            .put("walletSettings",walletSettingsData())
+            .put("bankCodeOptions",JSONArray().apply { BankCodes.entries.forEach { put(JSONObject().put("code",it.code).put("label",it.label)) } })
             .put("bankOptions",JSONArray().apply { AccountBanks.entries.forEach {
                 put(JSONObject().put("kind",it.kind).put("label",it.label).put("icon",it.icon))
             } })
@@ -188,9 +198,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("automatic",JSONObject().put("enabled",app.channels.automaticEnabled()).put("applications",applications))
             .put("screenshotStorage",app.screenshots.stats())
             .put("status", app.channels.lastStatus())
-    } catch (_: Exception) {
+    } catch (error: Exception) {
         // An explicit error avoids making a failed read look like an empty ledger.
-        failure("账本读取失败，请稍后重试").put("version", BuildConfig.VERSION_NAME)
+        failure("账本读取失败，请稍后重试",failureCode(error)).put("version", BuildConfig.VERSION_NAME)
     }
 
     @JavascriptInterface
@@ -204,11 +214,13 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("hasMerchantIcon",iconKey!=null).put("merchantIconKey",iconKey?:JSONObject.NULL)
             .put("merchantIconRevision",iconKey?.let { app.store.merchantIconAsset(it)?.contentHashCode() }?:0)
             .put("captureMode",if(task?.optString("origin")?.startsWith("payment_auto:")==true)"page" else "")
-            .put("refundCandidateCount",if(record.bill.refund!=null&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
+            .put("refundCandidateCount",if((record.bill.refund!=null||record.bill.standaloneRefund!=null)&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
+            .put("wallet",WalletReadModel.summary(app.store,record)).put("paymentMethod",WalletReadModel.evidence(record.bill.paymentMethod))
+            .put("standaloneRefund",WalletReadModel.standalone(record.bill.standaloneRefund))
             .put("refund",record.bill.refund?.let { JSONObject().put("provider",it.provider).put("originalAmountCents",it.originalAmountCents).put("refundedCents",it.refundedCents).put("mode",it.mode).put("refundId",it.refundId?:JSONObject.NULL) }?:JSONObject.NULL))
             .put("rawText",record.capture.text).put("history",JSONArray().apply {
             app.store.captureHistory(id).forEach { item ->
@@ -218,7 +230,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     .put("screenshotUrl",if(item.hasScreenshot)"/record-history/$id/${item.sequence}.jpg" else JSONObject.NULL))
             }
         }).toString()
-    } catch(_:Exception) { failure("账单详情读取失败，请重试").toString() }
+    } catch(error:Exception) { failure("账单详情读取失败，请重试",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun exportBills(format:String) {
@@ -233,7 +245,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     fun categoryRecords(month:String,category:String,direction:String,offset:Int):String = try {
         checkInput(category.length<=1024,"分类无效")
         LedgerReadView(app.store).records(month,offset=offset,direction=direction,category=category).put("ok",true).toString()
-    } catch(_:Exception) { failure("明细读取失败").toString() }
+    } catch(error:Exception) { failure("明细读取失败",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun save(json: String): String = try {
@@ -261,7 +273,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val result = synchronized(app.store) {
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
-            checkInput(original?.bill?.refund == null || original.state == RecordState.POSTED,
+            checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")
             val refund = original?.bill?.refund
             val validatedRefund = original != null && original.state == RecordState.POSTED && refund != null &&
@@ -288,20 +300,26 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     bill = base.bill.copy(amountCents = cents, direction = direction,
                         merchant = merchant, category = category, occurredAt = occurredAt,
                         reliable = true, reason = "", timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
-                    note = note))
+                    note = note),
+                    walletAccountUid=if(input.has("walletAccountUid")&&!input.isNull("walletAccountUid"))string(input,"walletAccountUid",64) else null,
+                    manualWalletSelected=if(input.has("manualWalletSelected"))input.get("manualWalletSelected") as? Boolean ?: throw InvalidInput("钱包选择参数无效") else false,
+                    expectedRevision=if(input.has("expectedRevision"))integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else original?.wallet?.revision,
+                    submissionToken=if(input.has("submissionToken"))string(input,"submissionToken",160) else null)
                 if(taskId>0) {
                     app.tasks.image(taskId)?.let { app.store.attachScreenshot(saved.id,it) }
                     app.tasks.update(taskId,"SUCCEEDED","已手动补录账单",saved.id)
                 }
                 app.changed()
-                JSONObject().put("ok", true).put("id", saved.id)
+                JSONObject().put("ok", true).put("id", saved.id).put("state",saved.state.name)
             }
         }
         result.toString()
-    } catch (error: InvalidInput) {
-        failure(error.message ?: "账单数据无效").toString()
+    } catch (error: WalletException) {
+        failure(error.message ?: "保存失败").put("code",error.code).toString()
+    } catch (error: IllegalArgumentException) {
+        structuredFailure(error,"账单数据无效").toString()
     } catch (_: JSONException) {
-        failure("账单数据格式错误").toString()
+        failure("账单数据格式错误","INVALID_INPUT").toString()
     } catch (_: Exception) {
         failure("保存失败，内容已保留，请重试").toString()
     }
@@ -317,7 +335,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         }
         JSONObject().put("ok", true).put("candidates", candidates).toString()
     } catch (error: Exception) {
-        failure(error.message ?: "无法读取原账单，请重试").toString()
+        structuredFailure(error,"无法读取原账单，请重试").toString()
     }
 
     @JavascriptInterface
@@ -328,7 +346,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         app.changed()
         JSONObject().put("ok", true).put("id", saved.record.id).put("updated", saved.updated).toString()
     } catch (error: Exception) {
-        failure(error.message ?: "退款关联失败，请重新核对原账单").toString()
+        structuredFailure(error,"退款关联失败，请重新核对原账单").toString()
     }
 
     @JavascriptInterface
@@ -346,8 +364,10 @@ class LedgerWebBridge(private val activity: MainActivity) {
             app.changed()
         }
         JSONObject().put("ok", true).put("id", id).put("expiresAt",deletion?.expiresAt?:0).toString()
-    } catch (error: InvalidInput) {
-        failure(error.message ?: "账单编号无效").toString()
+    } catch (error: WalletException) {
+        structuredFailure(error,"删除失败，请稍后重试").toString()
+    } catch (error: IllegalArgumentException) {
+        structuredFailure(error,"账单编号无效").toString()
     } catch (_: Exception) {
         failure("删除失败，请稍后重试").toString()
     }
@@ -357,7 +377,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(id in 1..MAX_SAFE_INTEGER,"账单编号无效")
         checkInput(app.store.undoDelete(id),"撤销时间已过")
         app.changed();JSONObject().put("ok",true).toString()
-    } catch(error:Exception) { failure(error.message?:"撤销失败，请重试").toString() }
+    } catch(error:Exception) { structuredFailure(error,"撤销失败，请重试").toString() }
 
     @JavascriptInterface
     fun deleteTask(id:Long):String=try {
@@ -365,7 +385,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(app.tasks.exists(id),"识别记录已不存在")
         checkInput(app.tasks.status(id) !in setOf("CAPTURING","RECOGNIZING"),"正在识别，请稍后再删除")
         app.tasks.delete(id);app.changed();JSONObject().put("ok",true).toString()
-    } catch(error:Exception) { failure((error as? InvalidInput)?.message?:"删除失败，请重试").toString() }
+    } catch(error:Exception) { failure((error as? IllegalArgumentException)?.message?:"删除失败，请重试",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun saveAccount(json: String): String = try {
@@ -376,8 +396,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val description = if (input.has("description")) string(input, "description", 80).trim() else ""
         val amount = string(input, "amount", 32).trim()
         checkInput(amount.isNotEmpty(), "请输入余额，可填 0")
-        checkInput(DECIMAL.matches(amount), "余额需为零或正数，最多两位小数")
-        val cents = Money.parseCents(amount) ?: throw InvalidInput("账户余额无效或过大")
+        val cents = AccountMoney.parseCents(amount) ?: throw InvalidInput("账户余额无效或过大，最多两位小数")
         val kind = string(input, "kind", 16)
         checkInput(kind in LedgerAccount.KINDS, "账户图标类型无效")
         val name=enteredName.ifBlank { AccountBanks.entries.firstOrNull { it.kind==kind }?.label ?: when(kind) {
@@ -388,18 +407,30 @@ class LedgerWebBridge(private val activity: MainActivity) {
             "LIABILITY" -> AccountType.LIABILITY
             else -> throw InvalidInput("请选择资产或负债")
         }
+        checkInput(type==AccountType.ASSET || cents>=0,"负债余额不能为负数")
+        val bankCode=if(input.has("bankCode")&&!input.isNull("bankCode"))string(input,"bankCode",32).trim().ifBlank { null } else null
+        val cardLast4=if(input.has("cardLast4")&&!input.isNull("cardLast4"))string(input,"cardLast4",4).trim().ifBlank { null } else null
+        checkInput(bankCode==null || Regex("[a-z][a-z0-9_]{1,31}").matches(bankCode),"请选择有效银行")
+        checkInput(cardLast4==null || Regex("[0-9]{4}").matches(cardLast4),"银行卡尾号需为四位数字")
         val saved = synchronized(app.store) {
             val original = if (id == 0L) null else (app.store.getAccount(id)
                 ?: throw InvalidInput("账户已不存在，请刷新后重试"))
             app.store.saveAccount((original ?: LedgerAccount(name = name, amountCents = cents)).copy(
-                name = name, description = description, amountCents = cents, kind = kind, type = type))
+                name = name, description = description, amountCents = cents, kind = kind, type = type,
+                bankCode=if(input.has("bankCode"))bankCode else original?.bankCode ?: AccountBanks.codeForKind(kind),
+                cardLast4=if(input.has("cardLast4"))cardLast4 else original?.cardLast4),
+                calibrateBalance=if(input.has("calibrateBalance"))input.get("calibrateBalance") as? Boolean ?: throw InvalidInput("余额校准参数无效") else false,
+                expectedRevision=if(input.has("expectedRevision"))integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else original?.revision,
+                submissionToken=if(input.has("submissionToken"))string(input,"submissionToken",160) else null)
         }
         app.changed()
         JSONObject().put("ok", true).put("id", saved.id).toString()
-    } catch (error: InvalidInput) {
-        failure(error.message ?: "账户数据无效").toString()
+    } catch (error: WalletException) {
+        failure(error.message ?: "账户保存失败").put("code",error.code).toString()
+    } catch (error: IllegalArgumentException) {
+        structuredFailure(error,"账户数据无效").toString()
     } catch (_: JSONException) {
-        failure("账户数据格式错误").toString()
+        failure("账户数据格式错误","INVALID_INPUT").toString()
     } catch (_: Exception) {
         failure("账户保存失败，内容已保留，请重试").toString()
     }
@@ -413,11 +444,52 @@ class LedgerWebBridge(private val activity: MainActivity) {
         }
         app.changed()
         JSONObject().put("ok", true).put("id", id).toString()
-    } catch (error: InvalidInput) {
-        failure(error.message ?: "账户编号无效").toString()
+    } catch (error: WalletException) {
+        structuredFailure(error,"账户删除失败，请稍后重试").toString()
+    } catch (error: IllegalArgumentException) {
+        structuredFailure(error,"账户编号无效").toString()
     } catch (_: Exception) {
         failure("账户删除失败，请稍后重试").toString()
     }
+
+    private fun walletSettingsData():JSONObject = app.store.walletSettings().let { settings ->
+        JSONObject().put("defaultAccountUid",settings.defaultAccountUid?:JSONObject.NULL)
+            .put("appBindings",JSONObject(settings.appBindings)).put("revision",settings.revision)
+    }
+    @JavascriptInterface fun getWalletSettings():String = try {
+        walletSettingsData().put("ok",true).toString()
+    } catch(error:Exception) { failure("钱包设置读取失败，请重试",failureCode(error)).toString() }
+    @JavascriptInterface fun setDefaultWallet(uid:String):String = try {
+        app.store.setDefaultWallet(uid.trim().ifBlank { null });app.changed()
+        walletSettingsData().put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"默认钱包保存失败").toString() }
+    @JavascriptInterface fun setAppWallet(packageName:String,uid:String):String = try {
+        app.store.setAppWallet(packageName,uid.trim().ifBlank { null });app.changed()
+        walletSettingsData().put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"应用钱包保存失败").toString() }
+    @JavascriptInterface fun archiveAccount(id:Long):String = try {
+        checkInput(id in 1..MAX_SAFE_INTEGER,"账户编号无效")
+        app.store.archiveAccount(id);app.changed();JSONObject().put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"账户归档失败").toString() }
+    @JavascriptInterface fun walletMovements(accountUid:String,offset:Int,limit:Int):String = try {
+        checkInput(accountUid.length<=64 && offset>=0 && limit in 1..100,"余额记录查询无效")
+        val rows=app.store.walletMovements(accountUid,limit+1,offset)
+        JSONObject().put("ok",true).put("hasMore",rows.size>limit).put("movements",JSONArray().apply {
+            rows.take(limit).forEach { item -> put(JSONObject().put("uid",item.movementUid).put("kind",item.kind)
+                .put("deltaCents",item.deltaCents).put("balanceBefore",item.balanceBefore).put("balanceAfter",item.balanceAfter)
+                .put("createdAt",item.createdAt).put("summary",item.summary).put("recordUid",item.recordUid?:JSONObject.NULL)) }
+        }).toString()
+    } catch(error:Exception) { structuredFailure(error,"余额记录读取失败").toString() }
+    @JavascriptInterface fun listInstalledApplications(search:String,offset:Int,limit:Int,refresh:Boolean):String = try {
+        checkInput(search.length<=200 && offset>=0 && limit in 1..100,"应用查询无效")
+        net.ankio.ledger.capture.InstalledAppsRepository.get(activity).page(search,offset,limit,refresh).put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"应用列表读取失败").toString() }
+    @JavascriptInterface fun setShakeApplication(packageName:String,enabled:Boolean):String = try {
+        app.channels.setShakePackage(packageName,enabled)
+        net.ankio.ledger.capture.CaptureRuntime.refreshHealth();app.changed()
+        JSONObject().put("ok",true).put("selectedCount",app.channels.selectedShakePackages().size)
+            .put("generation",app.channels.shakeMasterGeneration()).put("captureHealth",app.captureHealth.snapshot()).toString()
+    } catch(error:Exception) { structuredFailure(error,"应用选择保存失败").toString() }
 
     @JavascriptInterface
     fun addCategory(name: String, direction: String): String = try {
@@ -425,8 +497,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val added = app.store.addCategory(category)
         app.changed()
         JSONObject().put("ok", true).put("added", added).toString()
-    } catch (error: InvalidInput) {
-        failure(error.message ?: "分类数据无效").toString()
+    } catch (error: IllegalArgumentException) {
+        structuredFailure(error,"分类数据无效").toString()
     } catch (_: Exception) {
         failure("分类保存失败，请重试").toString()
     }
@@ -436,8 +508,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
         app.store.deleteCategory(categoryInput(name, direction))
         app.changed()
         JSONObject().put("ok", true).toString()
-    } catch (error: InvalidInput) {
-        failure(error.message ?: "分类数据无效").toString()
+    } catch (error: IllegalArgumentException) {
+        structuredFailure(error,"分类数据无效").toString()
     } catch (_: Exception) {
         failure("分类删除失败，请重试").toString()
     }
@@ -479,7 +551,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             app.changed()
         }
         JSONObject().put("ok",true).toString()
-    } catch(e:Exception) { failure(e.message?:"无法修改应用选择").toString() }
+    } catch(e:Exception) { structuredFailure(e,"无法修改应用选择").toString() }
 
     /** An individual switch only commits its application after the shared setup completes. */
     @JavascriptInterface
@@ -523,7 +595,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         app.screenshots.setRetentionDays(days)
         app.screenshots.cleanup()
         JSONObject().put("ok",true).put("storage",app.screenshots.stats()).toString()
-    } catch(_:Exception) { failure("无法更新截图保留设置").toString() }
+    } catch(error:Exception) { failure("无法更新截图保留设置",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun backup(action: String) {
@@ -613,7 +685,13 @@ class LedgerWebBridge(private val activity: MainActivity) {
         if (!valid) throw InvalidInput(message)
     }
 
-    private fun failure(message: String) = JSONObject().put("ok", false).put("error", message)
+    private fun failure(message:String,code:String="OPERATION_FAILED") = JSONObject().put("ok",false).put("error",message).put("code",code)
+    private fun failureCode(error:Exception):String = when(error) {
+        is WalletException -> error.code
+        is IllegalArgumentException,is JSONException -> "INVALID_INPUT"
+        else -> "OPERATION_FAILED"
+    }
+    private fun structuredFailure(error:Exception,fallback:String):JSONObject = failure(error.message?:fallback,failureCode(error))
     private class InvalidInput(message: String) : IllegalArgumentException(message)
 
     private companion object {

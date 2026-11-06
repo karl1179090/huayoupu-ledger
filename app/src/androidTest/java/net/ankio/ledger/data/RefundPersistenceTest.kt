@@ -17,7 +17,7 @@ class RefundPersistenceTest {
     private val namespace="refund-test-${UUID.randomUUID()}"
     private val database="$namespace-ledger.db"
     private val images=ScreenshotStore(context,namespace)
-    private var store=LedgerStore(context,database,images)
+    private var store=LedgerStore(context,database,images).prepareSyntheticDefaultWallet()
     private val instant=1_790_000_000_000L
     private val first=byteArrayOf(1,2,3)
     private val second=byteArrayOf(4,5,6)
@@ -196,12 +196,8 @@ class RefundPersistenceTest {
     @Test fun versionSixMigrationPreservesOriginalImageAndAddsFirstHistoryWithoutDuplicatingBytes() {
         val original=payment()
         val db=store.writableDatabase
-        // A v6 schema has no refund columns or capture_history; construct it from the current fixture data.
-        db.execSQL("CREATE TABLE legacy_records AS SELECT id,uid,source,origin,raw_text,received_at,amount,direction,merchant,category,occurred_at,transaction_id,reliable,time_explicit,state,reason,duplicate_id,note FROM records")
-        db.execSQL("DROP TABLE records");db.execSQL("ALTER TABLE legacy_records RENAME TO records")
-        db.execSQL("DROP TABLE capture_history")
-        db.version=6;store.close();store=LedgerStore(context,database,images)
-        assertEquals(8,store.readableDatabase.version);assertEquals(original,store.get(original.id))
+        store.rebuildPreWalletSchemaForTest(6);store.close();store=LedgerStore(context,database,images)
+        assertEquals(9,store.readableDatabase.version);assertEquals(original.asLegacyExcluded(),store.get(original.id))
         assertEquals(1,store.captureHistory(original.id).size);assertArrayEquals(first,store.historyScreenshot(original.id,1))
         assertEquals(1,images.stats().getInt("count"))
     }

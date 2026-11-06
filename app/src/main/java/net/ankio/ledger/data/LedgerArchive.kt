@@ -47,7 +47,7 @@ object LedgerArchive {
     /** The caller owns output. A complete manifest is written only after all images succeed. */
     fun write(store: LedgerStore, channels: ChannelSettings, output: OutputStream): Summary = synchronized(store) {
         val records = store.all()
-        val ledger = JSONObject(LedgerBackup.encode(records, channels, store.accounts(), store.customCategories()))
+        val ledger = JSONObject(LedgerBackup.encode(records, channels, store.accounts(), store.customCategories(),store.walletSnapshot()))
         val histories = JSONObject()
         val icons = JSONObject()
         val stored = mutableSetOf<String>()
@@ -209,10 +209,11 @@ object LedgerArchive {
     }
 
     /** Repeated imports are idempotent. Existing edits, evidence and capture permissions survive. */
-    fun restore(store: LedgerStore, prepared: PreparedBackup): Int = synchronized(store) {
+    fun restore(store: LedgerStore, prepared: PreparedBackup): Int = restoreDetailed(store,prepared).imported
+    fun restoreDetailed(store: LedgerStore, prepared: PreparedBackup): RestoreSummary = synchronized(store) {
         prepared.ensureOpen()
-        if (prepared.legacy) return@synchronized LedgerBackup.restore(store, prepared.backup)
-        LedgerBackup.restore(store, prepared.backup) { record ->
+        if (prepared.legacy) return@synchronized LedgerBackup.restoreDetailed(store, prepared.backup)
+        LedgerBackup.restoreDetailed(store, prepared.backup) { record ->
             prepared.backup.histories[record.uid]?.let { entries ->
                 store.restoreHistory(record.id, entries) { restored ->
                     prepared.historyAssets[record.uid]?.get(restored.entry.sequence)?.let { hash ->

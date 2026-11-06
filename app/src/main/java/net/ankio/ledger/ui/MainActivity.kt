@@ -82,6 +82,10 @@ class MainActivity : Activity() {
                                 ?.groupValues?.get(1)?.toLongOrNull() ?: return missing()
                             val bytes = ledger.tasks.image(id) ?: return missing()
                             WebResourceResponse("image/jpeg",null,ByteArrayInputStream(bytes))
+                        } else if (uri.path?.startsWith("/installed-app-icon/") == true) {
+                            val key=Regex("^/installed-app-icon/([a-f0-9]{64})\\.png$").matchEntire(uri.path!!)?.groupValues?.get(1) ?: return missing()
+                            val bytes=net.ankio.ledger.capture.InstalledAppsRepository.get(this@MainActivity).iconAsset(key) ?: return missing()
+                            WebResourceResponse("image/png",null,ByteArrayInputStream(bytes))
                         } else if (uri.path?.startsWith("/merchant-icon/") == true) {
                             val key = Regex("^/merchant-icon/([a-f0-9]{64})\\.img$").matchEntire(uri.path!!)
                                 ?.groupValues?.get(1) ?: return missing()
@@ -315,6 +319,11 @@ class MainActivity : Activity() {
         sheet.dialog.setOnDismissListener { if(csvPreviewSheet===sheet)csvPreviewSheet=null }
         sheet.content.addView(sheet.text("共 ${preview.total} 笔 · 可导入 ${preview.ready} 笔",20,MintDialog.INK,true))
         sheet.content.addView(sheet.text("重复 ${preview.duplicates} 笔 · 无效 ${preview.errors.size} 笔",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(8),0,sheet.dp(8)) })
+        sheet.content.addView(sheet.text("预计入账 ${preview.posted} 笔 · 待选择钱包 ${preview.pendingWallets} 笔",14,MintDialog.MUTED))
+        preview.walletImpacts.take(20).forEach { impact ->
+            sheet.content.addView(sheet.text("${impact.accountName ?: "待选择钱包"}  ${if(impact.deltaCents>0)"+" else ""}${net.ankio.ledger.core.Money.format(impact.deltaCents)} 元${if(impact.pending>0)" · ${impact.pending} 笔待确认" else ""}",13,MintDialog.INK))
+        }
+        sheet.content.addView(sheet.text("新导入的历史日期账单也会影响当前钱包余额；完整备份恢复不会重复扣款。",12,MintDialog.MUTED))
         for(record in preview.samples)sheet.content.addView(sheet.text("${java.text.SimpleDateFormat("yyyy-MM-dd",java.util.Locale.ROOT).format(java.util.Date(record.bill.occurredAt))}  ${record.bill.merchant.take(20)}  ${if(record.bill.direction==net.ankio.ledger.core.Direction.INCOME)"收入" else "支出"} ¥${net.ankio.ledger.core.Money.format(record.bill.amountCents!!)}",13,MintDialog.INK))
         if(preview.errors.isNotEmpty()) {
             sheet.label("以下无效行将跳过")
@@ -327,9 +336,15 @@ class MainActivity : Activity() {
             uiScope.launch {
                 dispatch("fileOperation",JSONObject.quote("正在导入账单"))
                 try {
-                    val result=withContext(Dispatchers.IO) { ensureActive();LedgerCsvImport.apply(ledger.store,document) }
-                    ledger.changed();message("已导入 ${result.imported} 笔，跳过 ${result.duplicates+result.invalid} 笔")
+                    val result=withContext(Dispatchers.IO) { ensureActive();LedgerCsvImport.apply(ledger.store,document,preview.previewToken) }
+                    ledger.changed();message("已入账 ${result.posted} 笔，待选择钱包 ${result.pendingWallets} 笔，跳过 ${result.duplicates+result.invalid} 笔")
                 } catch(cancelled:CancellationException) { throw cancelled }
+                catch(error:net.ankio.ledger.data.WalletException) {
+                    if(error.code=="CSV_PREVIEW_STALE") {
+                        val refreshed=withContext(Dispatchers.IO) { LedgerCsvImport.preview(ledger.store,document) }
+                        previewBills(document,refreshed);message("钱包或余额已更新，请核对新的导入预览")
+                    } else message(error.message?:"导入失败，账单未修改")
+                }
                 catch(_:Exception) { message("导入失败，账单未修改") }
                 finally { dispatch("fileOperation","null") }
             }
@@ -396,17 +411,28 @@ class MainActivity : Activity() {
             }
             RESTORE_REQUEST -> AlertDialog.Builder(this).setTitle("恢复本地备份？")
                 .setMessage("将合并备份中的账单、账户、分类及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。旧版备份可能没有截图。")
-                .setPositiveButton("恢复") { _,_ -> uiScope.launch {
+                .setPositiveButton("恢复") { _,_ ->
+                    // Pause both independent channels before taking the ledger write lock.
+                    // A late native OCR response must lose its session before restore starts.
+                    ledger.channels.set(ChannelSettings.Channel.OCR,false)
+                    ledger.channels.setAutomaticEnabled(false)
+                    ledger.recognitionSession.invalidate()
+                    ScreenCaptureService.current?.cancelRecognition()
+                    ledger.captureQueue.cancelAll()
+                    CaptureRuntime.stopSafely()
+                    ledger.changed()
+                    uiScope.launch {
                     dispatch("fileOperation",JSONObject.quote("正在校验并恢复备份"))
                     try {
                         val count=withContext(Dispatchers.IO) {
                             val imported=(contentResolver.openInputStream(uri) ?: error("无法读取")).use { input ->
-                                LedgerArchive.read(input,cacheDir).use { prepared -> LedgerArchive.restore(ledger.store,prepared) }
+                                LedgerArchive.read(input,cacheDir).use { prepared -> LedgerArchive.restoreDetailed(ledger.store,prepared) }
                             }
                             // Restoring data must never silently start collection or restore cloud consent.
                             ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
+                            ledger.channels.resetShakeSelectionForRestore()
                             imported
-                        }; CaptureRuntime.stopSafely(); ledger.changed(); message("已恢复 $count 笔账单，采集保持暂停，可按需开启")
+                        }; CaptureRuntime.stopSafely(); ledger.changed(); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔历史记录未参与余额联动，保留 ${count.retainedAccounts} 个本地账户。采集保持暂停，请重新选择摇一摇应用")
                     } catch(cancelled:CancellationException) { throw cancelled }
                     catch(_:Exception) { message("恢复失败，备份无效或已损坏，现有账单未修改") }
                     finally { dispatch("fileOperation","null") }
@@ -435,6 +461,10 @@ class MainActivity : Activity() {
     }
     private fun enableChannel(channel: ChannelSettings.Channel) {
         if (!ledger.channels.permitted(channel)) return
+        if(channel==ChannelSettings.Channel.OCR && ledger.channels.selectedShakePackages().isEmpty()) {
+            ledger.channels.set(channel,true);CaptureRuntime.refreshHealth();ledger.changed()
+            showShakeApplications();return
+        }
         if (channel.capture && permissionSetup.backgroundNeedsReview()) {
             permissionSetup.start(channel); return
         }
@@ -487,12 +517,14 @@ class MainActivity : Activity() {
         val running=state.optBoolean("running")&&state.optBoolean("accessibilityConnected")
         val sheet=MintDialog(this,"摇一摇运行状态")
         sheet.content.addView(sheet.text(when {
+            ledger.channels.selectedShakePackages().isEmpty() -> "请选择允许摇一摇记账的应用"
             !state.optBoolean("running") -> "摇一摇未运行"
             !state.optBoolean("accessibilityConnected") -> "页面识别尚未连接"
             state.optBoolean("backgroundRestricted") -> "后台运行受限"
             else -> "运行中"
         },20,if(running)MintDialog.GREEN else MintDialog.INK,true))
-        sheet.content.addView(sheet.text("打开单笔账单详情，摇一摇即可补录。",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(10),0,sheet.dp(16)) })
+        sheet.content.addView(sheet.text("仅在你选择的应用内，打开单笔账单详情后摇一摇补录。当前已选 ${ledger.channels.selectedShakePackages().size} 个应用。",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(10),0,sheet.dp(16)) })
+        sheet.action("应用白名单",true) { sheet.dismiss();showShakeApplications() }
         val recent=ledger.captureHealth.snapshot()
         val successfulAt=recent.optLong("lastSuccessfulAt",0)
         val recentRecord=recent.optLong("lastSuccessfulRecordId",0).takeIf { it>0 }?.let { ledger.store.get(it) }
@@ -502,10 +534,11 @@ class MainActivity : Activity() {
         if(ledger.channels.permitted(ChannelSettings.Channel.OCR))sheet.action("关闭并撤销识别授权") { sheet.dismiss();revokeChannel("ocr") }
         sheet.show()
     }
+    fun showShakeApplications() { permissionSetup.cancel();dispatch("shakeApplications","null") }
     fun configureWechatAuto() {
         val enabled=ledger.channels.wechatAutoConsented()
         val sheet=MintDialog(this,"微信支付自动识别",if(enabled)"已开启 · 与摇一摇共用无障碍授权" else "微信没发通知，也能识别前台支付结果")
-        sheet.content.addView(sheet.text("开启后，在微信付款或转账成功页、已完成交易详情页停留片刻，应用会检查交易页面；可读取文字时先核对状态和单笔金额，微信转账结果页没有提供文字时改用截图识别。匹配后弹出识别进度，全部在本机识别，截图不上传。有效结果直接记账，可再编辑或删除。\n\n不读取聊天内容，不点击、不支付；输入密码、待支付或交易失败的页面不采集。截图和账本保存在本机。\n\n此功能需要同时开启摇一摇及无障碍。后台代扣如果既没有通知、也没有显示支付结果页面，仍无法实时感知；可之后打开单笔详情识别。暂未适配的结果页请摇一摇补录。",14,MintDialog.MUTED))
+        sheet.content.addView(sheet.text("开启后，在微信付款或转账成功页、已完成交易详情页停留片刻，应用会检查交易页面；可读取文字时先核对状态和单笔金额，微信转账结果页没有提供文字时改用截图识别。匹配后弹出识别进度，全部在本机识别，截图不上传。有效结果直接记账，可再编辑或删除。\n\n不读取聊天内容，不点击、不支付；输入密码、待支付或交易失败的页面不采集。截图和账本保存在本机。\n\n此功能需要页面识别授权，自动识别与摇一摇开关独立。后台代扣如果既没有通知、也没有显示支付结果页面，仍无法实时感知；可之后打开单笔详情识别。暂未适配的结果页请摇一摇补录。",14,MintDialog.MUTED))
         sheet.action(if(enabled)"关闭微信自动识别" else "同意并开启微信自动识别",true) {
             ledger.channels.setWechatAuto(!enabled)
             ScreenCaptureService.current?.cancelRecognition()
@@ -520,7 +553,7 @@ class MainActivity : Activity() {
         if(modelPage?.isClosing==true)modelPage?.dismiss(false)
         if(modelPage!=null)return
         val sheet=MintDialog(this,"数据与隐私","截图与账本保存在本机")
-        sheet.content.addView(sheet.text("账单、账户、分类、备注及新增、修改、删除操作均在本机完成和保存。应用不自动同步完整账本。卸载或清除应用数据会删除本机账本，请主动导出备份。\n\n自动记账、摇一摇和截图导入均在本机识别，无需配置，截图不上传。主动摇动手机或选择图片时取图识别；另外同意并开启支付自动识别后，只会检查你主动选择的应用中的前台付款成功页，先从可读取的节点确认付款成功和单笔金额，再核对当前页面后截图识别。出现输入框、密码或验证提示，或无法确认页面时直接跳过，不用截图来猜测是否成功。摇一摇也不能绕过这层检查。仅自动记录支出，不等待对方确认收款；收入请手动记账、导入截图或主动摇一摇记录。识别成功后直接记账，可在详情中编辑或删除。不会代你点击、收款或支付。识别开始即保存本地任务；识别中、成功、失败均可查看。识别截图会压缩后保存在应用私有目录，用于详情核对。账单与任务共享同一张图片。已关联账单的付款及退款截图随识别历史保留，按第 1 次、第 2 次顺序核对。未关联的成功任务截图默认保留30天，失败截图7天，并按200MiB容量预算清理；仍被账单历史或待识别任务引用的图片继续保留。清理截图不删除账单、识别历史和商户图标，缺失图片会明确提示。删除最后一个引用后释放图片。完整 ZIP 备份包含账单、识别历史、截图、商户图标、账户及分类，相同图片只保存一次；支持恢复旧版 JSON。账单 CSV 可导出全部月份的已入账收支，通用格式保留商户与订单号，也提供钱迹官方模板格式。失败识别任务不作为账单导出，也不进入完整备份。\n\n此版本不再读取短信和其他应用通知。没有显示前台结果页的后台代扣可能漏记，可打开交易详情后摇一摇补录。暂停自动识别与关闭摇一摇分别生效；撤销无障碍授权会同时停止两种截图功能。",14,MintDialog.MUTED))
+        sheet.content.addView(sheet.text("账单、账户、分类、备注及新增、修改、删除操作均在本机完成和保存。应用不自动同步完整账本。卸载或清除应用数据会删除本机账本，请主动导出备份。\n\n自动记账、摇一摇和截图导入均在本机识别，无需配置，截图不上传。摇一摇仅在你主动勾选的应用白名单内、通过隐私检查后取图；应用目录和图标仅在本机用于选择，不上传。选择图片时主动导入识别；另外同意并开启支付自动识别后，只会检查你主动选择的应用中的前台付款成功页，先从可读取的节点确认付款成功和单笔金额，再核对当前页面后截图识别。出现输入框、密码或验证提示，或无法确认页面时直接跳过，不用截图来猜测是否成功。摇一摇也不能绕过这层检查。仅自动记录支出，不等待对方确认收款；收入请手动记账、导入截图或主动摇一摇记录。有效账单选择钱包后入账，可在详情中编辑或删除。优先使用明确的付款方式，再使用来源应用钱包和默认钱包；没有可用钱包时等待选择。新账单自动更新资产余额，退款回到原钱包，历史记录不追溯扣款，可手动校准余额。不会代你点击、收款或支付。识别开始即保存本地任务；识别中、成功、失败均可查看。识别截图会压缩后保存在应用私有目录，用于详情核对。账单与任务共享同一张图片。已关联账单的付款及退款截图随识别历史保留，按第 1 次、第 2 次顺序核对。未关联的成功任务截图默认保留30天，失败截图7天，并按200MiB容量预算清理；仍被账单历史或待识别任务引用的图片继续保留。清理截图不删除账单、识别历史和商户图标，缺失图片会明确提示。删除最后一个引用后释放图片。完整 ZIP 备份包含账单、识别历史、截图、商户图标、账户及分类，相同图片只保存一次；支持恢复旧版 JSON。账单 CSV 可导出全部月份的已入账收支，通用格式保留商户与订单号，也提供钱迹官方模板格式。失败识别任务不作为账单导出，也不进入完整备份。\n\n此版本不再读取短信和其他应用通知。没有显示前台结果页的后台代扣可能漏记，可打开交易详情后摇一摇补录。暂停自动识别与关闭摇一摇分别生效；撤销无障碍授权会同时停止两种截图功能。",14,MintDialog.MUTED))
         var afterDismiss:(()->Unit)?=null
         sheet.fixedActions(
             sheet.button("管理截图授权").apply { setOnClickListener { afterDismiss={ changeChannel("ocr",false) };sheet.dismiss() } },

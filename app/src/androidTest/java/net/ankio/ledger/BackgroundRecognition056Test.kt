@@ -24,6 +24,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 /** Live storage is authoritative, including the short deletion undo grace period. */
 @RunWith(AndroidJUnit4::class)
 class BackgroundRecognition056Test {
+    @get:org.junit.Rule val wallet=CaptureWalletFixture()
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
     private fun fixture(state:RecordState=RecordState.POSTED)=LedgerRecord(capture=Capture(Source.OCR,"com.tencent.mm","合成测试"),
         bill=ParsedBill(1234,Direction.EXPENSE,"后台回归${UUID.randomUUID()}","其他",System.currentTimeMillis(),null,true,"",true),state=state)
@@ -54,6 +56,30 @@ class BackgroundRecognition056Test {
     @Test fun reviewRecordDoesNotReportPostedSuccess()=withRecord(RecordState.REVIEW) { record,task,queue ->
         assertEquals("金额待核对，请打开账单",queue.completedMessage(task,IngestResult.Saved(record)))
         assertFalse(app.captureHealth.successful(record.id,"com.tencent.mm"))
+    }
+    @Test fun completedRefundReportsAnAdjustmentInsteadOfAZeroAmountPayment() {
+        val model=fixture().let { it.copy(bill=it.bill.copy(amountCents=0,refund=RefundInfo("wechat",1234,1234))) }
+        app.store.merge(listOf(model))
+        val record=app.store.all().first { it.uid==model.uid }
+        val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm")
+        try {
+            app.tasks.update(task,"SUCCEEDED","退款已更新",record.id)
+            assertEquals("退款已更新",PaymentRecognitionQueue(app){true}.completedMessage(task,IngestResult.Saved(record,updated=true)))
+        } finally { app.tasks.delete(task);app.store.delete(record.id) }
+    }
+    @Test fun walletRequiredFeedbackAsksForSelectionWithoutClaimingAnAmountError() {
+        val previous=app.store.walletSettings().defaultAccountUid
+        val merchant="待选钱包${UUID.randomUUID()}"
+        app.store.setDefaultWallet(null)
+        var record:LedgerRecord?=null
+        val task=app.tasks.create(Source.OCR,"shake:com.example.synthetic")
+        try {
+            record=(app.store.ingest(Capture(Source.OCR,"com.example.synthetic","合成账单"),
+                ParsedBill(1234,Direction.EXPENSE,merchant,"其他",System.currentTimeMillis(),UUID.randomUUID().toString(),true,"",true)) as IngestResult.Saved).record
+            app.tasks.update(task,"REVIEW","请选择钱包",record.id)
+            assertEquals("WALLET_REQUIRED",record.wallet!!.reviewCode)
+            assertEquals("请选择钱包后入账",PaymentRecognitionQueue(app){true}.completedMessage(task,IngestResult.Saved(record)))
+        } finally { record?.let { app.store.delete(it.id) };app.tasks.delete(task);app.store.setDefaultWallet(previous) }
     }
     @Test fun publicBatteryRequestTargetsOnlyThisApplication() {
         val intent=BackgroundBatteryPolicy.request(app.packageName)
@@ -104,7 +130,8 @@ class BackgroundRecognition056Test {
         val aiPrefs=app.getSharedPreferences("remote_ai",Context.MODE_PRIVATE);val aiBefore=aiPrefs.all.toMap()
         val healthPrefs=app.getSharedPreferences("capture_health",Context.MODE_PRIVATE);val healthBefore=healthPrefs.all.toMap()
         val shake=app.channels.enabled(ChannelSettings.Channel.OCR)
-        val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm")
+        app.channels.set(ChannelSettings.Channel.OCR,true)
+        val task=app.tasks.create(Source.OCR,"shake:${whitelist.packageName}",app.channels.shakeAuthorization(whitelist.packageName))
         val merchant="恢复队列${UUID.randomUUID()}"
         val feedback=CopyOnWriteArrayList<String>()
         val permission=java.util.concurrent.atomic.AtomicBoolean(false)
@@ -134,7 +161,7 @@ class BackgroundRecognition056Test {
             val id=app.tasks.recordId(task)!!;assertEquals(RecordState.POSTED,app.store.get(id)!!.state)
             val health=app.captureHealth.snapshot()
             assertEquals(id,health.getLong("lastSuccessfulRecordId"));assertTrue(health.getLong("lastSuccessfulAt")>0)
-            assertEquals("com.tencent.mm",health.getString("lastSuccessfulOrigin"))
+            assertEquals(whitelist.packageName,health.getString("lastSuccessfulOrigin"))
         } finally {
             permission.set(false);queue.cancelAll();withTimeout(10_000){while(queue.size()!=0)delay(25)}
             app.store.all().filter { it.bill.merchant==merchant }.forEach { app.store.delete(it.id) }

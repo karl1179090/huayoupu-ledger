@@ -15,7 +15,7 @@ class CrossChannelDuplicateTest {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
         for(imageFirst in listOf(false,true)) {
             val name="cross-channel-${UUID.randomUUID()}.db"
-            LedgerStore(app,name).use { store ->
+            LedgerStore(app,name).prepareSyntheticDefaultWallet().use { store ->
                 try {
                     val now=System.currentTimeMillis()
                     val notification=Capture(Source.NOTIFICATION,"com.eg.android.AlipayGphone","交易提醒\n你有一笔28.50元的支出，点此查看详情。",now)

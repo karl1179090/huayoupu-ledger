@@ -70,8 +70,8 @@ class NativeV2DataTest {
             db.execSQL("INSERT INTO capture_events(event_key,received_at) VALUES (?,?)", arrayOf("synthetic-v1-event", instant))
             db.version = 1
         }
-        assertEquals(listOf(original), store.all())
-        assertEquals(8, store.readableDatabase.version)
+        assertEquals(listOf(original.asLegacyExcluded()), store.all())
+        assertEquals(9, store.readableDatabase.version)
         assertTrue(store.accounts().isEmpty())
         assertTrue(store.customCategories().isEmpty())
         store.readableDatabase.rawQuery("SELECT received_at FROM capture_events WHERE event_key = ?",
@@ -84,26 +84,27 @@ class NativeV2DataTest {
         assertTrue(store.addCategory(category))
         store.close()
         store = LedgerStore(context, databaseName)
-        assertEquals(original, store.get(37))
+        assertEquals(original.asLegacyExcluded(), store.get(37))
         assertEquals(account, store.getAccount(account.id))
         assertEquals(listOf(category), store.customCategories())
     }
 
     @Test fun versionTwoUpgradeKeepsBillsAccountsCategoriesAndAddsEmptyImageStorage() {
-        val bill = store.saveEdited(record())
+        store.merge(listOf(record()))
+        val bill = store.all().single()
         val account = store.saveAccount(LedgerAccount(name = "升级保留账户", amountCents = 12345, kind = "cash"))
         val category = CustomCategory("升级分类", Direction.EXPENSE)
         store.addCategory(category)
         store.writableDatabase.execSQL("DROP TABLE capture_images")
         store.writableDatabase.execSQL("DROP TABLE merchant_icons")
         store.writableDatabase.execSQL("DROP TABLE merchant_icon_assets")
-        store.writableDatabase.version = 2
+        store.rebuildPreWalletSchemaForTest(2)
         store.close()
         store = LedgerStore(context, databaseName)
-        assertEquals(bill, store.get(bill.id))
-        assertEquals(account, store.getAccount(account.id))
+        assertEquals(bill.asLegacyExcluded(), store.get(bill.id))
+        assertEquals(account.copy(revision = 0), store.getAccount(account.id))
         assertEquals(listOf(category), store.customCategories())
-        assertEquals(8, store.readableDatabase.version)
+        assertEquals(9, store.readableDatabase.version)
         assertTrue(store.screenshotIds().isEmpty())
     }
 
@@ -111,7 +112,7 @@ class NativeV2DataTest {
         val initial = store.saveAccount(LedgerAccount(name = "合成银行卡", description = "初始零余额",
             amountCents = 0, kind = "bank"))
         val edited = store.saveAccount(initial.copy(name = "合成负债", description = "用户手动维护",
-            amountCents = 12345, type = AccountType.LIABILITY, kind = "custom"))
+            amountCents = 12345, type = AccountType.LIABILITY, kind = "custom"), calibrateBalance = true)
         assertEquals(initial.uid, edited.uid)
         assertEquals(edited, store.getAccount(initial.id))
         val expense = CustomCategory("合成自定义", Direction.EXPENSE)
@@ -119,7 +120,9 @@ class NativeV2DataTest {
         assertTrue(store.addCategory(expense))
         assertFalse(store.addCategory(expense))
         assertTrue(store.addCategory(income))
-        val bill = store.saveEdited(record().copy(bill = record().bill.copy(category = expense.name)))
+        store.merge(listOf(record().copy(bill = record().bill.copy(category = expense.name))))
+        val bill = store.all().single()
+        assertEquals(WalletEligibility.RESTORE_EXCLUDED, bill.wallet!!.eligibility)
         assertEquals(12345L, store.getAccount(edited.id)!!.amountCents)
         store.close()
         store = LedgerStore(context, databaseName)
@@ -139,13 +142,17 @@ class NativeV2DataTest {
         store.deleteCategory(expense)
         assertEquals(listOf(income), store.customCategories())
         assertEquals(expense.name, store.get(bill.id)!!.bill.category)
-        store.deleteAccount(edited.id)
-        assertNull(store.getAccount(edited.id))
+        expectFailure { store.deleteAccount(edited.id) }
+        val archived = store.archiveAccount(edited.id)
+        assertTrue(archived.archived)
+        assertEquals(edited.amountCents, archived.amountCents)
         assertEquals(listOf(bill), store.all())
     }
 
     @Test fun versionTwoBackupRoundTripsEveryEntityAndRepeatedMergeKeepsLocalEdits() {
-        val posted = store.saveEdited(record().copy(note = "备份备注"))
+        store.merge(listOf(record().copy(note = "备份备注")))
+        val posted = store.all().single()
+        assertEquals(WalletEligibility.RESTORE_EXCLUDED, posted.wallet!!.eligibility)
         val pending = (store.ingest(Capture(Source.IMAGE, "image", "合成不完整原文", instant + 180000),
             ParsedBill(null, null, "待确认商户", "其他", instant + 180000, null, false, "需补全金额"))
             as IngestResult.Saved).record
@@ -158,7 +165,7 @@ class NativeV2DataTest {
         store.addCategory(expense); store.addCategory(income)
         channels.set(ChannelSettings.Channel.OCR, true)
         val encoded = LedgerBackup.encode(store, channels)
-        assertEquals(3, JSONObject(encoded).getInt("version"))
+        assertEquals(4, JSONObject(encoded).getInt("version"))
         val backup = decode(encoded)
         assertEquals(setOf(posted.copy(id = 0), pending.copy(id = 0)), backup.records.toSet())
         assertEquals(setOf(asset.copy(id = 0), debt.copy(id = 0)), backup.accounts.toSet())
@@ -171,7 +178,7 @@ class NativeV2DataTest {
                 assertEquals(setOf(posted.uid, pending.uid), target.all().map { it.uid }.toSet())
                 assertEquals(setOf(asset.uid, debt.uid), target.accounts().map { it.uid }.toSet())
                 val importedAsset = target.accounts().single { it.uid == asset.uid }
-                val localAccountEdit = target.saveAccount(importedAsset.copy(amountCents = 999, description = "导入后本地修改"))
+                val localAccountEdit = target.saveAccount(importedAsset.copy(amountCents = 999, description = "导入后本地修改"), calibrateBalance = true)
                 val localBillEdit = target.saveEdited(target.all().single { it.uid == posted.uid }.copy(note = "保留本地账单编辑"))
                 assertEquals(0, target.merge(backup.records, backup.accounts, backup.categories))
                 assertEquals(localAccountEdit, target.getAccount(importedAsset.id))
@@ -183,7 +190,8 @@ class NativeV2DataTest {
     }
 
     @Test fun legacyBackupAndMalformedOrFailedV2RestoreNeverPartiallyChangeLocalData() {
-        val existing = store.saveEdited(record())
+        store.merge(listOf(record()))
+        val existing = store.all().single()
         val account = store.saveAccount(LedgerAccount(name = "已有本地账户", amountCents = 500))
         val category = CustomCategory("已有本地分类", Direction.EXPENSE)
         store.addCategory(category)
@@ -203,7 +211,7 @@ class NativeV2DataTest {
         val validV2 = JSONObject(LedgerBackup.encode(listOf(record()), channels, listOf(newAccount), listOf(newCategory)))
             .apply { getJSONObject("channels").put("ocr", false) }.toString()
         val malformed = mutableListOf<String>()
-        listOf<Any>(-1, 12.5, "100", Money.MAX_CENTS + 1).forEach { invalid ->
+        listOf<Any>(-Money.MAX_CENTS - 1, 12.5, "100", Money.MAX_CENTS + 1).forEach { invalid ->
             malformed += JSONObject(validV2).apply {
                 getJSONArray("accounts").getJSONObject(0).put("amountCents", invalid)
             }.toString()
@@ -257,6 +265,7 @@ class NativeV2DataTest {
     }
 
     @Test fun thousandBillBatchHistoryMatchesIndividualReads() {
+        store.prepareSyntheticDefaultWallet()
         val db=store.writableDatabase
         val ids=mutableListOf<Long>()
         db.beginTransaction()

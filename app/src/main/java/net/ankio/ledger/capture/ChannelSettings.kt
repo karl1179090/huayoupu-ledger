@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.view.accessibility.AccessibilityManager
+import kotlinx.coroutines.launch
 
 class ChannelSettings(private val context: Context) {
     private val preferences = context.getSharedPreferences("channels", Context.MODE_PRIVATE)
@@ -17,12 +18,65 @@ class ChannelSettings(private val context: Context) {
                 .putBoolean("automatic_enabled",previous && preferences.getBoolean("ocr",false))
         }
         edit.apply()
+        (context.applicationContext as? net.ankio.ledger.LedgerApp)?.let { app ->
+            if(registerPackages(app))app.scope.launch { app.channels.reconcileShakePackages() }
+        }
     }
     private val generations = java.util.concurrent.ConcurrentHashMap<Channel, Long>()
     // Retired keys remain only for decoding old backups; none can request permissions or run.
     enum class Channel(val key: String) { OCR("ocr"), PAGE("page"), SMS("sms"), NOTIFICATION("notification"); val capture get()=this==OCR }
     private val automaticGenerations=java.util.concurrent.ConcurrentHashMap<String,Long>()
-    fun captureEnabled()=enabled(Channel.OCR) || automaticEnabled()
+    fun selectedShakePackages():Set<String> = preferences.getStringSet("shake_apps_v1",emptySet()).orEmpty().toSet()
+    fun shakeMasterGeneration()=preferences.getLong("shake_master_generation_v1",0)
+    fun shakeApplicationGeneration(packageName:String)=preferences.getLong("shake_package_generation_v1:$packageName",0)
+    @Synchronized fun shakeAllowed(packageName:String):Boolean {
+        if(!enabled(Channel.OCR) || packageName !in selectedShakePackages())return false
+        val installed=InstalledAppsRepository.get(context)
+        return installed.selectable(packageName) && installed.installationFingerprint(packageName)==preferences.getString("shake_installation_v1:$packageName",null)
+    }
+    @Synchronized fun shakeAuthorization(packageName:String):ShakeAuthorization? = if(shakeAllowed(packageName))
+        ShakeAuthorization(packageName,shakeMasterGeneration(),shakeApplicationGeneration(packageName)) else null
+    @Synchronized fun shakeAuthorized(authorization:ShakeAuthorization):Boolean =
+        shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration &&
+            shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
+    /** Commit consent before cancellation; queue locks are never acquired while holding this lock. */
+    fun setShakePackage(packageName:String,enabled:Boolean) {
+        require(ShakeAuthorization.validPackage(packageName)) { "应用包名无效" }
+        val changed=synchronized(this) {
+            val installed=InstalledAppsRepository.get(context)
+            val fingerprint=if(enabled) {
+                require(installed.selectable(packageName)) { installed.selectionProblem(packageName)?:"应用不可采集" }
+                requireNotNull(installed.installationFingerprint(packageName)) { "应用未安装" }
+            } else null
+            val selected=selectedShakePackages().toMutableSet()
+            if((packageName in selected)==enabled && (!enabled || preferences.getString("shake_installation_v1:$packageName",null)==fingerprint))false
+            else {
+                if(enabled)selected.add(packageName) else selected.remove(packageName)
+                val edit=preferences.edit().putStringSet("shake_apps_v1",selected)
+                    .putLong("shake_package_generation_v1:$packageName",Math.addExact(shakeApplicationGeneration(packageName),1))
+                if(enabled)edit.putString("shake_installation_v1:$packageName",fingerprint) else edit.remove("shake_installation_v1:$packageName")
+                check(edit.commit()) { "应用授权未保存，请重试" };true
+            }
+        }
+        if(changed)(context.applicationContext as? net.ankio.ledger.LedgerApp)?.let { app ->
+            if(!enabled) {
+                ScreenCaptureService.current?.cancelShakeRecognition(packageName)
+                app.captureQueue.cancelShake(packageName)
+            }
+            CaptureRuntime.refreshHealth();app.changed()
+        }
+    }
+    /** Also catches uninstalls missed while the process was stopped, including a later reinstall. */
+    fun reconcileShakePackages() {
+        val installed=InstalledAppsRepository.get(context)
+        selectedShakePackages().filter { pkg -> !installed.selectable(pkg) ||
+            installed.installationFingerprint(pkg)!=preferences.getString("shake_installation_v1:$pkg",null) }.forEach { setShakePackage(it,false) }
+    }
+    fun resetShakeSelectionForRestore() {
+        set(Channel.OCR,false)
+        selectedShakePackages().forEach { setShakePackage(it,false) }
+    }
+    fun captureEnabled()=enabled(Channel.OCR) && selectedShakePackages().isNotEmpty() || automaticEnabled()
     fun automaticEnabled()=preferences.getBoolean("automatic_enabled",false)
     fun selectedAutoPackages():Set<String> = preferences.getStringSet("auto_apps_v1",emptySet()).orEmpty().toSet()
         .intersect(net.ankio.ledger.core.PaymentApps.entries.map { it.packageName }.toSet())
@@ -34,7 +88,7 @@ class ChannelSettings(private val context: Context) {
         setAutoPackage(packageName,true)
         setAutomaticEnabled(true)
     }
-    @Synchronized fun pauseForMissingPermission() {
+    fun pauseForMissingPermission() {
         set(Channel.OCR,false)
         setAutomaticEnabled(false)
         selectedAutoPackages().forEach { setAutoPackage(it,false) }
@@ -60,13 +114,20 @@ class ChannelSettings(private val context: Context) {
         setAutomaticEnabled(enabled)
     }
     fun enabled(channel: Channel): Boolean = channel == Channel.OCR && preferences.getBoolean(channel.key, false)
-    @Synchronized fun set(channel: Channel, enabled: Boolean) {
+    fun set(channel: Channel, enabled: Boolean) {
         if(channel!=Channel.OCR) { preferences.edit().remove(channel.key).apply();return }
-        generations[channel] = generation(channel) + 1
-        preferences.edit().putBoolean(channel.key, enabled).apply()
+        val changed=synchronized(this) {
+            if(enabled==enabled(channel))false else {
+                val generation=Math.addExact(shakeMasterGeneration(),1)
+                check(preferences.edit().putBoolean(channel.key,enabled).putLong("shake_master_generation_v1",generation).commit()) { "摇一摇设置未保存，请重试" }
+                generations[channel]=generation;true
+            }
+        }
+        if(!changed)return
         (context.applicationContext as? net.ankio.ledger.LedgerApp)?.executionLog?.event(channel.key,"switch",if(enabled)"enabled" else "disabled")
+        if(!enabled)(context.applicationContext as? net.ankio.ledger.LedgerApp)?.captureQueue?.cancelShake()
     }
-    fun generation(channel: Channel): Long = generations[channel] ?: 0L
+    fun generation(channel: Channel): Long = if(channel==Channel.OCR)shakeMasterGeneration() else generations[channel] ?: 0L
     fun status(message: String) { preferences.edit().putString("last_status", message).apply() }
     fun lastStatus(): String = preferences.getString("last_status", "") ?: ""
     fun permitted(channel: Channel): Boolean = when (channel) {
@@ -75,5 +136,16 @@ class ChannelSettings(private val context: Context) {
             .getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
             .any { ComponentName(it.resolveInfo.serviceInfo.packageName, it.resolveInfo.serviceInfo.name) ==
                 captureServiceComponent(context) }
+    }
+    companion object {
+        private val registeredApplications=java.util.WeakHashMap<Context,Boolean>()
+        @Synchronized private fun registerPackages(context:Context):Boolean {
+            if(registeredApplications[context]==true)return false
+            val filter=android.content.IntentFilter().apply { InstalledAppsReceiver.ACTIONS.forEach(::addAction);addDataScheme("package") }
+            androidx.core.content.ContextCompat.registerReceiver(context,InstalledAppsReceiver(),filter,
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+            registeredApplications[context]=true
+            return true
+        }
     }
 }

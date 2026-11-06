@@ -15,7 +15,7 @@ class LedgerUndo056Test {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val name="undo056-${UUID.randomUUID()}.db"
     private val images=ScreenshotStore(context,"undo-images-${UUID.randomUUID()}")
-    private var store=LedgerStore(context,name,images)
+    private var store=LedgerStore(context,name,images).prepareSyntheticDefaultWallet()
     private val now=System.currentTimeMillis()
     private val capture=Capture(Source.OCR,"com.eg.android.AlipayGphone","交易号 UNDO-ORDER-0001",now)
     private val bill=ParsedBill(1000,Direction.EXPENSE,"测试店铺","购物",now,"UNDO-ORDER-0001",true,"",true)
@@ -50,7 +50,10 @@ class LedgerUndo056Test {
         assertNull(store.get(record.id))
         assertArrayEquals(image,store.historyScreenshot(record.id,1))
         assertTrue(store.undoDelete(record.id,now+1))
-        assertEquals(record,store.get(record.id))
+        val restored=store.get(record.id)!!
+        assertEquals(record.copy(wallet=restored.wallet),restored)
+        assertEquals(record.wallet!!.appliedCents,restored.wallet!!.appliedCents)
+        assertTrue(restored.wallet.revision>record.wallet.revision)
     }
 
     @Test fun recognitionDuringUndoWindowCannotCreateCompetingBill() {

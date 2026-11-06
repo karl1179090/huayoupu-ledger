@@ -92,7 +92,7 @@ class CaptureSupplementTest {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val namespace="supplement-${UUID.randomUUID()}"
     private val images=ScreenshotStore(context,namespace)
-    private var store=LedgerStore(context,"$namespace-ledger.db",images)
+    private var store=LedgerStore(context,"$namespace-ledger.db",images).prepareSyntheticDefaultWallet()
     private val now=System.currentTimeMillis()
     private val first=byteArrayOf(1,2,3)
     private val second=byteArrayOf(4,5,6)
@@ -194,10 +194,15 @@ class CaptureSupplementTest {
 
     @Test fun standaloneRefundCleanupPreservesOriginalAdjustedPaymentAndManualEntries() {
         val raw="退款成功 120.00 查看原账单 退款方式 余额"
-        val wrong=(store.ingest(capture(raw),bill().copy(merchant="退款来源"),screenshot=first) as IngestResult.Saved).record
+        val receipt=bill().copy(amountCents=null,reliable=false,merchant="退款来源",
+            standaloneRefund=StandaloneRefundEvidence("wechat",12000,"SYNTHETIC-COMPLETED-REFUND",null))
+        val wrong=(store.ingest(capture(raw),receipt,screenshot=first) as IngestResult.Saved).record
+        val rejected=(store.ingest(capture(raw+" 交易关闭"),receipt.copy(
+            standaloneRefund=receipt.standaloneRefund!!.copy(refundId="SYNTHETIC-CLOSED-REFUND"))) as IngestResult.Saved).record
         val manual=store.saveEdited(wrong.copy(id=0,uid=UUID.randomUUID().toString(),capture=Capture(Source.MANUAL,"manual",raw),bill=bill().copy(merchant="手动保留")))
         val adjusted=(store.ingest(capture("支付成功 已部分退款 原付款金额100 累计成功退款30"),bill().copy(merchant="调整后消费",transactionId="ADJUSTED",amountCents=7000,refund=RefundInfo("wechat",10000,3000)),screenshot=second) as IngestResult.Saved).record
-        assertEquals(listOf(wrong.id),store.discardStandaloneRefundReceipts())
+        assertEquals(listOf(rejected.id),store.discardStandaloneRefundReceipts())
+        assertEquals(RecordState.REVIEW,store.get(wrong.id)!!.state);assertEquals(0L,store.get(wrong.id)!!.wallet!!.appliedCents)
         assertNotNull(store.get(manual.id));assertNotNull(store.get(adjusted.id));assertEquals(7000L,store.get(adjusted.id)!!.bill.amountCents)
     }
 

@@ -17,6 +17,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class BackgroundSettingsSyncTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private fun exercise(block:(LedgerApp,UiAutomation,ActivityScenario<MainActivity>,WebUiProbe,(Boolean)->Unit)->Unit) {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
         val automation=InstrumentationRegistry.getInstrumentation().getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)

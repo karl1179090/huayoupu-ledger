@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class WechatAutoPaymentTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
+    @get:org.junit.Rule val wallet=CaptureWalletFixture()
     @Test fun realAccessibilityEventCapturesCompletedPaymentWithoutShakeOrNotification()=captureCompletedPayment(null)
     @Test fun liteSdkDescriptionOnlySuccessCapturesWithoutShake()=captureCompletedPayment("lite_readable",true)
     @Test fun coldFirstTreeReplyCapturesWithoutReenteringOrOpeningLedger()=captureCompletedPayment("lite_cold_ready",true)
@@ -52,6 +54,8 @@ class WechatAutoPaymentTest {
         val lite=mode?.startsWith("lite_")==true
         val framework=mode?.startsWith("framework")==true || lite
         val component=ComponentName(packageName,if(packageName==PaymentApps.ALIPAY)"com.alipay.fixture.PaymentResultActivity" else if(lite)"com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI" else if(framework)PaymentPageDetector.WECHAT_FRAMEWORK_RESULT else "com.tencent.mm.plugin.remittance.ui.RemittanceResultNewUI")
+        assumeTrue("External synthetic payment fixture is not installed: $component",runCatching { app.packageManager.getActivityInfo(component,0) }.isSuccess)
+        app.channels.setShakePackage(packageName,true)
         assertNull(PaymentPageDetector.detect(PaymentPage(PaymentApps.WECHAT,1,component.className,emptyList())))
         val automation=InstrumentationRegistry.getInstrumentation().getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val resolver=app.contentResolver

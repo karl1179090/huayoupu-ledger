@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /** The window manager can publish a usable window after the activity's initial event. */
 @RunWith(AndroidJUnit4::class)
 class PaymentWindowReadyTest {
+    @get:org.junit.Rule val wallet=CaptureWalletFixture()
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     @Test fun explicitShakeCapturesReadOnlyActivityWithoutAPaymentAdapter()=windowReady(false,activityOverride="com.tencent.mm.BillActivity",manualShake=true)
     @Test fun explicitShakeStillBlocksEditableActivityWithoutAPaymentAdapter()=windowReady(true,activityOverride="com.tencent.mm.BillActivity",manualShake=true)
     @Test fun packageLessWindowReadyEventCapturesInBackgroundWithoutOpeningLedger()=windowReady(false)
@@ -43,6 +45,9 @@ class PaymentWindowReadyTest {
         val instrumentation=InstrumentationRegistry.getInstrumentation()
         val automation=instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
+        val activity=activityOverride?:if(pkg=="com.tencent.mm")"com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI" else "com.alipay.fixture.PaymentResultActivity"
+        assumeTrue("External synthetic payment fixture is not installed: $pkg/$activity",runCatching { app.packageManager.getActivityInfo(ComponentName(pkg,activity),0) }.isSuccess)
+        if(manualShake)app.channels.setShakePackage(pkg,true)
         val resolver=app.contentResolver
         val services=Settings.Secure.getString(resolver,"enabled_accessibility_services")
         val enabled=Settings.Secure.getInt(resolver,"accessibility_enabled",0)
@@ -93,7 +98,6 @@ class PaymentWindowReadyTest {
                 assertSame(service,ScreenCaptureService.current)
             }
             automation.performGlobalAction(2);SystemClock.sleep(300)
-            val activity=activityOverride?:if(pkg=="com.tencent.mm")"com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI" else "com.alipay.fixture.PaymentResultActivity"
             val initialRequests=service.screenshotRequests
             app.startActivity(Intent().setComponent(ComponentName(pkg,activity))
                 .putExtra("mode",if(password && activity=="com.tencent.mm.BillActivity")"chat" else if(password)"lite_password" else "lite_readable")

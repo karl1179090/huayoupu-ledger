@@ -21,6 +21,7 @@ data class LedgerRecord(
     val duplicateId: Long? = null,
     val note: String = "",
     val identities: List<TransactionIdentity> = emptyList(),
+    val wallet: RecordWalletLink? = null,
 ) {
     fun existing() = ExistingBill(id, capture.source, capture.origin, capture.text,
         bill.amountCents, bill.direction, bill.merchant, bill.occurredAt, bill.transactionId, bill.timeExplicit)
@@ -35,7 +36,7 @@ sealed class IngestResult {
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 8) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 9) {
     private fun imageOwner(id: Long) = "ledger:$name:$id"
     private fun historyOwner(id: Long, sequence: Int) = if (sequence == 1) imageOwner(id) else "ledger:$name:$id:history:$sequence"
     override fun onOpen(db:SQLiteDatabase) {
@@ -63,7 +64,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             received_at INTEGER NOT NULL, amount INTEGER, direction TEXT,
             merchant TEXT NOT NULL, category TEXT NOT NULL, occurred_at INTEGER NOT NULL,
             transaction_id TEXT, reliable INTEGER NOT NULL, time_explicit INTEGER NOT NULL,
-            state TEXT NOT NULL, reason TEXT NOT NULL, duplicate_id INTEGER, note TEXT NOT NULL)""")
+            state TEXT NOT NULL, reason TEXT NOT NULL, duplicate_id INTEGER, note TEXT NOT NULL, standalone_refund TEXT)""")
         db.execSQL("CREATE INDEX records_time ON records(occurred_at)")
         db.execSQL("CREATE INDEX records_transaction ON records(transaction_id)")
         db.execSQL("CREATE INDEX records_received ON records(received_at)")
@@ -73,11 +74,13 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         createMerchantIcons(db)
         createRefunds(db)
         createIdentitiesAndUndo(db)
+        WalletAccounting.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..7 && newVersion == 8) { "Unsupported database migration $oldVersion → $newVersion" }
-        // SQLiteOpenHelper wraps this migration in a transaction; existing bills remain untouched.
+        check(oldVersion in 1..8 && newVersion == 9) { "Unsupported database migration $oldVersion → $newVersion" }
+        // Preserve the complete historical upgrade chain before the wallet migration.
+        if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
         if (oldVersion < 3) createCaptureImages(db)
         if (oldVersion < 5) {
@@ -106,6 +109,23 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val recovered=(TransactionIdentities.from(record.capture,record.bill)+captured).distinct().groupBy { it.scope }.values.filter { it.size==1 }.flatten()
             persistIdentities(db,record.id,recovered)
         } }
+        }
+        migrateWallets(db)
+    }
+
+    private fun migrateWallets(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE records ADD COLUMN standalone_refund TEXT")
+        val sequence=db.rawQuery("SELECT seq FROM sqlite_sequence WHERE name='accounts'",null).use { if(it.moveToFirst())it.getLong(0) else 0L }
+        db.execSQL("ALTER TABLE accounts RENAME TO accounts_before_wallets")
+        createAccounts(db)
+        db.execSQL("""INSERT INTO accounts(id,uid,name,description,amount,kind,type,bank_code,card_last4,archived,revision)
+            SELECT id,uid,name,description,amount,kind,type,
+            CASE kind WHEN 'bank_icbc' THEN 'icbc' WHEN 'bank_abc' THEN 'abc' WHEN 'bank_boc' THEN 'boc'
+            WHEN 'bank_ccb' THEN 'ccb' WHEN 'bank_bocom' THEN 'bocom' ELSE NULL END,NULL,0,0 FROM accounts_before_wallets""")
+        db.execSQL("DROP TABLE accounts_before_wallets")
+        db.execSQL("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='accounts'",arrayOf(sequence))
+        WalletAccounting.create(db)
+        db.execSQL("INSERT INTO record_wallet_links(record_uid,eligibility,applied_cents) SELECT uid,'LEGACY_EXCLUDED',0 FROM records")
     }
 
     private fun createIdentitiesAndUndo(db:SQLiteDatabase) {
@@ -251,13 +271,164 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     private fun createAccountsAndCategories(db: SQLiteDatabase) {
-        db.execSQL("""CREATE TABLE accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL, description TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount >= 0),
-            kind TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('ASSET', 'LIABILITY')))""")
+        createAccounts(db)
         db.execSQL("""CREATE TABLE custom_categories (
             name TEXT NOT NULL, direction TEXT NOT NULL CHECK(direction IN ('EXPENSE', 'INCOME')),
             PRIMARY KEY(direction, name))""")
+    }
+
+    private fun createAccounts(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,uid TEXT NOT NULL UNIQUE,name TEXT NOT NULL,
+            description TEXT NOT NULL,amount INTEGER NOT NULL,
+            kind TEXT NOT NULL,type TEXT NOT NULL CHECK(type IN ('ASSET','LIABILITY')),
+            bank_code TEXT,card_last4 TEXT,archived INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0,
+            CHECK(amount BETWEEN -${Money.MAX_CENTS} AND ${Money.MAX_CENTS}),
+            CHECK(type='ASSET' OR amount>=0),CHECK(card_last4 IS NULL OR length(card_last4)=4 AND card_last4 NOT GLOB '*[^0-9]*'))""")
+    }
+
+    private fun withWallet(record: LedgerRecord): LedgerRecord {
+        val link=WalletAccounting.link(readableDatabase,record.uid)
+        return record.copy(wallet=link,bill=record.bill.copy(paymentMethod=decodePaymentEvidence(link?.paymentEvidence)))
+    }
+
+    private fun encodePaymentEvidence(e: PaymentMethodEvidence?): String? = e?.let {
+        org.json.JSONObject().apply {
+            put("version",1);put("medium",it.medium);put("role",it.role);put("bankCode",it.bankCode)
+            put("cardLast4",it.cardLast4);put("platform",it.platform);put("rawLabel",it.rawLabel.take(80))
+            put("rawValue",it.rawValue.take(160));put("ambiguous",it.ambiguous);put("reason",it.reason)
+        }.toString()
+    }
+    private fun decodePaymentEvidence(value: String?): PaymentMethodEvidence? = value?.let {
+        val json=org.json.JSONObject(it)
+        fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotEmpty)
+        PaymentMethodEvidence(json.getString("medium"),json.getString("role"),optional("bankCode"),optional("cardLast4"),
+            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"))
+    }
+
+    private fun encodeStandaloneRefund(e:StandaloneRefundEvidence?):String?=e?.let {
+        org.json.JSONObject().apply {
+            put("version",1);put("provider",it.provider);put("refundedCents",it.refundedCents)
+            put("refundId",it.refundId);put("originalTransactionId",it.originalTransactionId)
+        }.toString()
+    }
+    private fun decodeStandaloneRefund(value:String?):StandaloneRefundEvidence?=value?.let {
+        val json=org.json.JSONObject(it)
+        fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotBlank)
+        StandaloneRefundEvidence(json.getString("provider"),json.getLong("refundedCents"),optional("refundId"),optional("originalTransactionId"))
+    }
+
+    /** The only bill-to-balance write path. Missing links never acquire financial eligibility. */
+    private fun syncWallet(db:SQLiteDatabase,record:LedgerRecord,isNew:Boolean=false,kind:String="EDIT",
+        manualAccountUid:String?=null,manualSelected:Boolean=false,incomingEvidence:PaymentMethodEvidence?=record.bill.paymentMethod,
+        deleted:Boolean=false,changed:Boolean=true,sourcePackage:String?=record.capture.origin):LedgerRecord {
+        val previous=WalletAccounting.link(db,record.uid)
+        var link=previous ?: RecordWalletLink(record.uid,if(isNew)WalletEligibility.ACTIVE else WalletEligibility.LEGACY_EXCLUDED,
+            reviewCode=if(isNew)null else "MISSING_WALLET_LINK")
+        var final=record
+        if(link.eligibility==WalletEligibility.ACTIVE) {
+            val settings=WalletAccounting.settings(db)
+            if(manualSelected && manualAccountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
+            val resolution=WalletResolver.resolve(accounts().map {
+                WalletCandidate(it.uid,it.type.name,it.kind,it.bankCode,it.cardLast4,it.archived)
+            },sourcePackage,incomingEvidence,settings.defaultAccountUid,settings.appBindings,
+                if(manualSelected)manualAccountUid else null,
+                previous?.let { WalletResolution(it.accountUid,it.selectionSource,it.reviewCode,it.evidenceFingerprint,it.manualLocked) })
+            if(manualSelected && resolution.accountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
+            val evidence=if(incomingEvidence!=null && resolution.evidenceFingerprint==WalletResolver.fingerprint(incomingEvidence))
+                encodePaymentEvidence(incomingEvidence) else link.paymentEvidence
+            link=link.copy(accountUid=resolution.accountUid,selectionSource=resolution.selectionSource,
+                manualLocked=resolution.manualLocked || link.manualLocked || manualSelected,
+                paymentEvidence=evidence,evidenceFingerprint=resolution.evidenceFingerprint ?: link.evidenceFingerprint,
+                reviewCode=resolution.reviewCode)
+            if(record.state==RecordState.POSTED && link.accountUid==null) {
+                final=record.copy(state=RecordState.REVIEW,reason="请选择钱包后入账")
+                link=link.copy(reviewCode="WALLET_REQUIRED")
+            } else if(record.state==RecordState.REVIEW && previous?.reviewCode=="WALLET_REQUIRED" &&
+                record.reason=="请选择钱包后入账" && link.accountUid!=null && record.bill.reliable && record.duplicateId==null) {
+                final=record.copy(state=RecordState.POSTED,reason="")
+            }
+        }
+        var target=WalletEffectCalculator.target(final.bill.amountCents,final.bill.direction,final.state==RecordState.POSTED,
+            deleted,link.eligibility==WalletEligibility.ACTIVE)
+        var changes=WalletEffectCalculator.changes(link.appliedAccountUid,link.appliedCents,link.accountUid,target)
+        // Validate every leg before changing either wallet, including transfers.
+        try {
+            changes.forEach { delta ->
+                val account=getAccountByUid(delta.accountUid) ?: throw WalletException("WALLET_MISSING","关联钱包已不存在")
+                val balance=try { Math.addExact(account.amountCents,delta.deltaCents) } catch(_:ArithmeticException) {
+                    throw WalletException("BALANCE_LIMIT","钱包余额超出允许范围")
+                }
+                if(balance !in (if(account.type==AccountType.ASSET)-Money.MAX_CENTS else 0L)..Money.MAX_CENTS)
+                    throw WalletException("BALANCE_LIMIT","钱包余额超出允许范围")
+            }
+        } catch(error:WalletException) {
+            if(!isNew || error.code!="BALANCE_LIMIT")throw error
+            final=record.copy(state=RecordState.REVIEW,reason="钱包余额超出允许范围，请核对后保存")
+            link=link.copy(reviewCode="BALANCE_LIMIT");target=0;changes=emptyList()
+        }
+        val operation=UUID.randomUUID().toString()
+        val movementKind=if(link.appliedAccountUid!=null && link.appliedAccountUid!=link.accountUid && target!=0L)"TRANSFER" else kind
+        changes.forEach { WalletAccounting.move(db,it.accountUid,record.uid,it.deltaCents,movementKind,operation,record.bill.merchant) }
+        // A zero net payment still belongs to its final wallet after a full refund or evidence upgrade.
+        link=link.copy(appliedAccountUid=link.accountUid ?: link.appliedAccountUid,appliedCents=target)
+        val mutated=changed || previous==null || link!=previous
+        link=link.copy(revision=(previous?.revision ?: 0)+(if(mutated)1 else 0))
+        WalletAccounting.saveLink(db,link)
+        if(final.state!=record.state || final.reason!=record.reason)db.update("records",ContentValues().apply {
+            put("state",final.state.name);put("reason",final.reason)
+        },"id=?",arrayOf(record.id.toString()))
+        return final.copy(wallet=link,bill=final.bill.copy(paymentMethod=decodePaymentEvidence(link.paymentEvidence)))
+    }
+
+    private fun recordIncludingDeleted(id:Long):LedgerRecord?=readableDatabase.query("records",null,"id=?",arrayOf(id.toString()),null,null,null)
+        .use { if(it.moveToFirst())withWallet(read(it)) else null }
+    private fun getByUid(uid:String):LedgerRecord?=readableDatabase.query("records",null,"uid=?",arrayOf(uid),null,null,null)
+        .use { if(it.moveToFirst())withWallet(read(it)) else null }
+    private fun checkRecordRevision(record:LedgerRecord,expectedRevision:Long?) {
+        if(expectedRevision!=null && record.wallet?.revision!=expectedRevision)
+            throw WalletException("STALE_RECORD_REVISION","账单已更新，请重新核对")
+    }
+
+    data class CommittedCapture(val recordUid:String,val record:LedgerRecord?)
+
+    /** This identity lives with the financial commit, independently of recognition.db updates. */
+    @Synchronized fun committedCapture(operationKey:String):CommittedCapture? {
+        val uid=WalletAccounting.submission(readableDatabase,operationKey,"CAPTURE_RESULT") ?: return null
+        return CommittedCapture(uid,getByUid(uid)?.let { get(it.id) })
+    }
+
+    @Synchronized fun committedPaymentEvent(eventKey:String):CommittedCapture? {
+        val uid=WalletAccounting.submission(readableDatabase,"capture-event:$eventKey","CAPTURE_EVENT_RESULT") ?: return null
+        return CommittedCapture(uid,getByUid(uid)?.let { get(it.id) })
+    }
+
+    private fun redirectCaptureReceipts(db:SQLiteDatabase,fromUid:String,toUid:String) {
+        db.update("wallet_submissions",ContentValues().apply { put("result_uid",toUid) },
+            "result_uid=? AND kind IN ('CAPTURE_RESULT','CAPTURE_EVENT_RESULT')",arrayOf(fromUid))
+    }
+
+    @Synchronized fun ingestRecognition(capture:Capture,bill:ParsedBill,operationKey:String,eventKey:String?=null,
+        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null):IngestResult {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            committedCapture(operationKey)?.let { committed ->
+                db.setTransactionSuccessful()
+                return if(committed.record==null)IngestResult.Skipped("账单已移除，未新增记账") else IngestResult.DuplicateSkipped
+            }
+            val result=ingest(capture,bill,eventKey,screenshot,merchantIcon)
+            val record=when(result) {
+                is IngestResult.Saved->result.record
+                IngestResult.DuplicateSkipped->eventKey?.let(::committedPaymentEvent)?.record ?: matchingIdentity(capture,bill)
+                else->null
+            }
+            record?.let {
+                WalletAccounting.remember(db,operationKey,"CAPTURE_RESULT",it.uid)
+                if(eventKey!=null && committedPaymentEvent(eventKey)==null)
+                    WalletAccounting.remember(db,"capture-event:$eventKey","CAPTURE_EVENT_RESULT",it.uid)
+            }
+            db.setTransactionSuccessful();return result
+        } finally { db.endTransaction() }
     }
 
     fun hasCaptureEvent(key:String):Boolean=readableDatabase.rawQuery("SELECT 1 FROM capture_events WHERE event_key=?",arrayOf(key)).use { it.moveToFirst() }
@@ -293,6 +464,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 })
                 db.delete("capture_events", "received_at < ?", arrayOf((capture.receivedAt - 7 * 86_400_000L).toString()))
             }
+            if(bill.standaloneRefund!=null) {
+                val result=ingestStandaloneRefund(db,capture,bill,screenshot,requireReview,merchantIcon)
+                db.setTransactionSuccessful();return result
+            }
             if (bill.refund != null) {
                 val result = ingestRefund(db, capture, bill, screenshot, requireReview, merchantIcon)
                 db.setTransactionSuccessful()
@@ -303,14 +478,16 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val enriched=identified.identities!=get(identified.id)?.identities
                 persistIdentities(db,identified.id,identified.identities)
                 val supplemented=appendPaymentScreenshot(db,identified,capture,screenshot)
-                val presented=enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                val presentation=enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                val presented=syncWallet(db,presentation,
+                    incomingEvidence=bill.paymentMethod,changed=enriched || presentation!=identified)
                 db.setTransactionSuccessful()
                 return if(supplemented || enriched || presented!=identified) IngestResult.Saved(presented,supplemented=supplemented)
                     else IngestResult.DuplicateSkipped
             }
             val automatic = if(!requireReview) uniqueAutomaticPayment(capture,bill) else null
             if(automatic!=null) {
-                val completed=completePaymentIdentity(db,automatic,bill)
+                val completed=syncWallet(db,completePaymentIdentity(db,automatic,bill),incomingEvidence=bill.paymentMethod)
                 val supplemented=appendPaymentScreenshot(db,completed,capture,screenshot)
                 linkMerchantIcon(db,completed.id,completed.bill.merchant,merchantIcon)
                 db.setTransactionSuccessful()
@@ -320,8 +497,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             if(repeated!=null) {
                 val supplemented=appendPaymentScreenshot(db,repeated,capture,screenshot)
                 linkMerchantIcon(db,repeated.id,repeated.bill.merchant,merchantIcon)
+                val linked=syncWallet(db,repeated,incomingEvidence=bill.paymentMethod,changed=false)
                 db.setTransactionSuccessful()
-                return IngestResult.Saved(repeated,supplemented=supplemented)
+                return IngestResult.Saved(linked,supplemented=supplemented)
             }
             // Reopening the original payment must never undo a later refund or add another expense.
             val refundedOriginals = if(bill.direction==Direction.EXPENSE && !primaryIssuerConflict)query(
@@ -338,8 +516,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 }
             if (refundedOriginal != null) {
                 val supplemented = bill.reliable && appendPaymentScreenshot(db, refundedOriginal, capture, screenshot)
+                val linked=syncWallet(db,refundedOriginal,incomingEvidence=bill.paymentMethod,changed=false)
                 db.setTransactionSuccessful()
-                return if (supplemented) IngestResult.Saved(refundedOriginal, supplemented=true) else IngestResult.DuplicateSkipped
+                return if (supplemented || linked!=refundedOriginal) IngestResult.Saved(linked, supplemented=supplemented) else IngestResult.DuplicateSkipped
             }
             // Without a transaction ID an equal amount/name/time is only a candidate: a new purchase
             // can look the same. Keep it outside totals until the user decides which payment it is.
@@ -368,12 +547,13 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val previous = requireNotNull(get(duplicate.id))
                 val promoted=previous.state==RecordState.REVIEW && previous.duplicateId==null && previous.bill.refund==null &&
                     previous.capture.source in setOf(Source.OCR,Source.IMAGE) && !requireReview && bill.reliable
-                val original=if(promoted)previous.copy(bill=bill,state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
+                var original=if(promoted)previous.copy(bill=bill,state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
                     else enrichPaymentPresentation(db,previous,capture,bill,merchantIcon)
                 if(promoted)check(db.update("records",values(original),"id=?",arrayOf(original.id.toString()))==1)
                 if(promoted)linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon)
                 persistIdentities(db,original.id,(original.identities+incomingIdentities).distinct())
                 val supplemented = bill.reliable && appendPaymentScreenshot(db, original, capture, screenshot)
+                original=syncWallet(db,original,incomingEvidence=bill.paymentMethod,changed=promoted)
                 db.setTransactionSuccessful()
                 return if (supplemented || promoted || original!=previous) IngestResult.Saved(original, supplemented=supplemented) else IngestResult.DuplicateSkipped
             }
@@ -395,6 +575,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             }
             insertHistory(db, id, RecordCaptureHistory(1,capture.receivedAt,"payment",bill.amountCents,0,capture.text,screenshot != null))
             linkMerchantIcon(db, id, bill.merchant, merchantIcon)
+            syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
             db.setTransactionSuccessful()
             return IngestResult.Saved(requireNotNull(get(id)))
         } finally { db.endTransaction() }
@@ -436,8 +617,13 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val record=get(recordId)?:continue
             val texts=(listOf(record.capture.text)+captureHistory(record.id).map { it.rawText }).distinct()
             val id=texts.mapNotNull { raw -> LocalOcrBillParser.transactionId(raw.lines().map { LocalOcrLine(it) }) }.distinct().singleOrNull()?:continue
-            db.update("records",ContentValues().apply { put("transaction_id",id) },"id=?",arrayOf(record.id.toString()))
-            persistIdentities(db,record.id,(record.identities+TransactionIdentities.from(record.capture,record.bill.copy(transactionId=id))).distinct())
+            db.beginTransaction()
+            try {
+                db.update("records",ContentValues().apply { put("transaction_id",id) },"id=?",arrayOf(record.id.toString()))
+                persistIdentities(db,record.id,(record.identities+TransactionIdentities.from(record.capture,record.bill.copy(transactionId=id))).distinct())
+                syncWallet(db,requireNotNull(get(record.id)))
+                db.setTransactionSuccessful()
+            } finally { db.endTransaction() }
         }
         // Only IDs repeated with the same financial fields can belong to a duplicate group.
         // Scope, conflicting identities and user-note checks remain in Kotlin below.
@@ -461,8 +647,12 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     val entries=captureHistory(copy.id)
                     if(entries.isEmpty())appendPaymentScreenshot(db,current,copy.capture,screenshot(copy.id))
                     else entries.forEach { entry -> appendPaymentScreenshot(db,current,copy.capture.copy(text=entry.rawText,receivedAt=entry.at),historyScreenshot(copy.id,entry.sequence)) }
-                    if(current.note.isBlank() && copy.note.isNotBlank())db.update("records",ContentValues().apply { put("note",copy.note) },"id=?",arrayOf(current.id.toString()))
+                    if(current.note.isBlank() && copy.note.isNotBlank()) {
+                        db.update("records",ContentValues().apply { put("note",copy.note) },"id=?",arrayOf(current.id.toString()))
+                        syncWallet(db,requireNotNull(get(current.id)))
+                    }
                     if(MerchantNames.key(current.bill.merchant)==MerchantNames.key(copy.bill.merchant))linkMerchantIcon(db,current.id,current.bill.merchant,merchantIcon(copy.id))
+                    redirectCaptureReceipts(db,copy.uid,current.uid)
                     delete(copy.id);merged[copy.id]=current.id
                     db.setTransactionSuccessful()
                 } finally { db.endTransaction() }
@@ -476,6 +666,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 if(entries.isEmpty())appendPaymentScreenshot(db,original,pending.capture,screenshot(pending.id))
                 else entries.forEach { entry -> appendPaymentScreenshot(db,original,pending.capture.copy(text=entry.rawText,receivedAt=entry.at),historyScreenshot(pending.id,entry.sequence)) }
                 linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon(pending.id))
+                redirectCaptureReceipts(db,pending.uid,original.uid)
                 delete(pending.id);merged[pending.id]=original.id
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() }
@@ -495,7 +686,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         try {
             db.update("records",ContentValues().apply { put("merchant",recognized.merchant) },"id=?",arrayOf(id.toString()))
             val previousKey=iconKey(db,id)
-            linkMerchantIcon(db,id,recognized.merchant,icon);pruneIcon(db,previousKey);db.setTransactionSuccessful();return true
+            linkMerchantIcon(db,id,recognized.merchant,icon);pruneIcon(db,previousKey)
+            syncWallet(db,requireNotNull(get(id)));db.setTransactionSuccessful();return true
         } finally { db.endTransaction() }
     }
 
@@ -506,20 +698,29 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun discardStandaloneRefundReceipts():List<Long> = readableDatabase.rawQuery(
         "SELECT id,raw_text FROM records WHERE source IN ('OCR','IMAGE') AND refund_provider IS NULL "+
             "AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=records.id) ORDER BY occurred_at DESC,id DESC",null).use { c ->
-        buildList { while(c.moveToNext())if(StandaloneRefundReceipt.matches(c.getString(1)))add(c.getLong(0)) }
-    }.also { ids -> ids.forEach(::delete) }
+        buildList { while(c.moveToNext())if(StandaloneRefundReceipt.matches(c.getString(1)) && TransactionRejection.reason(c.getString(1))!=null)add(c.getLong(0)) }
+    }.also { ids -> ids.forEach { delete(it) } }
 
     /** Withdraw only untouched machine drafts that the recognition gate now rejects. */
     @Synchronized fun discardRejectedDrafts():Map<Long,String> = query("state='REVIEW' AND source IN ('OCR','IMAGE')",null).filter {
         it.state==RecordState.REVIEW && it.note.isBlank() &&
             it.capture.source in setOf(Source.OCR,Source.IMAGE)
     }.mapNotNull { record -> TransactionRejection.reason(record.capture.text)?.let { record.id to it } }
-        .toMap().also { drafts -> drafts.keys.forEach(::delete) }
+        .toMap().also { drafts -> drafts.keys.forEach { delete(it) } }
 
     @Synchronized
-    fun saveEdited(record: LedgerRecord): LedgerRecord {
+    fun saveEdited(record: LedgerRecord, walletAccountUid:String?=null,manualWalletSelected:Boolean=false,
+        expectedRevision:Long?=record.wallet?.revision,submissionToken:String?=null): LedgerRecord {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+        val token=submissionToken ?: if(record.id==0L)record.uid else null
+        WalletAccounting.submission(db,token,"RECORD_SAVE")?.let { uid ->
+            val result=requireNotNull(getByUid(uid)) { "账单已不存在" };db.setTransactionSuccessful();return result
+        }
         val amount = record.bill.amountCents
         val previous=record.id.takeIf { it!=0L }?.let(::get)
+        previous?.let { require(it.uid==record.uid) { "账单标识无效" };checkRecordRevision(it,expectedRevision) }
+        require(record.bill.standaloneRefund==null) { "请先关联原账单后确认退款" }
         require(record.bill.refund == null || record.id != 0L && previous?.state == RecordState.POSTED) { "请通过关联原账单确认退款" }
         require(amount != null && (amount > 0 || amount == 0L && validRefundSummary(record.bill))) { "请输入有效金额" }
         require(record.bill.refund == null || validRefundSummary(record.bill)) { "退款账单金额必须等于原付金额减累计退款" }
@@ -534,9 +735,6 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             it.bill.occurredAt==record.bill.occurredAt && it.bill.timeExplicit==record.bill.timeExplicit }?.reason.orEmpty()
         val posted = record.copy(identities=previous?.identities ?: record.identities,bill = record.bill.copy(reliable = true, reason = provenance),
             state = RecordState.POSTED, reason = provenance, duplicateId = null)
-        val db = writableDatabase
-        db.beginTransaction()
-        try {
             val previousKey = if (record.id == 0L) null else iconKey(db, record.id)
             val id = if (record.id == 0L) db.insertOrThrow("records", null, values(posted)) else {
                 check(previous!=null && db.update("records", values(posted),
@@ -548,13 +746,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             db.delete("merchant_icons", "record_id = ?", arrayOf(id.toString()))
             linkMerchantIcon(db, id, posted.bill.merchant, null)
             pruneIcon(db, previousKey)
+            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected)
+            WalletAccounting.remember(db,token,"RECORD_SAVE",saved.uid)
             db.setTransactionSuccessful()
-            return requireNotNull(get(id))
+            return saved
         } finally { db.endTransaction() }
     }
 
     fun get(id: Long): LedgerRecord? = readableDatabase.query("records", null, "id = ? AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=records.id)",
-        arrayOf(id.toString()), null, null, null).use { if (it.moveToFirst()) read(it) else null }
+        arrayOf(id.toString()), null, null, null).use { if (it.moveToFirst()) withWallet(read(it)) else null }
 
     fun captureHistory(recordId: Long): List<RecordCaptureHistory> = readableDatabase.query("capture_history", null,
         "record_id=?",arrayOf(recordId.toString()),null,null,"sequence ASC").use { c -> buildList {
@@ -767,9 +967,61 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     kotlin.math.abs(candidate.bill.occurredAt-bill.occurredAt)<=120_000) }
     }
 
+    private fun standaloneRefundCandidates(capture:Capture,evidence:StandaloneRefundEvidence,exactOnly:Boolean):List<LedgerRecord> {
+        if(evidence.provider !in setOf("wechat","alipay") || evidence.refundedCents !in 1..Money.MAX_CENTS ||
+            evidence.refundId.isNullOrBlank() || paymentProvider(capture)?.let { it!=evidence.provider }==true)return emptyList()
+        val identity=evidence.originalTransactionId?.takeIf(String::isNotBlank)
+        if(exactOnly && identity==null)return emptyList()
+        return query("state='POSTED' AND direction='EXPENSE'",null).filter { original ->
+            val gross=original.bill.refund?.originalAmountCents ?: original.bill.amountCents
+            val sameProvider=paymentProvider(original.capture)==evidence.provider || original.identities.any { it.scope==evidence.provider && it.value==identity }
+            sameProvider && gross!=null && evidence.refundedCents<=gross &&
+                (identity==null || original.bill.transactionId==identity || original.identities.any { it.scope==evidence.provider && it.value==identity })
+        }
+    }
+    private fun completeStandaloneRefund(original:LedgerRecord,bill:ParsedBill):ParsedBill {
+        val evidence=requireNotNull(bill.standaloneRefund)
+        val gross=requireNotNull(original.bill.refund?.originalAmountCents ?: original.bill.amountCents)
+        require(evidence.refundedCents in 1..gross && !evidence.refundId.isNullOrBlank()) { "退款证据不完整，请重新识别" }
+        return bill.copy(amountCents=gross-evidence.refundedCents,direction=Direction.EXPENSE,
+            transactionId=evidence.originalTransactionId ?: original.bill.transactionId,reliable=true,reason="",
+            refund=RefundInfo(evidence.provider,gross,evidence.refundedCents,"single",evidence.refundId),standaloneRefund=null)
+    }
+    private fun ingestStandaloneRefund(db:SQLiteDatabase,capture:Capture,bill:ParsedBill,image:ByteArray?,requireReview:Boolean,merchantIcon:ByteArray?):IngestResult {
+        val evidence=requireNotNull(bill.standaloneRefund)
+        val original=if(!requireReview)standaloneRefundCandidates(capture,evidence,true).singleOrNull() else null
+        if(original!=null) {
+            val completed=completeStandaloneRefund(original,bill)
+            if(refundConflict(original,completed)==null)return applyRefund(db,original,capture,completed,image)
+        }
+        val repeated=if(!evidence.refundId.isNullOrBlank())query("state='REVIEW' AND standalone_refund IS NOT NULL",null).singleOrNull {
+            it.bill.standaloneRefund?.provider==evidence.provider && it.bill.standaloneRefund?.refundId==evidence.refundId &&
+                it.bill.standaloneRefund==evidence
+        } else null
+        if(repeated!=null) {
+            val supplemented=appendPaymentScreenshot(db,repeated,capture,image,"refund_supplement")
+            return IngestResult.Saved(repeated,supplemented=supplemented)
+        }
+        val reason="退款已完成，请选择原账单核对"
+        val pending=LedgerRecord(capture=capture,bill=bill.copy(amountCents=null,direction=Direction.EXPENSE,reliable=false,reason=reason),state=RecordState.REVIEW,reason=reason)
+        val id=db.insertOrThrow("records",null,values(pending))
+        persistIdentities(db,id,identities(pending))
+        image?.let {
+            screenshots.put(imageOwner(id),it,capture.receivedAt,"HISTORY")
+            db.insertOrThrow("capture_images",null,ContentValues().apply { put("record_id",id) })
+        }
+        insertHistory(db,id,RecordCaptureHistory(1,capture.receivedAt,"refund_pending",null,evidence.refundedCents,capture.text,image!=null,
+            "single",evidence.refundId,evidence.refundedCents))
+        linkMerchantIcon(db,id,bill.merchant,merchantIcon)
+        syncWallet(db,pending.copy(id=id),isNew=true,kind="REFUND")
+        return IngestResult.Saved(requireNotNull(get(id)))
+    }
+
     fun refundCandidates(pendingId:Long):List<LedgerRecord> {
         val pending=get(pendingId) ?: return emptyList()
-        if(pending.state!=RecordState.REVIEW || !validRefundEvidence(pending.bill))return emptyList()
+        if(pending.state!=RecordState.REVIEW)return emptyList()
+        pending.bill.standaloneRefund?.let { return standaloneRefundCandidates(pending.capture,it,false) }
+        if(!validRefundEvidence(pending.bill))return emptyList()
         return matchingRefundCandidates(pending.capture,pending.bill).filter { it.id!=pendingId }
     }
 
@@ -778,13 +1030,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         db.beginTransaction()
         try {
             val pending=requireNotNull(get(pendingId)) { "待确认退款已不存在" }
-            require(pending.state==RecordState.REVIEW && validRefundEvidence(pending.bill)) { "退款证据不完整，请重新识别" }
-            require(paymentProvider(pending.capture)?.let { it==pending.bill.refund?.provider }!=false) { "退款平台与截图来源冲突，请重新识别" }
+            require(pending.state==RecordState.REVIEW && (validRefundEvidence(pending.bill) || pending.bill.standaloneRefund!=null)) { "退款证据不完整，请重新识别" }
+            require(paymentProvider(pending.capture)?.let { it==(pending.bill.refund?.provider ?: pending.bill.standaloneRefund?.provider) }!=false) { "退款平台与截图来源冲突，请重新识别" }
             require(refundCandidates(pendingId).any { it.id==targetId }) { "原账单已变更或与退款不匹配，请重新选择" }
             val original=requireNotNull(get(targetId))
-            val reason=refundConflict(original,pending.bill)
+            val refundBill=if(pending.bill.standaloneRefund!=null)completeStandaloneRefund(original,pending.bill) else pending.bill
+            val reason=refundConflict(original,refundBill)
             require(reason==null) { reason ?: "退款状态冲突" }
-            val result=applyRefund(db,original,pending.capture,pending.bill,screenshot(pendingId))
+            val result=applyRefund(db,original,pending.capture,refundBill,screenshot(pendingId))
+            redirectCaptureReceipts(db,pending.uid,original.uid)
             delete(pendingId)
             db.setTransactionSuccessful()
             return result
@@ -831,6 +1085,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         }
         insertHistory(db,id,RecordCaptureHistory(1,capture.receivedAt,"refund_pending",bill.amountCents,refund.refundedCents,capture.text,image!=null,
             refund.mode,refund.refundId,refund.refundedCents))
+        syncWallet(db,pending.copy(id=id),isNew=true,kind="POST")
         return IngestResult.Saved(requireNotNull(get(id)))
     }
 
@@ -856,6 +1111,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 if(refund.refundedCents==refund.originalAmountCents)"full_refund" else "partial_refund",
                 bill.amountCents,refund.refundedCents,capture.text,image!=null,"cumulative",null,refund.refundedCents))
             linkMerchantIcon(db,id,bill.merchant,merchantIcon)
+            syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
             return IngestResult.Saved(requireNotNull(get(id)))
         } catch(error:Throwable) { screenshots.release(imageOwner(id));throw error }
     }
@@ -873,6 +1129,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 if(target!=null && refundConflict(target,pending.bill)==null && paymentProvider(pending.capture)==pending.bill.refund!!.provider) {
                     val original=if(isAutomaticPayment(target))completePaymentIdentity(db,target,pending.bill) else target
                     applyRefund(db,original,pending.capture,pending.bill,screenshot(pending.id))
+                    redirectCaptureReceipts(db,pending.uid,original.uid)
                     delete(pending.id);resolved[pending.id]=original.id
                 } else if(canCreateNetRefund(pending.capture,pending.bill)) {
                     val settled=pending.copy(state=RecordState.POSTED,reason="",bill=pending.bill.copy(reason=""))
@@ -880,6 +1137,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     db.update("capture_history",ContentValues().apply {
                         put("kind",if(pending.bill.amountCents==0L)"full_refund" else "partial_refund")
                     },"record_id=? AND sequence=1 AND kind='refund_pending'",arrayOf(pending.id.toString()))
+                    syncWallet(db,settled,kind="REFUND")
                     resolved[pending.id]=pending.id
                 }
                 db.setTransactionSuccessful()
@@ -895,6 +1153,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         if(history.any { it.refundMode!=refund.mode })return "累计退款与单次退款口径不同，请核对原账单"
         if(original.bill.refund!=null && history.isEmpty())return "原账单缺少退款明细，暂不能叠加退款"
         if(refund.mode=="single") {
+            val reused=readableDatabase.rawQuery("SELECT 1 FROM capture_history h JOIN records r ON r.id=h.record_id WHERE h.refund_id=? AND r.refund_provider=? AND r.id<>? LIMIT 1",
+                arrayOf(refund.refundId,refund.provider,original.id.toString())).use { it.moveToFirst() }
+            if(reused)return "退款单号已关联其他账单，请核对原账单"
             val prior=history.find { it.refundId==refund.refundId }
             if(prior!=null && prior.refundAmountCents!=refund.refundedCents)return "相同退款单号的金额冲突，请重新核对"
             val current=original.bill.refund?.refundedCents ?: 0
@@ -914,7 +1175,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             // cumulative page must not replace the more recent financial state.
             val supplemented=(incoming.mode=="single" || incoming.refundedCents==current) &&
                 appendPaymentScreenshot(db,original,capture,image,"refund_supplement")
-            return IngestResult.Saved(original,supplemented=supplemented)
+            return IngestResult.Saved(syncWallet(db,original,kind="REFUND",incomingEvidence=null,changed=false),supplemented=supplemented)
         }
         val entries=history ?: captureHistory(original.id)
         if(entries.isEmpty())insertHistory(db,original.id,RecordCaptureHistory(1,original.capture.receivedAt,
@@ -930,6 +1191,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             persistIdentities(db,original.id,identities(updated))
             insertHistory(db,original.id,RecordCaptureHistory(sequence,capture.receivedAt,if(total==incoming.originalAmountCents)"full_refund" else "partial_refund",
                 updated.bill.amountCents,total,capture.text,image!=null,incoming.mode,incoming.refundId,incoming.refundedCents))
+            syncWallet(db,updated,kind="REFUND",incomingEvidence=null)
             return IngestResult.Saved(requireNotNull(get(original.id)),updated=true)
         } catch(error:Throwable) {
             // The ledger transaction will roll back; release its uncommitted external image reference too.
@@ -944,9 +1206,21 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
 
     fun pending(): List<LedgerRecord> = query("state = ?", arrayOf(RecordState.REVIEW.name))
     fun all(): List<LedgerRecord> = query(null, null)
+    /** Undo-hidden rows still own their UID and transaction identities during CSV import. */
+    @Synchronized internal fun importIdentityRecords():List<LedgerRecord> = readableDatabase.query(
+        "records",null,null,null,null,null,null
+    ).use { cursor->buildList { while(cursor.moveToNext())add(read(cursor)) } }
     internal fun activeRecordIdsByUid():Map<String,Long> = readableDatabase.rawQuery(
         "SELECT uid,id FROM records r WHERE NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)",null
     ).use { c->buildMap { while(c.moveToNext())put(c.getString(0),c.getLong(1)) } }
+
+    /** Restore rollback discards ledger rows itself; only the separate screenshot store needs cleanup. */
+    @Synchronized internal fun releaseImportedMedia(recordIds:Collection<Long>) {
+        recordIds.forEach { id ->
+            captureHistory(id).forEach { screenshots.release(historyOwner(id,it.sequence)) }
+            screenshots.release(imageOwner(id))
+        }
+    }
     fun screenshotIds(availableOwners: Set<String> = screenshots.availableOwners(),recordIds:Set<Long>?=null): Set<Long> =
         readableDatabase.rawQuery("SELECT record_id FROM capture_images"+idFilter(recordIds),null)
             .use { cursor -> buildSet { while (cursor.moveToNext()) { val id=cursor.getLong(0); if(imageOwner(id) in availableOwners)add(id) } } }
@@ -995,10 +1269,13 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         return screenshots.image(imageOwner(id))
     }
 
-    @Synchronized fun delete(id: Long) {
+    @Synchronized fun delete(id: Long,expectedRevision:Long?=null,submissionToken:String?=null) {
         val db = writableDatabase
         db.beginTransaction()
         try {
+            WalletAccounting.submission(db,submissionToken,"RECORD_HARD_DELETE")?.let { db.setTransactionSuccessful();return }
+            val deleting=recordIncludingDeleted(id)
+            deleting?.let { checkRecordRevision(it,expectedRevision);syncWallet(db,it,kind="DELETE",deleted=true) }
             val previousKey = iconKey(db, id)
             db.delete("record_deletions","record_id=?",arrayOf(id.toString()))
             db.delete("record_identities","record_id=?",arrayOf(id.toString()))
@@ -1007,22 +1284,30 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             captureHistory(id).forEach { screenshots.release(historyOwner(id,it.sequence)) }
             db.delete("capture_history", "record_id = ?", arrayOf(id.toString()))
             db.delete("records", "id = ?", arrayOf(id.toString()))
+            deleting?.let { db.delete("record_wallet_links","record_uid=?",arrayOf(it.uid)) }
             screenshots.release(imageOwner(id))
             pruneIcon(db, previousKey)
+            deleting?.let { WalletAccounting.remember(db,submissionToken,"RECORD_HARD_DELETE",it.uid) }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }
 
     /** The deletion deadline is durable: process death cannot resurrect a removed bill. */
-    @Synchronized fun softDelete(id:Long,now:Long=System.currentTimeMillis()):Boolean {
-        if(get(id)==null)return false
-        return synchronized(screenshots) {
-            val deleted=writableDatabase.insertWithOnConflict("record_deletions",null,ContentValues().apply {
-                put("record_id",id);put("expires_at",now+UNDO_WINDOW_MS)
+    @Synchronized fun softDelete(id:Long,now:Long=System.currentTimeMillis(),expectedRevision:Long?=null,submissionToken:String?=null):Boolean {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            WalletAccounting.submission(db,submissionToken,"RECORD_DELETE")?.let { db.setTransactionSuccessful();return true }
+            val record=get(id) ?: return false
+            checkRecordRevision(record,expectedRevision)
+            syncWallet(db,record,kind="DELETE",deleted=true)
+            val deleted=db.insertWithOnConflict("record_deletions",null,ContentValues().apply {
+                put("record_id",id);put("expires_at",Math.addExact(now,UNDO_WINDOW_MS))
             },SQLiteDatabase.CONFLICT_IGNORE)!=-1L
+            WalletAccounting.remember(db,submissionToken,"RECORD_DELETE",record.uid)
+            db.setTransactionSuccessful()
             if(deleted)markDeletedMedia(id,"UNDO")
-            deleted
-        }
+            return deleted
+        } finally { db.endTransaction() }
     }
 
     private fun markDeletedMedia(id:Long,state:String) {
@@ -1030,10 +1315,20 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         captureHistory(id).forEach { screenshots.state(historyOwner(id,it.sequence),state) }
     }
 
-    @Synchronized fun undoDelete(id:Long,now:Long=System.currentTimeMillis()):Boolean {
-        val restored=writableDatabase.delete("record_deletions","record_id=? AND expires_at>?",arrayOf(id.toString(),now.toString()))==1
-        if(restored)markDeletedMedia(id,"HISTORY")
-        return restored
+    @Synchronized fun undoDelete(id:Long,now:Long=System.currentTimeMillis(),expectedRevision:Long?=null,submissionToken:String?=null):Boolean {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            WalletAccounting.submission(db,submissionToken,"RECORD_UNDO")?.let { db.setTransactionSuccessful();return true }
+            val record=recordIncludingDeleted(id) ?: return false
+            checkRecordRevision(record,expectedRevision)
+            val restored=db.delete("record_deletions","record_id=? AND expires_at>?",arrayOf(id.toString(),now.toString()))==1
+            if(restored) {
+                syncWallet(db,record,kind="UNDO_DELETE")
+                WalletAccounting.remember(db,submissionToken,"RECORD_UNDO",record.uid)
+                markDeletedMedia(id,"HISTORY")
+            }
+            db.setTransactionSuccessful();return restored
+        } finally { db.endTransaction() }
     }
 
     fun pendingDeletion(now:Long=System.currentTimeMillis()):DeletedRecord? = readableDatabase.rawQuery(
@@ -1043,7 +1338,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun purgeExpiredDeletes(now:Long=System.currentTimeMillis()):List<Long> {
         val ids=readableDatabase.rawQuery("SELECT record_id FROM record_deletions WHERE expires_at<=?",arrayOf(now.toString()))
             .use { c->buildList { while(c.moveToNext())add(c.getLong(0)) } }
-        ids.forEach(::delete)
+        ids.forEach { delete(it) }
         return ids
     }
 
@@ -1055,17 +1350,112 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     fun getAccount(id: Long): LedgerAccount? = readableDatabase.query("accounts", null, "id = ?",
         arrayOf(id.toString()), null, null, null).use { if (it.moveToFirst()) readAccount(it) else null }
 
+    fun getAccountByUid(uid:String):LedgerAccount?=readableDatabase.query("accounts",null,"uid=?",arrayOf(uid),null,null,null)
+        .use { if(it.moveToFirst())readAccount(it) else null }
+
     @Synchronized
-    fun saveAccount(account: LedgerAccount): LedgerAccount {
+    fun saveAccount(account: LedgerAccount, calibrateBalance:Boolean=false,expectedRevision:Long?=null,submissionToken:String?=null): LedgerAccount {
         account.validate()
-        val db = writableDatabase
-        if (account.id == 0L) return account.copy(id = db.insertOrThrow("accounts", null, accountValues(account)))
-        check(db.update("accounts", accountValues(account), "id = ? AND uid = ?",
-            arrayOf(account.id.toString(), account.uid)) == 1) { "账户已不存在" }
-        return account
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            WalletAccounting.submission(db,submissionToken,"ACCOUNT_SAVE")?.let { uid ->
+                val result=requireNotNull(getAccountByUid(uid)) { "账户已不存在" };db.setTransactionSuccessful();return result
+            }
+            var previous=if(account.id==0L)null else getAccount(account.id)
+            if(account.id!=0L)require(previous?.uid==account.uid) { "账户已不存在" }
+            if(previous!=null && calibrateBalance && previous.revision!=(expectedRevision ?: account.revision))
+                throw WalletException("STALE_ACCOUNT_REVISION","余额已更新，请重新核对")
+            if(previous!=null && previous.type!=account.type && db.rawQuery(
+                "SELECT 1 FROM record_wallet_links WHERE account_uid=? OR applied_account_uid=? UNION ALL SELECT 1 FROM wallet_movements WHERE account_uid=? AND record_uid IS NOT NULL LIMIT 1",
+                arrayOf(account.uid,account.uid,account.uid)).use { it.moveToFirst() })
+                throw WalletException("ACCOUNT_IN_USE","已有账单关联的账户不能更改资产类型")
+            if(previous!=null && previous.type!=account.type && account.type==AccountType.LIABILITY) {
+                val settings=WalletAccounting.settings(db)
+                if(settings.defaultAccountUid==account.uid || account.uid in settings.appBindings.values)
+                    throw WalletException("WALLET_CONFIGURATION_IN_USE","请先解除默认钱包和应用绑定，再更改账户类型")
+                if(calibrateBalance && previous.amountCents<0) {
+                    // Its old signed balance belongs to an asset. Calibrate before applying the liability constraint.
+                    WalletAccounting.move(db,account.uid,null,Math.subtractExact(account.amountCents,previous.amountCents),
+                        "CALIBRATION",UUID.randomUUID().toString(),account.name)
+                    previous=requireNotNull(getAccount(account.id))
+                }
+            }
+            if(previous!=null && !previous.archived && account.archived)validateArchive(db,account.uid)
+            val saved=if(previous==null) {
+                account.copy(id=db.insertOrThrow("accounts",null,accountValues(account.copy(amountCents=0,revision=0))),amountCents=0,revision=0)
+            } else account.copy(amountCents=previous.amountCents,revision=previous.revision+1)
+            if(previous!=null)db.update("accounts",accountValues(saved),"id=? AND uid=?",arrayOf(saved.id.toString(),saved.uid))
+            if(previous==null || calibrateBalance)WalletAccounting.move(db,saved.uid,null,
+                Math.subtractExact(account.amountCents,saved.amountCents),"CALIBRATION",UUID.randomUUID().toString(),account.name)
+            if(saved.archived && db.delete("app_wallet_bindings","account_uid=?",arrayOf(saved.uid))>0)
+                db.execSQL("UPDATE wallet_settings SET revision=revision+1 WHERE singleton=1")
+            WalletAccounting.remember(db,submissionToken,"ACCOUNT_SAVE",saved.uid)
+            db.setTransactionSuccessful();return requireNotNull(getAccountByUid(saved.uid))
+        } finally { db.endTransaction() }
     }
 
-    @Synchronized fun deleteAccount(id: Long) { writableDatabase.delete("accounts", "id = ?", arrayOf(id.toString())) }
+    private fun hasWalletHistory(db:SQLiteDatabase,uid:String):Boolean = db.rawQuery(
+        "SELECT 1 FROM record_wallet_links WHERE account_uid=? OR applied_account_uid=? UNION ALL SELECT 1 FROM wallet_movements WHERE account_uid=? LIMIT 1",
+        arrayOf(uid,uid,uid)).use { it.moveToFirst() }
+    private fun validateArchive(db:SQLiteDatabase,uid:String) {
+        if(WalletAccounting.settings(db).defaultAccountUid==uid)throw WalletException("DEFAULT_WALLET_IN_USE","请先选择其他默认钱包")
+    }
+    @Synchronized fun archiveAccount(id:Long):LedgerAccount {
+        val account=requireNotNull(getAccount(id)) { "账户已不存在" }
+        return saveAccount(account.copy(archived=true))
+    }
+    @Synchronized fun deleteAccount(id: Long) {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            val account=getAccount(id) ?: return
+            val settings=WalletAccounting.settings(db)
+            if(hasWalletHistory(db,account.uid))throw WalletException("ACCOUNT_IN_USE","账户已有账单或余额流水，请归档")
+            if(settings.defaultAccountUid==account.uid || account.uid in settings.appBindings.values)
+                throw WalletException("ACCOUNT_IN_USE","请先移除钱包配置引用")
+            db.delete("accounts","id=?",arrayOf(id.toString()));db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+    @Synchronized fun walletSettings():WalletSettings=WalletAccounting.settings(readableDatabase)
+    private fun requireAvailableWallet(uid:String):LedgerAccount {
+        val account=getAccountByUid(uid)
+        if(account==null || account.type!=AccountType.ASSET || account.archived)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
+        return account
+    }
+    @Synchronized fun setDefaultWallet(uid:String?):WalletSettings {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            uid?.let(::requireAvailableWallet)
+            db.execSQL("UPDATE wallet_settings SET default_account_uid=?,revision=revision+1 WHERE singleton=1",arrayOf(uid))
+            db.setTransactionSuccessful();return WalletAccounting.settings(db)
+        } finally { db.endTransaction() }
+    }
+    @Synchronized fun setAppWallet(packageName:String,uid:String?):WalletSettings {
+        require(packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")) && packageName.length<=200) { "应用包名无效" }
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            if(uid==null)db.delete("app_wallet_bindings","package_name=?",arrayOf(packageName))
+            else { requireAvailableWallet(uid);db.insertWithOnConflict("app_wallet_bindings",null,ContentValues().apply {
+                put("package_name",packageName);put("account_uid",uid)
+            },SQLiteDatabase.CONFLICT_REPLACE) }
+            db.execSQL("UPDATE wallet_settings SET revision=revision+1 WHERE singleton=1")
+            db.setTransactionSuccessful();return WalletAccounting.settings(db)
+        } finally { db.endTransaction() }
+    }
+    @Synchronized fun walletMovements(accountUid:String,limit:Int=50,offset:Int=0):List<WalletMovement> {
+        require(limit in 1..200 && offset>=0)
+        return readableDatabase.query("wallet_movements",null,"account_uid=?",arrayOf(accountUid),null,null,
+            "created_at DESC,rowid DESC","$offset,$limit").use { c->buildList { while(c.moveToNext())add(WalletAccounting.readMovement(c)) } }
+    }
+    @Synchronized fun walletSnapshot():WalletSnapshot {
+        val db=readableDatabase
+        val links=db.query("record_wallet_links",null,"record_uid IN (SELECT uid FROM records r WHERE NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id))",null,null,null,"record_uid").use { c->buildList {
+            while(c.moveToNext())add(WalletAccounting.readLink(c))
+        } }
+        val movements=db.query("wallet_movements",null,null,null,null,null,"created_at,rowid").use { c->buildList {
+            while(c.moveToNext())add(WalletAccounting.readMovement(c))
+        } }
+        return WalletSnapshot(WalletAccounting.settings(db),links,movements)
+    }
 
     fun customCategories(): List<CustomCategory> = readableDatabase.query("custom_categories", null,
         null, null, null, null, "direction ASC, rowid ASC").use { cursor -> buildList {
@@ -1087,6 +1477,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             arrayOf(category.direction.name, category.name))
     }
 
+    /** Compatibility API: merging saved history never posts a new financial transaction. */
     @Synchronized
     fun merge(records: List<LedgerRecord>, accounts: List<LedgerAccount> = emptyList(),
               categories: List<CustomCategory> = emptyList()): Int {
@@ -1100,6 +1491,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 if (!exists) {
                     val id = db.insertOrThrow("records", null, values(record.copy(id = 0, duplicateId = null)))
                     persistIdentities(db,id,identities(record))
+                    WalletAccounting.saveLink(db,RecordWalletLink(record.uid,WalletEligibility.RESTORE_EXCLUDED))
                     linkMerchantIcon(db, id, record.bill.merchant, null)
                     imported++
                 }
@@ -1118,9 +1510,99 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         } finally { db.endTransaction() }
     }
 
+    /** Snapshot restore is financially distinct from importing new transactions. */
+    @Synchronized fun restoreBackup(backup:ValidatedBackup):Int=restoreBackupDetailed(backup).imported
+    @Synchronized fun restoreBackupDetailed(backup:ValidatedBackup):RestoreSummary {
+        backup.wallets?.let { WalletBackupCodec.validate(backup.records,backup.accounts,it) }
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            val empty=db.rawQuery("SELECT (SELECT COUNT(*) FROM records)+(SELECT COUNT(*) FROM accounts)+(SELECT COUNT(*) FROM wallet_movements)",null)
+                .use { it.moveToFirst();it.getLong(0)==0L } && WalletAccounting.settings(db).let { it.defaultAccountUid==null && it.appBindings.isEmpty() }
+            val existing=db.rawQuery("SELECT uid FROM records",null).use { c->buildSet { while(c.moveToNext())add(c.getString(0)) } }
+            val existingAccounts=accounts().mapTo(mutableSetOf()) { it.uid }
+            val newAccounts=backup.accounts.mapTo(mutableSetOf()) { it.uid }.apply { removeAll(existingAccounts) }
+            val imported=merge(backup.records,backup.accounts,backup.categories)
+            val snapshot=backup.wallets
+            var excluded=0
+            if(snapshot!=null) {
+                val conflictedAccounts=snapshot.links.filter { it.recordUid in existing }.flatMap {
+                    listOfNotNull(it.accountUid,it.appliedAccountUid)
+                }.filterTo(mutableSetOf()) { it in newAccounts }
+                snapshot.links.filter { it.recordUid !in existing }.forEach { link->
+                    val references=listOfNotNull(link.accountUid,link.appliedAccountUid)
+                    val canRestore=empty || references.all { it in newAccounts && it !in conflictedAccounts }
+                    val restored=if(canRestore)link else link.copy(eligibility=WalletEligibility.RESTORE_EXCLUDED,appliedAccountUid=null,appliedCents=0)
+                    if(restored.eligibility==WalletEligibility.RESTORE_EXCLUDED)excluded++
+                    WalletAccounting.saveLink(db,restored)
+                }
+                if(empty) {
+                    db.execSQL("UPDATE wallet_settings SET default_account_uid=?,revision=? WHERE singleton=1",
+                        arrayOf<Any?>(snapshot.settings.defaultAccountUid,snapshot.settings.revision))
+                    snapshot.settings.appBindings.forEach { (packageName,uid)->db.insertOrThrow("app_wallet_bindings",null,ContentValues().apply {
+                        put("package_name",packageName);put("account_uid",uid)
+                    }) }
+                }
+                snapshot.movements.filter { it.accountUid in newAccounts }.forEach { m->db.insertOrThrow("wallet_movements",null,movementValues(m)) }
+                backup.accounts.filter { it.uid in newAccounts }.forEach { account->
+                    val balance=account.amountCents
+                    db.insertOrThrow("wallet_movements",null,movementValues(WalletMovement(UUID.randomUUID().toString(),UUID.randomUUID().toString(),
+                        account.uid,null,"RESTORE_SNAPSHOT",0,balance,balance,System.currentTimeMillis(),"恢复钱包快照")))
+                }
+            } else {
+                backup.records.filter { it.uid !in existing }.forEach { record->
+                    WalletAccounting.saveLink(db,RecordWalletLink(record.uid,WalletEligibility.LEGACY_EXCLUDED,
+                        paymentEvidence=record.bill.paymentMethod?.let(::encodePaymentEvidence)))
+                }
+            }
+            db.setTransactionSuccessful()
+            return RestoreSummary(imported,excluded,backup.accounts.count { it.uid in existingAccounts },newAccounts.size)
+        } finally { db.endTransaction() }
+    }
+    private fun movementValues(m:WalletMovement)=ContentValues().apply {
+        put("movement_uid",m.movementUid);put("operation_uid",m.operationUid);put("account_uid",m.accountUid);put("record_uid",m.recordUid)
+        put("kind",m.kind);put("delta_cents",m.deltaCents);put("balance_before",m.balanceBefore);put("balance_after",m.balanceAfter)
+        put("created_at",m.createdAt);put("summary",m.summary)
+    }
+    /** New CSV rows receive the same explicit ACTIVE eligibility as a new manual/capture bill. */
+    @Synchronized fun importTransactions(records:List<LedgerRecord>):List<LedgerRecord> {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            val saved=mutableListOf<LedgerRecord>()
+            records.forEach { record->
+                val exists=db.rawQuery("SELECT 1 FROM records WHERE uid=?",arrayOf(record.uid)).use { it.moveToFirst() }
+                if(!exists) {
+                    val id=db.insertOrThrow("records",null,values(record.copy(id=0,duplicateId=null)))
+                    persistIdentities(db,id,identities(record));linkMerchantIcon(db,id,record.bill.merchant,null)
+                    insertHistory(db,id,RecordCaptureHistory(1,record.capture.receivedAt,
+                        if(record.bill.refund==null)"payment" else if(record.bill.amountCents==0L)"full_refund" else "partial_refund",
+                        record.bill.amountCents,record.bill.refund?.refundedCents ?: 0L,record.capture.text,false))
+                    saved.add(syncWallet(db,record.copy(id=id,duplicateId=null),isNew=true,kind="POST",incomingEvidence=null,sourcePackage=null))
+                }
+            }
+            db.setTransactionSuccessful();return saved
+        } finally { db.endTransaction() }
+    }
+    @Synchronized fun previewWallet(record:LedgerRecord):WalletResolution {
+        val settings=WalletAccounting.settings(readableDatabase)
+        return WalletResolver.resolve(accounts().map { WalletCandidate(it.uid,it.type.name,it.kind,it.bankCode,it.cardLast4,it.archived) },
+            null,null,settings.defaultAccountUid,settings.appBindings)
+    }
+    @Synchronized fun walletConfigurationToken():String {
+        val settings=WalletAccounting.settings(readableDatabase)
+        // Account revisions also cover balance changes that can invalidate an import at the limits.
+        val value=buildString {
+            append(settings.revision);append('|');append(settings.defaultAccountUid);append('|')
+            settings.appBindings.toSortedMap().forEach { (pkg,uid)->append(pkg);append('=');append(uid);append(';') }
+            accounts().forEach { append(it.uid);append(':');append(it.revision);append(';') }
+        }
+        return java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
+    }
+
     private fun accountValues(account: LedgerAccount) = ContentValues().apply {
         put("uid", account.uid); put("name", account.name); put("description", account.description)
         put("amount", account.amountCents); put("kind", account.kind); put("type", account.type.name)
+        put("bank_code",account.bankCode ?: AccountBanks.codeForKind(account.kind));put("card_last4",account.cardLast4)
+        put("archived",if(account.archived)1 else 0);put("revision",account.revision)
     }
 
     private fun categoryValues(category: CustomCategory) = ContentValues().apply {
@@ -1134,11 +1616,13 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         description = cursor.getString(cursor.getColumnIndexOrThrow("description")),
         amountCents = cursor.getLong(cursor.getColumnIndexOrThrow("amount")),
         kind = cursor.getString(cursor.getColumnIndexOrThrow("kind")),
-        type = AccountType.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("type"))))
+        type = AccountType.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("type"))),
+        bankCode=cursor.getString(cursor.getColumnIndexOrThrow("bank_code")),cardLast4=cursor.getString(cursor.getColumnIndexOrThrow("card_last4")),
+        archived=cursor.getInt(cursor.getColumnIndexOrThrow("archived"))==1,revision=cursor.getLong(cursor.getColumnIndexOrThrow("revision")))
 
     private fun query(where: String?, args: Array<String>?): List<LedgerRecord> = readableDatabase.query(
         "records", null, "NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=records.id)"+(where?.let { " AND ($it)" }?:""), args, null, null, "occurred_at DESC, id DESC").use { cursor ->
-        buildList { while (cursor.moveToNext()) add(read(cursor)) }
+        buildList { while (cursor.moveToNext()) add(withWallet(read(cursor))) }
     }
 
     private fun values(r: LedgerRecord) = ContentValues().apply {
@@ -1149,7 +1633,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         put("occurred_at", r.bill.occurredAt); put("transaction_id", r.bill.transactionId)
         put("reliable", if (r.bill.reliable) 1 else 0); put("time_explicit", if (r.bill.timeExplicit) 1 else 0)
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)
-        put("note", r.note)
+        put("note", r.note);put("standalone_refund",encodeStandaloneRefund(r.bill.standaloneRefund))
         put("transaction_identities",TransactionIdentities.encode(identities(r)))
         put("refund_provider", r.bill.refund?.provider);put("refund_original", r.bill.refund?.originalAmountCents)
         put("refund_amount", r.bill.refund?.refundedCents);put("refund_mode",r.bill.refund?.mode);put("refund_id",r.bill.refund?.refundId)
@@ -1165,7 +1649,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             ParsedBill(optionalNumber("amount"), optionalText("direction")?.let(Direction::valueOf),
                 text("merchant"), text("category"), number("occurred_at"), optionalText("transaction_id"),
                 number("reliable") == 1L, text("reason"), number("time_explicit") == 1L,
-                optionalText("refund_provider")?.let { RefundInfo(it,number("refund_original"),number("refund_amount"),text("refund_mode"),optionalText("refund_id")) }),
+                optionalText("refund_provider")?.let { RefundInfo(it,number("refund_original"),number("refund_amount"),text("refund_mode"),optionalText("refund_id")) },
+                standaloneRefund=c.getColumnIndex("standalone_refund").takeIf { it>=0 && !c.isNull(it) }?.let { decodeStandaloneRefund(c.getString(it)) }),
             RecordState.valueOf(text("state")), text("reason"), optionalNumber("duplicate_id"), text("note"),
             TransactionIdentities.decode(text("transaction_identities")))
     }

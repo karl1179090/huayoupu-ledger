@@ -27,12 +27,77 @@ import net.ankio.ledger.core.Direction
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.core.Source
 import net.ankio.ledger.data.IngestResult
+import net.ankio.ledger.data.LedgerAccount
+import org.junit.Before
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class LocalRecognitionClientTest {
+    private var previousDefault: String? = null
+    private var testWallet: LedgerAccount? = null
+    @Before fun prepareSyntheticWallet() {
+        val app = ApplicationProvider.getApplicationContext<LedgerApp>()
+        previousDefault = app.store.walletSettings().defaultAccountUid
+        testWallet = app.store.saveAccount(LedgerAccount(name = "本地OCR合成钱包", amountCents = 100000))
+        app.store.setDefaultWallet(testWallet!!.uid)
+    }
+    @After fun restoreWalletSetting() {
+        val app = ApplicationProvider.getApplicationContext<LedgerApp>()
+        app.store.setDefaultWallet(previousDefault)
+        testWallet?.let { app.store.archiveAccount(it.id) }
+    }
+    @Test fun realOcrBankEvidenceAndFullRefundReachTheSameWalletTransaction() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<LedgerApp>()
+        val before = app.store.all().map { it.id }.toSet()
+        val card = app.store.saveAccount(LedgerAccount(name = "合成招商卡", kind = "bank", bankCode = "cmb", cardLast4 = "0007", amountCents = 20000))
+        val wechat = app.store.saveAccount(LedgerAccount(name = "合成微信", kind = "wechat", amountCents = 20000))
+        val taskIds = mutableListOf<Long>()
+        suspend fun recognize(refund: Boolean): IngestResult {
+            val bitmap = Bitmap.createBitmap(1080, 1800, Bitmap.Config.ARGB_8888)
+            val bytes = try {
+                val canvas = Canvas(bitmap); canvas.drawColor(Color.WHITE)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; typeface = Typeface.create("sans-serif", Typeface.NORMAL) }
+                fun text(value: String, x: Float, y: Float, size: Float = 40f) { paint.textSize = size; canvas.drawText(value, x, y, paint) }
+                text("微信支付", 390f, 160f, 60f)
+                text(if (refund) "已全额退款" else "支付成功", 370f, 300f, 60f)
+                text("合成咖啡店", 360f, 430f, 58f)
+                if (!refund) text("-100.00", 330f, 620f, 100f)
+                else { text("原付款金额", 70f, 600f); text("100.00元", 600f, 600f); text("累计退款", 70f, 730f); text("100.00元", 600f, 730f) }
+                text(if (refund) "原支付时间" else "支付时间", 70f, 950f)
+                text("2026-11-05 12:00:00", 440f, 950f)
+                text(if (refund) "原交易单号" else "交易单号", 70f, 1100f)
+                text("202611051234567890123456", 380f, 1100f, 35f)
+                text("付款方式", 70f, 1270f); text("招商银行 (0007)", 440f, 1270f)
+                encode(bitmap)
+            } finally { bitmap.recycle() }
+            val task = app.tasks.create(Source.IMAGE, "image").also(taskIds::add)
+            return CaptureProcessor(app).processPrepared(bytes, Source.IMAGE, "com.tencent.mm", task) { true }
+        }
+        try {
+            val paid = recognize(false) as IngestResult.Saved
+            assertEquals(RecordState.POSTED, paid.record.state)
+            assertEquals(card.uid, paid.record.wallet!!.accountUid)
+            assertEquals(10000L, app.store.getAccount(card.id)!!.amountCents)
+            assertEquals(20000L, app.store.getAccount(wechat.id)!!.amountCents)
+            val refunded = recognize(true) as IngestResult.Saved
+            assertEquals(paid.record.id, refunded.record.id)
+            assertEquals(0L, refunded.record.bill.amountCents)
+            assertEquals(card.uid, refunded.record.wallet!!.accountUid)
+            assertEquals(20000L, app.store.getAccount(card.id)!!.amountCents)
+            assertEquals("SUCCEEDED", app.tasks.status(taskIds.last()))
+            assertEquals("退款已更新", app.tasks.snapshot().let { rows -> (0 until rows.length()).map { rows.getJSONObject(it) }
+                .single { it.getLong("id") == taskIds.last() }.getString("message") })
+            recognize(true)
+            assertEquals(20000L, app.store.getAccount(card.id)!!.amountCents)
+        } finally {
+            taskIds.forEach(app.tasks::delete)
+            app.store.all().filter { it.id !in before }.forEach { app.store.delete(it.id) }
+            app.store.archiveAccount(card.id); app.store.archiveAccount(wechat.id)
+        }
+    }
     @Test fun cancelledQueuedImageNeverDecodesPixels()=runBlocking {
         val image=Bitmap.createBitmap(1800,1800,Bitmap.Config.ARGB_8888)
         val truncated=try {

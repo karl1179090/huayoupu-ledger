@@ -24,10 +24,16 @@ open class ScreenCaptureService:AccessibilityService() {
     @Volatile private var requestId=0L
     private val banner by lazy { RecognitionBanner(this) }
     private val knownWindows=java.util.concurrent.ConcurrentHashMap<Int,String>()
+    private val knownWindowTypes=java.util.concurrent.ConcurrentHashMap<Int,Int>()
+    private data class ForegroundMetadata(val windowId:Int?,val generation:Long)
+    @Volatile private var foregroundMetadata:ForegroundMetadata?=null
+    private val foregroundSwitch=java.util.concurrent.atomic.AtomicLong()
     private val windowProbe=CaptureProbe()
     private val rootProbe=CaptureProbe()
     private val paymentMonitor by lazy { PaymentPageMonitor(this,::captureAutomatic) }
     internal var processorFactory:()->CaptureProcessor={ CaptureProcessor(ledger) }
+    internal var beforeScreenshot:suspend ()->Unit={}
+    internal var beforeShakeOwner:suspend ()->Unit={}
     @Volatile private var activeAutomatic:Boolean?=null
     @Volatile private var activePackage:String?=null
     @Volatile private var cacheMode="platform_default"
@@ -35,18 +41,26 @@ open class ScreenCaptureService:AccessibilityService() {
     @Volatile private var runtimeRestoreNotBefore=0L
     @Volatile private var runtimeRestoreAttempts=0L
     @Volatile private var runtimeRestoreOutcome="not_requested"
-    private var lastScreenshotAt=0L
+    @Volatile private var lastScreenshotAt=0L
     private val paymentBoot by lazy { runCatching {
         android.provider.Settings.Global.getString(contentResolver,android.provider.Settings.Global.BOOT_COUNT)
             ?.toLongOrNull()?.takeIf { it>=0 }?.toString()
     }.getOrNull()?:java.util.UUID.randomUUID().toString() }
     @Volatile internal var screenshotRequests=0L;private set
+    @Volatile internal var lastScreenshotWindowId:Int?=null;private set
+    private val shakeAttempts=java.util.concurrent.atomic.AtomicLong()
+    @Volatile private var shakeDecision="{}"
     private class PrivacyBlocked(val userMessage:String="页面暂不可读，请稍后再试"):Exception()
 
     override fun onAccessibilityEvent(event:AccessibilityEvent?) {
         if(event==null || !ledger.channels.captureEnabled())return
-        if(event.eventType==AccessibilityEvent.TYPE_WINDOWS_CHANGED && event.windowChanges and AccessibilityEvent.WINDOWS_CHANGE_REMOVED!=0)
+        val foreground=foregroundMetadata?.takeIf { it.generation==foregroundSwitch.get() }?.windowId
+        if(shakeWindowEventChangesTarget(event.eventType,event.windowChanges,event.windowId,
+                foreground,knownWindowTypes[event.windowId]))foregroundSwitch.incrementAndGet()
+        if(event.eventType==AccessibilityEvent.TYPE_WINDOWS_CHANGED && event.windowChanges and AccessibilityEvent.WINDOWS_CHANGE_REMOVED!=0) {
             knownWindows.remove(event.windowId)
+            knownWindowTypes.remove(event.windowId)
+        }
         if(event.eventType in setOf(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,AccessibilityEvent.TYPE_WINDOWS_CHANGED)) {
             val pkg=event.packageName?.toString()
             if(CapturePrivacy.manualPackageAllowed(pkg) && event.windowId>=0) {
@@ -81,16 +95,19 @@ open class ScreenCaptureService:AccessibilityService() {
     }
     override fun onServiceConnected() {
         knownWindows.clear()
-        serviceInfo=serviceInfo.apply {
+        knownWindowTypes.clear()
+        foregroundMetadata=null
+        val configuration=serviceInfo?:return
+        serviceInfo=configuration.apply {
             // Alipay groups the result description and hides its individual status/amount
             // nodes from the default tree. Read those nodes before the existing privacy gate.
             flags=flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
                 AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
             eventTypes=AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOWS_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         }
+        current=this
         refreshScope()
         if(Build.VERSION.SDK_INT>=33)cacheMode=if(runCatching { setCacheEnabled(false) }.getOrDefault(false))"disabled" else "disable_failed"
-        current=this
         CaptureRuntime.attach(this)
         CaptureRuntime.refreshHealth()
         // The OS may rebind accessibility while our Activity is closed after reclaiming
@@ -113,15 +130,26 @@ open class ScreenCaptureService:AccessibilityService() {
         ledger.captureQueue.resume()
         ledger.changed()
     }
-    private suspend fun windowSnapshot(timeout:Long=180):CaptureProbeResult<List<CaptureWindow>> = windowProbe.readResult(timeout) {
-        val available=windows
-        try { available.map { CaptureWindow(it.id,it.type,it.isActive,it.isFocused,it.layer,null,it.isInPictureInPictureMode) } }
-        finally { available.forEach { it.recycle() } }
+    private suspend fun windowSnapshot(timeout:Long=180):CaptureProbeResult<List<CaptureWindow>> {
+        val generation=foregroundSwitch.get()
+        val result=windowProbe.readResult(timeout) {
+            val available=windows
+            try { available.map {
+                knownWindowTypes[it.id]=it.type
+                CaptureWindow(it.id,it.type,it.isActive,it.isFocused,it.layer,null,it.isInPictureInPictureMode)
+            }.also { if(knownWindowTypes.size>128)knownWindowTypes.keys.retainAll(it.map { value -> value.id }.toSet()) } }
+            finally { available.forEach { it.recycle() } }
+        }
+        // Use only an on-time metadata result. A late Binder response must not
+        // replace the foreground identity used to classify subsequent events.
+        foregroundMetadata=result.value?.takeIf { foregroundSwitch.get()==generation }?.let { ForegroundMetadata(selectCaptureWindow(it)?.id,generation) }
+        return result
     }
-    private suspend fun foregroundPackage(trace:(String)->Unit):String? {
+    private suspend fun foregroundObservation(trace:(String)->Unit):ShakeWindowObservation {
+        val switch=foregroundSwitch.get()
         val snapshot=windowSnapshot(700)
         val metadata=snapshot.value
-        if(metadata==null) { trace("windows=${snapshot.outcome}; cache=$cacheMode");return null }
+        if(metadata==null) { trace("windows=${snapshot.outcome}; cache=$cacheMode");return ShakeWindowObservation(null,switch,null) }
         if(metadata.isNotEmpty())knownWindows.keys.retainAll(metadata.map { it.id }.toSet())
         val selected=selectCaptureWindow(metadata)
         var detail="windows=${metadata.size}; selected=${selected?.id}; type=${selected?.type}; focused=${selected?.focused}; active=${selected?.active}; event=${selected?.id?.let { knownWindows[it] }}; cache=$cacheMode"
@@ -145,20 +173,29 @@ open class ScreenCaptureService:AccessibilityService() {
         if(selected?.type==AccessibilityWindowInfo.TYPE_APPLICATION && CapturePrivacy.manualPackageAllowed(owner))
             knownWindows[selected.id]=owner!!
         trace("$detail; owner=${owner?:"unavailable"}")
-        return owner
+        return if(foregroundSwitch.get()!=switch)ShakeWindowObservation(null,foregroundSwitch.get(),null)
+            else ShakeWindowObservation(selected?.id,switch,owner)
     }
-    private suspend fun currentTarget(pkg:String,expectedWindow:Int?=null):CaptureWindow? {
+    /** Metadata-only observation for native readiness checks; never traverses page content. */
+    internal suspend fun observeShakeWindow():ShakeWindowObservation=foregroundObservation {}
+    private suspend fun currentTarget(pkg:String,expectedWindow:Int?=null,expectedSwitch:Long?=null):CaptureWindow? {
+        if(expectedSwitch!=null && foregroundSwitch.get()!=expectedSwitch)return null
         val metadata=windowSnapshot().value?:return null
         val selected=selectCaptureWindow(metadata)?:return null
         if(selected.type!=AccessibilityWindowInfo.TYPE_APPLICATION || !selected.active && !selected.focused)return null
         if(expectedWindow!=null && selected.id!=expectedWindow)return null
-        return selected.takeIf { knownWindows[it.id]==pkg }
+        return selected.takeIf { knownWindows[it.id]==pkg && (expectedSwitch==null || foregroundSwitch.get()==expectedSwitch) }
     }
 
     private fun cancelAcquisition() {
         requestId++;job?.cancel();job=null;busy.set(false);activeAutomatic=null;activePackage=null;banner.close()
     }
     fun cancelRecognition() { cancelAcquisition();ledger.captureQueue.cancelAll() }
+    fun cancelShakeRecognition(packageName:String?=null) {
+        if(activeAutomatic==false && (packageName==null || activePackage==packageName))cancelAcquisition()
+        ledger.captureQueue.cancelShake(packageName)
+        refreshScope()
+    }
     fun cancelAutomaticRecognition(packageName:String?=null) {
         if(activeAutomatic==true && (packageName==null || activePackage==packageName))cancelAcquisition()
         ledger.captureQueue.cancelAutomatic(packageName)
@@ -180,7 +217,11 @@ open class ScreenCaptureService:AccessibilityService() {
         cancelAcquisition();paymentMonitor.stop()
     }
     fun refreshScope() {
-        serviceInfo=serviceInfo.apply {
+        // The OS can clear the connection before onUnbind clears current. Consent
+        // cancellation still runs then; an unbound service has no scope to update.
+        if(current!==this)return
+        val configuration=serviceInfo?:return
+        serviceInfo=configuration.apply {
             // Android filters package-less TYPE_WINDOWS_CHANGED out when packageNames
             // is set. Those system events are needed when an activity is announced
             // before its window can be queried. Receive their metadata, then enforce
@@ -194,6 +235,7 @@ open class ScreenCaptureService:AccessibilityService() {
     internal fun automaticCaptureAvailable()=!busy.get() && ledger.captureQueue.hasCapacity()
     fun paymentDiagnostics()=paymentMonitor.diagnostics()
         .put("feedback",banner.diagnostics())
+        .put("shake",org.json.JSONObject(shakeDecision))
         .put("captureBusy",busy.get()).put("queueSize",ledger.captureQueue.size())
         .put("runtimeRestore",org.json.JSONObject().put("attempts",runtimeRestoreAttempts)
             .put("outcome",runtimeRestoreOutcome)
@@ -214,63 +256,113 @@ open class ScreenCaptureService:AccessibilityService() {
     private fun capture(trigger:ShakeTrigger,page:PaymentMatch?=null) {
         val automatic=page!=null
         val channel=ChannelSettings.Channel.OCR
+        val attempt=if(automatic)0 else shakeAttempts.incrementAndGet()
+        fun note(outcome:String,window:Int?=null,detail:String="") {
+            if(!automatic && shakeAttempts.get()==attempt)shakeDecision=org.json.JSONObject().put("attempt",attempt)
+                .put("outcome",outcome).put("window",window?:org.json.JSONObject.NULL)
+                .put("switchGeneration",foregroundSwitch.get()).put("eventAgeMs",SystemClock.elapsedRealtime()-trigger.eventAtMs)
+                .put("detail",detail.take(200)).toString()
+        }
+        note("received")
         if(!trigger.freshAt(SystemClock.elapsedRealtime()))return
         val enabled=if(automatic)ledger.channels.autoAllowed(page!!.packageName) else ledger.channels.enabled(channel)
         if(!CaptureRuntime.running || !enabled)return
-        if(!automatic && !ledger.channels.permitted(channel)) { ledger.captureHealth.blocked();return }
-        if(!ledger.captureQueue.hasCapacity()) { if(!automatic)feedback("待识别账单较多，请稍候再摇一摇");return }
-        if(!busy.compareAndSet(false,true)) { if(!automatic)feedback("正在获取上一张账单，请稍候");return }
-        activeAutomatic=automatic;activePackage=page?.packageName
-        val generation=if(automatic)ledger.channels.automaticGeneration(page!!.packageName) else ledger.channels.generation(channel)
+        if(!automatic && (ledger.channels.selectedShakePackages().isEmpty() || !screenUnlocked()))return
+        val consent=if(automatic)null else synchronized(ledger.channels) {
+            ledger.channels.shakeMasterGeneration() to ledger.channels.selectedShakePackages().associateWith(ledger.channels::shakeApplicationGeneration)
+        }
+        val generation=if(automatic)ledger.channels.automaticGeneration(page!!.packageName) else consent!!.first
         val recognitionGeneration=ledger.recognitionSession.generation
-        val id=++requestId
-        fun allowed()=requestId==id && CaptureRuntime.running && ledger.channels.permitted(channel) && ledger.recognitionSession.generation==recognitionGeneration &&
-            if(automatic)ledger.channels.autoAllowed(page!!.packageName) && ledger.channels.automaticGeneration(page.packageName)==generation
-            else ledger.channels.enabled(channel) && ledger.channels.generation(channel)==generation
-        job=ledger.scope.launch {
+        val initialSwitch=foregroundSwitch.get()
+        val initialRequest=requestId
+        // Bind to metadata observed during THIS trigger, before dispatch to the application
+        // scope. The bounded Binder worker keeps an unavailable window from blocking sensors.
+        val initialObservation=if(automatic)null else {
+            val result=runBlocking { windowSnapshot(120) }
+            val metadata=result.value?:run { note("initial_metadata_unavailable",detail=result.outcome);return }
+            val selected=selectCaptureWindow(metadata)?:run { note("initial_window_unavailable");return }
+            if(selected.type!=AccessibilityWindowInfo.TYPE_APPLICATION || foregroundSwitch.get()!=initialSwitch || !trigger.freshAt(SystemClock.elapsedRealtime())) {
+                note("initial_window_changed",selected.id,"type=${selected.type}; expectedSwitch=$initialSwitch");return
+            }
+            val owner=captureForegroundPackage(metadata,null,knownWindows.toMap())
+            if(owner!=null && (owner !in consent!!.second || !ledger.channels.shakeAllowed(owner))) { note("application_not_selected",selected.id);return }
+            note("initial_window_bound",selected.id)
+            ShakeWindowObservation(selected.id,initialSwitch,owner)
+        }
+        ledger.scope.launch {
+            val observations=linkedSetOf<String>()
+            val windowDetails=linkedSetOf<String>()
+            if(!automatic)beforeShakeOwner()
+            note("owner_check_started",initialObservation?.windowId)
+            // Resolve the foreground BEFORE queue/busy feedback or any content read. A known
+            // unselected owner returns immediately; an unknown owner is tied to one window.
+            var firstObservation=true
+            val observed=if(automatic)null else resolveShakeTarget({
+                if(foregroundSwitch.get()!=initialSwitch || requestId!=initialRequest || !trigger.freshAt(SystemClock.elapsedRealtime()))
+                    ShakeWindowObservation(null,foregroundSwitch.get(),null)
+                else if(firstObservation) { firstObservation=false;initialObservation!! }
+                else foregroundObservation { windowDetails.add(it) }.also { observations.add(it.packageName?:"unavailable") }
+            }) { pkg -> pkg in consent!!.second && ledger.channels.shakeAllowed(pkg) }?:if(!automatic) {
+                note("owner_rejected",initialObservation?.windowId);return@launch
+            } else null
+            val pkg=page?.packageName?:observed?.packageName?:return@launch
+            val authorization=if(automatic)null else ledger.channels.shakeAuthorization(pkg)?:return@launch
+            if(!automatic && (authorization!!.masterGeneration!=generation || authorization.applicationGeneration!=consent!!.second[pkg] ||
+                    observed!!.switchGeneration!=initialSwitch || !screenUnlocked()))return@launch
+            if(!trigger.freshAt(SystemClock.elapsedRealtime()) || requestId!=initialRequest || ledger.recognitionSession.generation!=recognitionGeneration)return@launch
+            if(!ledger.captureQueue.hasCapacity()) { if(!automatic)feedback("待识别账单较多，请稍候再摇一摇");return@launch }
+            if(!busy.compareAndSet(false,true)) { if(!automatic)feedback("正在获取上一张账单，请稍候");return@launch }
+            activeAutomatic=automatic;activePackage=pkg
+            val id=++requestId
+            job=coroutineContext[Job]
+            fun allowed()=requestId==id && CaptureRuntime.running && ledger.channels.permitted(channel) && ledger.recognitionSession.generation==recognitionGeneration &&
+                if(automatic)ledger.channels.autoAllowed(pkg) && ledger.channels.automaticGeneration(pkg)==generation
+                else authorization!=null && ledger.channels.shakeAuthorized(authorization)
             var task:Long?=null
             var bitmap:Bitmap?=null
             var enqueued=false
-            val observations=linkedSetOf<String>()
-            val windowDetails=linkedSetOf<String>()
-            suspend fun readOwner():String?=foregroundPackage { windowDetails.add(it) }
             try {
                 val startAtMs=SystemClock.elapsedRealtime()
                 if(!trigger.freshAt(startAtMs) || !allowed())throw CancellationException()
                 // No acquisition banner or artificial delay before the frame: a result can vanish
                 // as soon as the user taps Done. Any progress banner is shown after persistence.
                 withContext(Dispatchers.Main) { banner.removeNow() }
-                val pkg=if(automatic)page!!.packageName else {
-                    var observed:String?=null
-                    resolveCaptureTarget { readOwner().also { observed=it;observations.add(it?:"unavailable") } }
-                        ?:throw RecognitionException(if(observed==null || observed=="com.android.systemui")"暂时无法确认账单窗口，请收起浮层并在账单页重试" else "当前不是已支持的应用，请进入账单详情页重试")
+                while(true) {
+                    val now=SystemClock.elapsedRealtime()
+                    val remaining=screenshotCooldownRemaining(Build.VERSION.SDK_INT,lastScreenshotAt,now)
+                    if(!allowed() || !trigger.freshAt(now) || !trigger.freshAt(now+remaining))throw CancellationException("本次摇动已失效")
+                    if(remaining==0L)break
+                    note("waiting_for_screenshot_interval",observed?.windowId)
+                    delay(remaining)
                 }
-                activePackage=pkg
-                val remaining=400L-(SystemClock.elapsedRealtime()-lastScreenshotAt)
-                if(lastScreenshotAt!=0L && remaining>0)delay(remaining)
-                if(!allowed())throw CancellationException()
-                val target=currentTarget(pkg,page?.windowId)
+                val target=currentTarget(pkg,page?.windowId?:observed?.windowId,observed?.switchGeneration)
                     ?:throw RecognitionException("页面正在切换，未获取本次截图，可打开账单详情摇一摇补录")
                 // A screenshot may NEVER be used as the probe that decides whether a page
                 // contains a password. Unknown/unreadable shared containers fail closed.
                 val manual=if(automatic)null else paymentMonitor.manualCheck(pkg,target.id)
+                note("page_checked",target.id,manual?.outcome.orEmpty())
                 if(manual?.value?.let(net.ankio.ledger.core.CapturePrivacy::sensitive)==true)
                     throw PrivacyBlocked("支付验证页，暂不截图")
                 val safe=if(automatic)paymentMonitor.confirms(page!!) else manual?.value?.let(net.ankio.ledger.core.CapturePrivacy::manualAllowed)==true
-                if(!safe || !allowed() || currentTarget(pkg,target.id)==null)throw PrivacyBlocked()
-                task=ledger.tasks.create(Source.OCR,if(automatic)"payment_auto:$pkg" else "shake:$pkg")
+                if(!safe)throw PrivacyBlocked()
+                if(!automatic)beforeScreenshot()
+                if(!allowed() || !trigger.freshAt(SystemClock.elapsedRealtime()) || currentTarget(pkg,target.id,observed?.switchGeneration)==null)throw CancellationException("采集窗口已经改变")
+                note("screenshot_authorized",target.id)
+                task=ledger.tasks.create(Source.OCR,if(automatic)"payment_auto:$pkg" else "shake:$pkg",authorization)
                 if(automatic)ledger.tasks.diagnose(task,"payment_identity","payment_page:$paymentBoot:${page!!.eventIdentity}")
                 ledger.tasks.diagnose(task,"trigger",(if(automatic)"payment_auto; " else "")+trigger.details(startAtMs))
                 ledger.changed()
                 ledger.tasks.diagnose(task,"stage","screenshot")
                 ledger.tasks.diagnose(task,"window","$pkg; id=${target.id}; automatic=$automatic")
-                lastScreenshotAt=SystemClock.elapsedRealtime()
-                bitmap=withTimeoutOrNull(4_000) { screenshot(if(Build.VERSION.SDK_INT>=34)target.id else null) }
+                bitmap=withTimeoutOrNull(4_000) { screenshot(if(Build.VERSION.SDK_INT>=34)target.id else null) {
+                    allowed() && trigger.freshAt(SystemClock.elapsedRealtime()) &&
+                        (automatic || screenUnlocked() && foregroundSwitch.get()==observed?.switchGeneration)
+                } }
                     ?:throw RecognitionException("系统截图响应超时，请检查无障碍状态后重试")
                 if(!allowed())throw CancellationException()
                 // A specified-window frame belongs to the validated target even if the user has
                 // returned since acquisition. Legacy full-display capture needs a second owner check.
-                if(Build.VERSION.SDK_INT<34 && currentTarget(pkg,target.id)==null)
+                if(Build.VERSION.SDK_INT<34 && currentTarget(pkg,target.id,observed?.switchGeneration)==null)
                     throw RecognitionException("页面已经切换，本次截图未发送，可打开详情摇一摇补录")
                 if(automatic)ledger.tasks.diagnose(task,"capture_context","payment_success_result:${System.currentTimeMillis()}")
                 ledger.tasks.diagnose(task,"timing","captured_age_ms=${SystemClock.elapsedRealtime()-trigger.eventAtMs}")
@@ -280,11 +372,13 @@ open class ScreenCaptureService:AccessibilityService() {
                 ledger.tasks.diagnose(task,"window_details",windowDetails.toList().takeLast(2).joinToString(" | "))
                 val feedbackTask=task
                 enqueued=ledger.captureQueue.enqueue(task,pkg,automatic,processorFactory) { message,loading ->
-                    feedback(message,loading,if(!loading && message.startsWith("已记账"))ledger.tasks.recordId(feedbackTask) else null)
+                    feedback(message,loading,if(!loading && (message.startsWith("已记账") || message=="退款已更新"))ledger.tasks.recordId(feedbackTask) else null)
                 }
                 if(!enqueued)throw RecognitionException("识别任务较多，请稍后重新摇一摇补录")
+                note("queued",target.id)
                 ledger.changed()
             } catch(blocked:PrivacyBlocked) {
+                note("privacy_blocked",observed?.windowId)
                 if(page!=null)paymentMonitor.rejectFrame(page)
                 task?.let(ledger.tasks::delete)
                 ledger.executionLog.event(if(automatic)"payment_auto" else "ocr","capture","privacy_skipped")
@@ -292,9 +386,11 @@ open class ScreenCaptureService:AccessibilityService() {
                 // without acquiring pixels or leaving a failed financial record behind.
                 if(!automatic && allowed())feedback(blocked.userMessage)
             } catch(cancelled:CancellationException) {
+                note("cancelled",observed?.windowId)
                 if(page!=null && !enqueued)paymentMonitor.rejectFrame(page)
                 if(!enqueued)task?.let { ledger.tasks.update(it,"CANCELLED","识别已停止，未新增账单");ledger.changed() }
             } catch(error:Exception) {
+                note("failed",observed?.windowId,(error as? RecognitionException)?.userMessage?:error.javaClass.simpleName)
                 if(page!=null && !enqueued)paymentMonitor.rejectFrame(page)
                 val message=(error as? RecognitionException)?.userMessage?:"获取截图失败，请在账单详情页重试"
                 ledger.executionLog.event(if(automatic)"payment_auto" else channel.key,"capture","failed",org.json.JSONObject().put("message",message).put("errorType",error.javaClass.simpleName))
@@ -310,10 +406,12 @@ open class ScreenCaptureService:AccessibilityService() {
             }
         }
     }
-    private suspend fun screenshot(windowId:Int?):Bitmap=suspendCancellableCoroutine { continuation ->
-        screenshotRequests++
+    private fun screenUnlocked()=getSystemService(android.os.PowerManager::class.java).isInteractive &&
+        !getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
+    private suspend fun screenshot(windowId:Int?,allowed:()->Boolean):Bitmap=suspendCancellableCoroutine { continuation ->
         val callback=object:TakeScreenshotCallback {
             override fun onSuccess(result:ScreenshotResult) {
+                lastScreenshotAt=SystemClock.elapsedRealtime()
                 val buffer=result.hardwareBuffer
                 val image=try { Bitmap.wrapHardwareBuffer(buffer,result.colorSpace)?.let { hardware ->
                     try { hardware.copy(Bitmap.Config.ARGB_8888,false) } finally { hardware.recycle() }
@@ -323,14 +421,23 @@ open class ScreenCaptureService:AccessibilityService() {
                 else continuation.resume(image) { _,value,_ -> value.recycle() }
             }
             override fun onFailure(errorCode:Int) {
+                lastScreenshotAt=SystemClock.elapsedRealtime()
                 if(continuation.isActive)continuation.resumeWithException(
                     if(errorCode==ERROR_TAKE_SCREENSHOT_SECURE_WINDOW)PrivacyBlocked("当前页面受系统保护，未获取截图；请使用账单截图导入")
                     else RecognitionException("当前页面无法截图（系统代码 $errorCode），请尝试导入截图"))
             }
         }
         try {
-            if(Build.VERSION.SDK_INT>=34 && windowId!=null)takeScreenshotOfWindow(windowId,mainExecutor,callback)
-            else takeScreenshot(Display.DEFAULT_DISPLAY,mainExecutor,callback)
+            synchronized(ledger.channels) {
+                if(!allowed())continuation.cancel(CancellationException("截图授权已改变"))
+                else {
+                    lastScreenshotAt=SystemClock.elapsedRealtime()
+                    screenshotRequests++
+                    lastScreenshotWindowId=windowId
+                    if(Build.VERSION.SDK_INT>=34 && windowId!=null)takeScreenshotOfWindow(windowId,mainExecutor,callback)
+                    else takeScreenshot(Display.DEFAULT_DISPLAY,mainExecutor,callback)
+                }
+            }
         } catch(_:Exception) {
             if(continuation.isActive)continuation.resumeWithException(RecognitionException("无法获取截图，请检查无障碍状态"))
         }
@@ -345,7 +452,7 @@ open class ScreenCaptureService:AccessibilityService() {
     override fun onInterrupt() { cancelAcquisition() }
     private fun releaseConnection() {
         connectionRestore?.cancel();connectionRestore=null
-        captureServiceStopped();knownWindows.clear()
+        captureServiceStopped();knownWindows.clear();knownWindowTypes.clear();foregroundMetadata=null
         ledger.captureHealth.suspendForMissingPermission()
         CaptureRuntime.detach(this)
         if(current===this)current=null
@@ -358,3 +465,19 @@ open class ScreenCaptureService:AccessibilityService() {
         @Volatile var current:ScreenCaptureService?=null;private set
     }
 }
+
+/** Removal of an already-background window cannot replace the confirmed foreground. */
+internal fun shakeWindowEventChangesTarget(eventType:Int,changes:Int,windowId:Int,foregroundWindow:Int?,windowType:Int?):Boolean {
+    if(windowType==AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY)return false
+    if(eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)return true
+    if(eventType!=AccessibilityEvent.TYPE_WINDOWS_CHANGED)return false
+    if(changes and (AccessibilityEvent.WINDOWS_CHANGE_ACTIVE or AccessibilityEvent.WINDOWS_CHANGE_FOCUSED or AccessibilityEvent.WINDOWS_CHANGE_ADDED)!=0)return true
+    return changes and AccessibilityEvent.WINDOWS_CHANGE_REMOVED!=0 && (foregroundWindow==null || windowId==foregroundWindow)
+}
+
+/** AOSP rejects elapsed <=1000ms on API 30, and <=333ms from API 31 onward.
+ * https://android.googlesource.com/platform/frameworks/base/+/android-11.0.0_r1/core/java/android/accessibilityservice/AccessibilityService.java
+ * https://android.googlesource.com/platform/frameworks/base/+/android-12.0.0_r1/core/java/android/accessibilityservice/AccessibilityService.java
+ * Keep a margin and measure from the callback, after the system received the last request. */
+internal fun screenshotCooldownRemaining(sdk:Int,lastAt:Long,now:Long):Long =
+    if(lastAt==0L)0L else ((if(sdk==30)1_100L else 400L)-(now-lastAt)).coerceAtLeast(0)

@@ -218,6 +218,8 @@
        <input aria-label="交易时间" id="occurred-at" type="hidden"/>
       </div>
       <p id="refund-summary" class="refund-summary" hidden=""></p>
+      <button type="button" id="record-wallet" class="wallet-choice" onclick="chooseWallet('record')"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>选择钱包</span><span class="chevron">›</span></button>
+      <p id="wallet-explanation" class="wallet-explanation"></p>
       <div class="form-row edit note-row">
        <i class="fa-regular fa-address-book">
        </i>
@@ -320,6 +322,7 @@
        ›
       </span>
      </button>
+     <button id="shake-applications" class="wallet-choice" onclick="openShakeWhitelist()"><i class="fa-solid fa-list-check" aria-hidden="true"></i><span>应用白名单</span><small id="shake-application-count">请选择应用</small><span class="chevron">›</span></button>
     </section>
     <section class="card account-preferences" aria-label="账户与偏好">
      <button id="backup"><i aria-hidden="true" class="fa-solid fa-folder-open"></i><b>账单与备份</b><span class="chevron">›</span></button>
@@ -399,6 +402,7 @@
         0/500
        </span>
       </label>
+      <button type="button" id="manual-wallet" class="wallet-choice" onclick="chooseWallet('manual')"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>选择钱包</span><span class="chevron">›</span></button>
      </section>
      <section class="entry-import">
       <button aria-label="导入支付截图" onclick="newDraft();go('import');pickImage()" type="button">
@@ -600,7 +604,7 @@
       <span>
        总资产（净资产）
       </span>
-      <button aria-label="净资产说明" class="muted" onclick="notify('净资产 = 总资产 − 总负债；余额由你手动维护')">
+      <button aria-label="净资产说明" class="muted" onclick="notify('净资产 = 总资产 − 总负债，含归档账户；新账单自动更新余额，可手动校准')">
        ⓘ
       </button>
      </div>
@@ -616,7 +620,8 @@
      <span id="account-count">
      </span>
     </div>
-    <p class="asset-maintenance">余额手动更新，与账本收支独立</p>
+    <p class="asset-maintenance">新账单自动更新余额，可手动校准</p>
+    <button id="wallet-settings" class="wallet-choice card" onclick="showWalletSettings()"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>默认钱包与应用绑定</span><span class="chevron">›</span></button>
     <div id="accounts">
     </div>
     <nav aria-label="主导航" class="bottom-nav">

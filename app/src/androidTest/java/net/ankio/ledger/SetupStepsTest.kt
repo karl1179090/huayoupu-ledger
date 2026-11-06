@@ -15,6 +15,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SetupStepsTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
     @Test fun localDefaultOpensSharedPermissionFlowWithoutModelConfiguration() {
         val previous=app.channels.enabled(ChannelSettings.Channel.OCR)

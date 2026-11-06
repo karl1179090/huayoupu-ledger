@@ -4,15 +4,19 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.core.app.ApplicationProvider
 import androidx.lifecycle.Lifecycle
+import android.content.Intent
+import android.os.SystemClock
 import net.ankio.ledger.ui.MainActivity
 import net.ankio.ledger.core.*
 import net.ankio.ledger.data.LedgerRecord
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AssetBankUiTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     @Test fun blankNameUsesAccountKindAndMissingBalanceExplainsTheRequiredField() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>();val before=app.store.accounts().map { it.id }.toSet()
         try { ActivityScenario.launch(MainActivity::class.java).use { scenario ->
@@ -24,14 +28,14 @@ class AssetBankUiTest {
             val saved=app.store.accounts().last { it.kind=="wechat" && it.amountCents==0L }
             assertEquals("微信",saved.name)
             for((kind,name) in listOf("bank_ccb" to "建设银行","custom" to "其他账户")) {
-                ui.run("editAccount();document.querySelector('#account-kind').value='${if(kind.startsWith("bank_"))"bank" else kind}';document.querySelector('#account-kind').dispatchEvent(new Event('change'));document.querySelector('#account-bank').value='$kind';document.querySelector('#account-name').value='';document.querySelector('#account-amount').value='-1';document.querySelector('#account-form').requestSubmit()")
+                ui.run("editAccount();document.querySelector('#account-kind').value='${if(kind.startsWith("bank_"))"bank" else kind}';document.querySelector('#account-kind').dispatchEvent(new Event('change'));document.querySelector('#account-bank').value='$kind';document.querySelector('#account-name').value='';document.querySelector('#account-amount').value='-1.234';document.querySelector('#account-form').requestSubmit()")
                 ui.await("document.querySelector('#account-amount').getAttribute('aria-invalid')==='true'")
                 assertEquals(before.size+if(kind=="bank_ccb")1 else 2,app.store.accounts().size)
                 ui.run("document.querySelector('#account-amount').value='12.34';document.querySelector('#account-form').requestSubmit()")
                 ui.await("!document.querySelector('#sheet').open")
                 assertEquals(name,app.store.accounts().last { it.kind==kind && it.id !in before }.name)
             }
-        } } finally {app.store.accounts().filter { it.id !in before }.forEach { app.store.deleteAccount(it.id) };app.changed()}
+        } } finally {app.store.accounts().filter { it.id !in before }.forEach { removeSyntheticAccount(it.id) };app.changed()}
     }
     @Test fun pausedActivityDoesNotRebuildInvisibleLedgerOnRevision() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
@@ -40,7 +44,12 @@ class AssetBankUiTest {
             web.run("window.__backgroundRefreshes=0;window.__originalLedgerEvent=LedgerUI.event;LedgerUI.event=function(type,data){if(type==='refresh')window.__backgroundRefreshes++;return window.__originalLedgerEvent(type,data)}")
             var activity:MainActivity?=null
             scenario.onActivity { activity=it }
-            scenario.moveToState(Lifecycle.State.CREATED)
+            // Exercise a real background transition. AndroidX's separate EmptyActivity
+            // cannot reliably deliver its finish broadcast when resuming this test APK.
+            scenario.onActivity { it.startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            val deadline=SystemClock.elapsedRealtime()+5000
+            while(scenario.state!=Lifecycle.State.CREATED && SystemClock.elapsedRealtime()<deadline)SystemClock.sleep(20)
+            assertEquals(Lifecycle.State.CREATED,scenario.state)
             val latch=java.util.concurrent.CountDownLatch(1)
             var count=""
             androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().runOnMainSync {
@@ -52,8 +61,12 @@ class AssetBankUiTest {
             }
             assertTrue(latch.await(5,java.util.concurrent.TimeUnit.SECONDS))
             assertEquals("0",count)
-            scenario.moveToState(Lifecycle.State.RESUMED)
+            app.startActivity(Intent(activity!!.intent).apply {
+                removeFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            })
             web.await("window.__backgroundRefreshes>0")
+            scenario.onActivity { assertSame("Return to the same backgrounded Activity",activity,it) }
         }
     }
 
@@ -71,7 +84,7 @@ class AssetBankUiTest {
             web.run("editAccount($id)")
             assertEquals("bank_bocom",web.text("document.querySelector('#account-bank').value"))
             web.await("document.querySelector('#account-preview .account-bank-logo')?.naturalWidth>0")
-        } } finally { if(id>0)app.store.deleteAccount(id);app.changed() }
+        } } finally { if(id>0)removeSyntheticAccount(id);app.changed() }
     }
 
     @Test fun bankSelectionIsDependentAndPreservesCustomName() {
@@ -105,5 +118,17 @@ class AssetBankUiTest {
             web.run("closeSheet();filter='income';viewKey='';refresh()")
             assertEquals("¥ +22.50",web.text("document.querySelector('.entry-amount').textContent"))
         } } finally { app.store.delete(record.id);app.changed() }
+    }
+    private fun removeSyntheticAccount(id:Long) {
+        val app=ApplicationProvider.getApplicationContext<LedgerApp>()
+        val account=app.store.getAccount(id)?:return
+        synchronized(app.store) {
+            val db=app.store.writableDatabase
+            assertFalse("Synthetic account must have no surviving bill references",db.rawQuery(
+                "SELECT 1 FROM record_wallet_links WHERE account_uid=? OR applied_account_uid=? LIMIT 1",arrayOf(account.uid,account.uid)).use { it.moveToFirst() })
+            // Opening a synthetic account with a nonzero balance now records calibration.
+            db.delete("wallet_movements","account_uid=?",arrayOf(account.uid))
+            app.store.deleteAccount(id)
+        }
     }
 }

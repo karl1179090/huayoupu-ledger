@@ -22,12 +22,13 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         factory:()->CaptureProcessor={CaptureProcessor(app)},feedback:(String,Boolean)->Unit={message,loading->deliver(id,message,loading)}):Boolean {
         if(jobs.containsKey(id))return true
         if(!hasCapacity())return false
-        val epoch=if(automatic)app.channels.automaticGeneration(pkg) else app.channels.generation(ChannelSettings.Channel.OCR)
+        val epoch=app.channels.automaticGeneration(pkg)
+        val shake=if(automatic)null else app.tasks.shakeAuthorization(id)?.takeIf { it.packageName==pkg }
         val recognitionEpoch=app.recognitionSession.generation
         fun allowed()=app.tasks.exists(id) && app.recognitionSession.generation==recognitionEpoch &&
             hasCapturePermission() &&
             if(automatic)app.channels.autoAllowed(pkg) && app.channels.automaticGeneration(pkg)==epoch
-            else app.channels.enabled(ChannelSettings.Channel.OCR) && app.channels.generation(ChannelSettings.Channel.OCR)==epoch
+            else shake!=null && app.channels.shakeAuthorized(shake)
         val work=app.scope.launch(start=CoroutineStart.LAZY) {
             try {
                 taskRecovery.await()
@@ -38,7 +39,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
                     val result=factory().processPrepared(image,Source.OCR,pkg,id,::allowed)
                     if(allowed()) {
                         var message=completedMessage(id,result)
-                        if(message.startsWith("已记账 ¥") && app.tasks.recordId(id)?.let { app.captureHealth.successful(it,pkg) }!=true)
+                        if((message.startsWith("已记账 ¥") || message=="退款已更新") && app.tasks.recordId(id)?.let { app.captureHealth.successful(it,pkg) }!=true)
                             message="账单已移除，未新增记账"
                         feedback(message,false)
                     }
@@ -70,8 +71,9 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             val record=linked?.let(app.store::get)
             when {
                 record==null || result is IngestResult.Saved && result.record.id!=linked -> "账单已移除，未新增记账"
-                record.state==net.ankio.ledger.core.RecordState.REVIEW -> "金额待核对，请打开账单"
+                record.state==net.ankio.ledger.core.RecordState.REVIEW -> if(record.wallet?.reviewCode=="WALLET_REQUIRED")"请选择钱包后入账" else record.reason.ifBlank { "金额待核对，请打开账单" }
                 record.state!=net.ankio.ledger.core.RecordState.POSTED || record.bill.amountCents==null -> "账单未入账，请重试"
+                result is IngestResult.Saved && result.updated && record.bill.refund!=null || app.tasks.message(id)=="退款已更新" -> "退款已更新"
                 else -> "已记账 ¥${net.ankio.ledger.core.Money.format(record.bill.amountCents!!)}"
             }
         }
@@ -79,8 +81,8 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         is IngestResult.Skipped -> result.message
     }
     private fun deliver(id:Long,message:String,loading:Boolean) {
-        val linked=if(!loading && message.startsWith("已记账 ¥"))app.tasks.recordId(id)?.takeIf { app.store.get(it)!=null } else null
-        val display=if(!loading && message.startsWith("已记账 ¥") && linked==null)"账单已移除，未新增记账" else message
+        val linked=if(!loading && (message.startsWith("已记账 ¥") || message=="退款已更新"))app.tasks.recordId(id)?.takeIf { app.store.get(it)!=null } else null
+        val display=if(!loading && (message.startsWith("已记账 ¥") || message=="退款已更新") && linked==null)"账单已移除，未新增记账" else message
         val service=ScreenCaptureService.current
         if(service!=null)service.showQueuedFeedback(display,loading,linked)
         else { app.channels.status(display);app.changed() }
@@ -95,7 +97,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             val automatic=origin.startsWith("payment_auto:")
             val pkg=origin.substringAfter(':',"")
             val allowed=if(automatic)app.channels.autoAllowed(pkg)
-                else net.ankio.ledger.core.CapturePrivacy.manualPackageAllowed(pkg) && origin.startsWith("shake:") && app.channels.enabled(ChannelSettings.Channel.OCR)
+                else origin.startsWith("shake:") && app.tasks.shakeAuthorization(id)?.let { it.packageName==pkg && app.channels.shakeAuthorized(it) }==true
             if(!allowed) { app.tasks.update(id,"CANCELLED","识别授权已关闭，未新增账单");continue }
             if(!hasCapacity())break
             if(feedback==null)enqueue(id,pkg,automatic,factory)
@@ -107,9 +109,9 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         app.tasks.pendingQueued().filter { (_,origin)->origin.startsWith("payment_auto:") && (pkg==null || origin=="payment_auto:$pkg") }
             .forEach { app.tasks.update(it.first,"CANCELLED","自动识别已关闭，未新增账单") }
     }
-    @Synchronized fun cancelShake() {
-        jobs.values.filter { !it.automatic }.forEach { it.job.cancel() }
-        app.tasks.pendingQueued().filter { it.second.startsWith("shake:") }.forEach { app.tasks.update(it.first,"CANCELLED","摇一摇已关闭，未新增账单") }
+    @Synchronized fun cancelShake(pkg:String?=null) {
+        jobs.values.filter { !it.automatic && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
+        app.tasks.pendingShake(pkg).forEach { app.tasks.update(it,"CANCELLED","摇一摇授权已关闭，未新增账单") }
     }
     fun cancelAll() { cancelAutomatic();cancelShake() }
     companion object { const val MAX_PENDING=8 }
