@@ -106,13 +106,13 @@ class WalletBackupTest {
         val target=store();LedgerBackup.restore(target,decoded)
         assertTrue(target.all().isEmpty());assertEquals(10000L,target.getAccountByUid(wallet.uid)!!.amountCents)
     }
-    @Test fun csvUsesDefaultIgnoresUntrustedSourceAndInvalidatesChangedPreview() {
+    @Test fun csvDefaultsToExcludedAndExplicitLinkingUsesDefaultWithoutTrustingSource() {
         val target=store();val app=account(target,10000,"wechat");val card=account(target,20000,"bank")
         target.setDefaultWallet(card.uid)
         val incoming=record().copy(capture=Capture(Source.OCR,"com.tencent.mm","",now))
         val document=LedgerCsvImport.Document("合成 CSV",listOf(incoming),emptyList(),1)
         val preview=LedgerCsvImport.preview(target,document)
-        assertEquals(card.uid,preview.walletImpacts.single().accountUid)
+        assertTrue(preview.walletImpacts.isEmpty());assertEquals(0,preview.pendingWallets);assertEquals(1,preview.posted)
         target.setDefaultWallet(app.uid)
         try { LedgerCsvImport.apply(target,document,preview.previewToken);fail("stale preview") }
         catch(error:WalletException) { assertEquals("CSV_PREVIEW_STALE",error.code) }
@@ -121,16 +121,31 @@ class WalletBackupTest {
         val fresh=LedgerCsvImport.preview(target,document)
         val result=LedgerCsvImport.apply(target,document,fresh.previewToken)
         assertEquals(1,result.posted);assertEquals(0,result.pendingWallets)
+        assertEquals(10000L,target.getAccount(app.id)!!.amountCents);assertEquals(20000L,target.getAccount(card.id)!!.amountCents)
+        assertEquals(WalletEligibility.IMPORT_EXCLUDED,target.all().single().wallet!!.eligibility)
+        assertTrue(target.all().single().walletEffects.isEmpty())
+        assertEquals(0,LedgerCsvImport.apply(target,document,linkWalletBalances=true).imported)
+        assertEquals(20000L,target.getAccount(card.id)!!.amountCents)
+        val linkedDocument=document.copy(records=listOf(incoming.copy(uid=UUID.randomUUID().toString())))
+        val linkedPreview=LedgerCsvImport.preview(target,linkedDocument,linkWalletBalances=true)
+        assertEquals(card.uid,linkedPreview.walletImpacts.single().accountUid);assertEquals(-3000L,linkedPreview.walletImpacts.single().deltaCents)
+        assertEquals(1,LedgerCsvImport.apply(target,linkedDocument,linkedPreview.previewToken,linkWalletBalances=true).posted)
         assertEquals(10000L,target.getAccount(app.id)!!.amountCents);assertEquals(17000L,target.getAccount(card.id)!!.amountCents)
-        assertEquals(0,LedgerCsvImport.apply(target,document).imported)
     }
-    @Test fun csvWithNoDefaultIsPendingAndNeverRestoresClaimedAppliedState() {
+    @Test fun csvWithoutWalletPostsExcludedHistoryAndExplicitLinkingStaysPending() {
         val target=store();val app=account(target,10000,"wechat")
         val incoming=record().copy(capture=Capture(Source.OCR,"com.tencent.mm","",now))
         val document=LedgerCsvImport.Document("合成 CSV",listOf(incoming),emptyList(),1)
-        assertEquals(1,LedgerCsvImport.preview(target,document).pendingWallets)
+        val preview=LedgerCsvImport.preview(target,document)
+        assertEquals(0,preview.pendingWallets);assertEquals(1,preview.posted)
         val result=LedgerCsvImport.apply(target,document)
-        assertEquals(1,result.pendingWallets);assertEquals(0,result.posted);assertEquals(10000L,target.getAccount(app.id)!!.amountCents)
-        assertEquals("WALLET_REQUIRED",target.all().single().wallet!!.reviewCode)
+        assertEquals(0,result.pendingWallets);assertEquals(1,result.posted);assertEquals(10000L,target.getAccount(app.id)!!.amountCents)
+        assertEquals(WalletEligibility.IMPORT_EXCLUDED,target.all().single().wallet!!.eligibility)
+        val linkedDocument=document.copy(records=listOf(incoming.copy(uid=UUID.randomUUID().toString())))
+        assertEquals(1,LedgerCsvImport.preview(target,linkedDocument,linkWalletBalances=true).pendingWallets)
+        val linked=LedgerCsvImport.apply(target,linkedDocument,linkWalletBalances=true)
+        assertEquals(1,linked.pendingWallets);assertEquals(0,linked.posted)
+        assertEquals("WALLET_REQUIRED",target.all().single { it.wallet!!.eligibility==WalletEligibility.ACTIVE }.wallet!!.reviewCode)
     }
+
 }

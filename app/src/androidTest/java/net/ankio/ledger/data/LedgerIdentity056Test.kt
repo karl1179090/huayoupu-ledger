@@ -75,7 +75,7 @@ class LedgerIdentity056Test {
         val db=store.writableDatabase
         store.rebuildPreWalletSchemaForTest(7);store.close()
         LedgerStore(context,name).use { upgraded->
-            assertEquals(9,upgraded.readableDatabase.version)
+            assertEquals(10,upgraded.readableDatabase.version)
             assertEquals(WalletEligibility.LEGACY_EXCLUDED,upgraded.get(original.id)!!.wallet!!.eligibility)
             assertEquals(original.uid,upgraded.get(original.id)!!.uid)
             assertEquals(2,upgraded.get(original.id)!!.identities.size)

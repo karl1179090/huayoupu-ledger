@@ -66,8 +66,10 @@ object LedgerCsvImport {
         return Document(if(own)"花有谱通用 CSV" else "钱迹 V10 模板",records,errors,rows.size-1)
     }
 
-    fun preview(store:LedgerStore,document:Document):Preview=synchronized(store) {
+    fun preview(store:LedgerStore,document:Document,linkWalletBalances:Boolean=false):Preview=synchronized(store) {
         val selected=select(store,document.records)
+        if(!linkWalletBalances)return@synchronized Preview(document.format,document.totalRows,selected.size,
+            document.records.size-selected.size,document.errors,selected.take(3),0,selected.size,emptyList(),store.walletConfigurationToken())
         val balances=store.accounts().associate { it.uid to it.amountCents }.toMutableMap()
         val names=store.accounts().associate { it.uid to it.name }
         val effects=linkedMapOf<String?,Long>();val pendingCounts=linkedMapOf<String?,Int>()
@@ -76,12 +78,14 @@ object LedgerCsvImport {
             val resolution=store.previewWallet(record)
             val uid=resolution.accountUid
             val target=WalletEffectCalculator.target(record.bill.amountCents,record.bill.direction,record.state==RecordState.POSTED)
-            val next=uid?.let { Math.addExact(balances.getValue(it),target) }
-            if(uid==null || next==null || next !in -Money.MAX_CENTS..Money.MAX_CENTS) {
-                pending++;pendingCounts[uid]=pendingCounts.getOrDefault(uid,0)+1
-            } else {
-                balances[uid]=next;effects[uid]=Math.addExact(effects.getOrDefault(uid,0L),target)
-            }
+            if(uid==null) {
+                pending++;pendingCounts[null]=pendingCounts.getOrDefault(null,0)+1
+            } else effects[uid]=Math.addExact(effects.getOrDefault(uid,0L),target)
+        }
+        effects.forEach { (uid,delta)->
+            val next=uid?.let { Math.addExact(balances.getValue(it),delta) }
+            if(next==null || next !in -Money.MAX_CENTS..Money.MAX_CENTS)
+                throw WalletException("BALANCE_LIMIT","钱包余额超出允许范围，请调整导入计划")
         }
         val impacts=(effects.keys+pendingCounts.keys).map { uid->WalletImpact(uid,names[uid],effects[uid] ?: 0L,pendingCounts[uid] ?: 0) }
         Preview(document.format,document.totalRows,selected.size,document.records.size-selected.size,document.errors,selected.take(3),
@@ -89,14 +93,14 @@ object LedgerCsvImport {
     }
 
     /** Recheck under the store monitor: recognition may finish while the preview is open. */
-    fun apply(store:LedgerStore,document:Document,expectedPreviewToken:String?=null):Result=synchronized(store) {
+    fun apply(store:LedgerStore,document:Document,expectedPreviewToken:String?=null,linkWalletBalances:Boolean=false):Result=synchronized(store) {
         val db=store.writableDatabase
         db.beginTransaction()
         try {
             if(expectedPreviewToken!=null && expectedPreviewToken!=store.walletConfigurationToken())
                 throw WalletException("CSV_PREVIEW_STALE","钱包或余额已更新，请刷新导入预览")
             val selected=select(store,document.records)
-            val saved=store.importTransactions(selected)
+            val saved=store.importTransactions(selected,linkWalletBalances)
             db.setTransactionSuccessful()
             Result(saved.size,document.records.size-saved.size,document.errors.size,
                 saved.count { it.state==RecordState.POSTED },saved.count { it.state==RecordState.REVIEW })

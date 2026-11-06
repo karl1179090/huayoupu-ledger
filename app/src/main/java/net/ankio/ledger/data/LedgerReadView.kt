@@ -39,7 +39,7 @@ class LedgerReadView(private val store:LedgerStore) {
                 WHEN lower(r.origin) LIKE '%com.eg.android.alipaygphone%' OR r.origin='支付宝' THEN 'alipay'
                 WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'微信')>0 AND instr(r.raw_text,'支付宝')=0 THEN 'wechat'
                 WHEN r.source IN ('IMAGE','OCR') AND instr(r.raw_text,'支付宝')>0 AND instr(r.raw_text,'微信')=0 THEN 'alipay' END,
-            w.eligibility,w.account_uid,w.selection_source,w.manual_locked,w.applied_cents,w.review_code,w.revision,
+            w.eligibility,w.account_uid,w.selection_source,w.manual_locked,COALESCE((SELECT e.applied_cents FROM record_wallet_effects e WHERE e.record_uid=r.uid AND e.account_uid=w.account_uid),0),w.review_code,w.revision,
             wa.name,wa.kind,wa.bank_code,wa.card_last4,wa.archived,r.standalone_refund
             FROM records r LEFT JOIN merchant_icons i ON i.record_id=r.id LEFT JOIN merchant_icon_assets a ON a.merchant_key=i.merchant_key
             LEFT JOIN record_wallet_links w ON w.record_uid=r.uid LEFT JOIN accounts wa ON wa.uid=w.account_uid

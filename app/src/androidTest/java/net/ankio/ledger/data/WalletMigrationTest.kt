@@ -5,6 +5,8 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONObject
 import net.ankio.ledger.core.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -47,6 +49,7 @@ class WalletMigrationTest {
                 db.execSQL("DELETE FROM accounts WHERE id=99")
             }
             if(version>=3)db.execSQL("CREATE TABLE capture_images(record_id INTEGER PRIMARY KEY NOT NULL,image BLOB)")
+            if(version==4)db.execSQL("CREATE TABLE merchant_icons(record_id INTEGER PRIMARY KEY NOT NULL,image BLOB)")
             if(version>=5) {
                 db.execSQL("CREATE TABLE merchant_icons(record_id INTEGER PRIMARY KEY NOT NULL,merchant_key TEXT NOT NULL)")
                 db.execSQL("CREATE INDEX merchant_icons_key ON merchant_icons(merchant_key)")
@@ -69,13 +72,13 @@ class WalletMigrationTest {
             db.version=version
         }
     }
-    @Test fun versionsOneSevenEightUpgradeWithoutReplayingHistoricalBills() {
-        for(version in listOf(1,7,8)) {
+    @Test fun allVersionsOneThroughEightUpgradeWithoutReplayingHistoricalBills() {
+        for(version in 1..8) {
             val name="wallet-migration-$version-${UUID.randomUUID()}.db"
             try {
                 fixture(name,version)
                 LedgerStore(context,name).use { store->
-                    assertEquals(9,store.readableDatabase.version)
+                    assertEquals(10,store.readableDatabase.version)
                     val historical=store.get(41)!!
                     assertEquals(recordUid,historical.uid);assertEquals(WalletEligibility.LEGACY_EXCLUDED,historical.wallet!!.eligibility)
                     assertEquals(0L,historical.wallet.appliedCents)
@@ -111,7 +114,64 @@ class WalletMigrationTest {
                 }
                 db.execSQL("DROP TABLE wallet_movements")
             }
-            LedgerStore(context,name).use { store->assertEquals(9,store.readableDatabase.version);assertEquals(12345L,store.getAccount(17)!!.amountCents) }
+            LedgerStore(context,name).use { store->assertEquals(10,store.readableDatabase.version);assertEquals(12345L,store.getAccount(17)!!.amountCents) }
         } finally { context.deleteDatabase(name) }
     }
+    private fun v9Expected()=JSONObject(InstrumentationRegistry.getInstrumentation().context.assets.open("transfers/ledger-v9-expected.json").bufferedReader().use { it.readText() })
+    private fun v9Fixture(name:String): Pair<Map<String,Long>,Long> {
+        val script=InstrumentationRegistry.getInstrumentation().context.assets.open("transfers/ledger-v9.sql").bufferedReader().use { it.readText() }
+        val file=context.getDatabasePath(name);file.parentFile!!.mkdirs()
+        SQLiteDatabase.openOrCreateDatabase(file,null).use { db->
+            script.lineSequence().filterNot { it.trimStart().startsWith("--") }.joinToString("\n").split(';').filter { it.isNotBlank() }.forEach(db::execSQL)
+        }
+        val expected=v9Expected();val json=expected.getJSONObject("accountBalances")
+        return json.keys().asSequence().associateWith { json.getLong(it) } to expected.getLong("movementCount")
+    }
+    @Test fun v9UpgradeRetainsAllFinancialFactsAndNeverCreatesMovements() {
+        val name="wallet-v9-${UUID.randomUUID()}.db"
+        try {
+            val (balances,movements)=v9Fixture(name)
+            repeat(3) {
+                LedgerStore(context,name).use { store->
+                    assertEquals(10,store.readableDatabase.version)
+                    assertEquals(balances,store.accounts().associate { it.uid to it.amountCents })
+                    assertEquals(movements,store.readableDatabase.rawQuery("SELECT COUNT(*) FROM wallet_movements",null).use { c->c.moveToFirst();c.getLong(0) })
+                    assertEquals(2,store.readableDatabase.rawQuery("SELECT COUNT(*) FROM record_wallet_effects",null).use { c->c.moveToFirst();c.getInt(0) })
+                    val columns=store.readableDatabase.rawQuery("PRAGMA table_info(record_wallet_links)",null).use { c->buildSet { while(c.moveToNext())add(c.getString(1)) } }
+                    assertFalse("applied_cents" in columns);assertFalse("applied_account_uid" in columns)
+                    val expected=v9Expected();val links=expected.getJSONArray("links")
+                    for(index in 0 until links.length()) {
+                        val source=links.getJSONObject(index);val uid=source.getString("recordUid")
+                        val link=store.walletSnapshot().links.firstOrNull { it.recordUid==uid }
+                        if(link!=null) { assertEquals(source.getString("eligibility"),link.eligibility.name);assertEquals(source.getLong("revision"),link.revision) }
+                        val effects=source.getJSONObject("expectedEffects")
+                        assertEquals(effects.keys().asSequence().associateWith { effects.getLong(it) },WalletAccounting.effects(store.readableDatabase,uid))
+                    }
+                    assertEquals(expected.getString("defaultAccountUid"),store.walletSettings().defaultAccountUid)
+                    assertEquals(1,store.readableDatabase.rawQuery("SELECT COUNT(*) FROM wallet_submissions",null).use { c->c.moveToFirst();c.getInt(0) })
+                    assertEquals(setOf(WalletEligibility.ACTIVE,WalletEligibility.LEGACY_EXCLUDED,WalletEligibility.RESTORE_EXCLUDED),store.walletSnapshot().links.map { link->link.eligibility }.toSet())
+                    assertEquals(1,store.readableDatabase.rawQuery("SELECT COUNT(*) FROM record_deletions",null).use { c->c.moveToFirst();c.getInt(0) })
+                    assertTrue(store.all().any { record->record.bill.refund?.refundedCents==10000L && record.walletEffects.isEmpty() })
+                }
+            }
+        } finally { context.deleteDatabase(name) }
+    }
+    @Test fun invalidV9FinancialFactFailsAtomicallyAndCanBeRetried() {
+        val name="wallet-v9-invalid-${UUID.randomUUID()}.db"
+        try {
+            val (balances,movements)=v9Fixture(name)
+            SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,SQLiteDatabase.OPEN_READWRITE).use { db->
+                db.execSQL("UPDATE record_wallet_links SET eligibility='RESTORE_EXCLUDED' WHERE applied_cents<>0")
+            }
+            LedgerStore(context,name).use { broken->try { broken.writableDatabase;fail("invalid migration must fail") } catch(_:Exception) { } }
+            SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,SQLiteDatabase.OPEN_READWRITE).use { db->
+                assertEquals(9,db.version)
+                db.rawQuery("SELECT amount FROM accounts WHERE uid=?",arrayOf(balances.keys.first())).use { c->assertTrue(c.moveToFirst());assertEquals(balances.values.first(),c.getLong(0)) }
+                assertEquals(movements,db.rawQuery("SELECT COUNT(*) FROM wallet_movements",null).use { c->c.moveToFirst();c.getLong(0) })
+                db.execSQL("UPDATE record_wallet_links SET eligibility='ACTIVE' WHERE applied_cents<>0")
+            }
+            LedgerStore(context,name).use { assertEquals(10,it.writableDatabase.version) }
+        } finally { context.deleteDatabase(name) }
+    }
+
 }

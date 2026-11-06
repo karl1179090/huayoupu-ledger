@@ -250,7 +250,7 @@ object SyntheticRecognition {
             if(signed!=null)return (if(signed=="-")Direction.EXPENSE else Direction.INCOME)==direction
             val expense = Regex("付款|支出|支付成功|扣款|消费|付给|已支付|已付款|支付金额|转账成功").containsMatchIn(text)
             val income = Regex("收入|收款|收钱|到账|收到|已收款|已收钱|入账").containsMatchIn(text)
-            return when (direction) { Direction.EXPENSE -> expense && !income; Direction.INCOME -> income && !expense }
+            return when (direction) { Direction.EXPENSE -> expense && !income; Direction.INCOME -> income && !expense; Direction.TRANSFER -> false }
         }
 
         private fun senderPaymentSucceeded(raw:String):Boolean {

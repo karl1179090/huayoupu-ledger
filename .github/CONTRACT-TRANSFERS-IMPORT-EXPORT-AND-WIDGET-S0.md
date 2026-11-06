@@ -19,7 +19,7 @@ python3 scripts/prepare-ledger-build.py --offline
 bash ./gradlew -PledgerPython=python3 :core:test :app:testDebugUnitTest :app:lintDebug --rerun-tasks
 ```
 
-初次主工作区公共源检查通过：343 public files，固定输入与通知校验通过；离线准备通过：4 个精简 AAR、固定 SDK 与 V6 模型。主工作区最初无环境的 Gradle 命令因无 Java 失败；随后启动的主树构建可能与 S1/S2 编辑交叉，不计为纯基线。独立 worktree 重跑结果及 XML 计数见本文件末尾。
+初次主工作区公共源检查通过：343 public files，固定输入与通知校验通过；离线准备通过：4 个精简 AAR、固定 SDK 与 V6 模型。主工作区最初无环境的 Gradle 命令因无 Java 失败；随后启动的主树构建与 S1/S2 编辑交叉，131 项中有 16 项 `NoSuchMethodError`（模型构造签名变更期间旧编译产物混用），不计为纯基线，主树这轮 XML 不用于验收。独立 worktree 重跑结果及 XML 计数见本文件末尾。
 
 检测到个人设备 `SM_G981N`，S0 未向它安装、测试或写入。现有隔离 AVD 为 `huayoupu-api30-arm64`、`huayoupu-api34-arm64`；S0 启动 API30 的 read-only/headless 实例 `emulator-5554` 供后续合成测试。设备测试一律显式设置 `ANDROID_SERIAL=emulator-5554`，不得无过滤地对全部连接设备执行 connected 测试。
 

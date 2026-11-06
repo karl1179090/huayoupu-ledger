@@ -7,7 +7,7 @@ import net.ankio.ledger.core.*
 import java.util.UUID
 
 /** Durable selection and the financial effect actually committed to the ledger. */
-enum class WalletEligibility { ACTIVE, LEGACY_EXCLUDED, RESTORE_EXCLUDED }
+enum class WalletEligibility { ACTIVE, LEGACY_EXCLUDED, RESTORE_EXCLUDED, IMPORT_EXCLUDED }
 
 data class RecordWalletLink(
     val recordUid: String,
@@ -21,6 +21,7 @@ data class RecordWalletLink(
     val appliedCents: Long = 0,
     val reviewCode: String? = null,
     val revision: Long = 0,
+    val accountReference: String? = null,
 )
 
 data class WalletMovement(
@@ -37,19 +38,16 @@ data class WalletMovement(
 )
 
 data class WalletSettings(val defaultAccountUid: String? = null, val appBindings: Map<String, String> = emptyMap(), val revision: Long = 0)
-data class WalletSnapshot(val settings: WalletSettings, val links: List<RecordWalletLink>, val movements: List<WalletMovement>)
+data class WalletSnapshot(val settings: WalletSettings, val links: List<RecordWalletLink>, val movements: List<WalletMovement>,
+    val transfers: List<RecordTransferDetails> = emptyList(), val effects: Map<String, Map<String, Long>> = emptyMap())
 data class RestoreSummary(val imported:Int,val excludedRecords:Int,val retainedAccounts:Int,val restoredAccounts:Int)
 class WalletException(val code: String, message: String): IllegalArgumentException(message)
 
 /** Called only while holding LedgerStore's write lock and a ledger.db transaction. */
 internal object WalletAccounting {
     fun create(db: SQLiteDatabase) {
-        db.execSQL("""CREATE TABLE record_wallet_links(record_uid TEXT PRIMARY KEY NOT NULL,
-            eligibility TEXT NOT NULL CHECK(eligibility IN ('ACTIVE','LEGACY_EXCLUDED','RESTORE_EXCLUDED')),
-            account_uid TEXT,selection_source TEXT,manual_locked INTEGER NOT NULL DEFAULT 0,
-            payment_evidence TEXT,evidence_fingerprint TEXT,applied_account_uid TEXT,
-            applied_cents INTEGER NOT NULL DEFAULT 0,review_code TEXT,revision INTEGER NOT NULL DEFAULT 0)""")
-        db.execSQL("CREATE INDEX wallet_links_account ON record_wallet_links(account_uid)")
+        createLinks(db)
+        createEffectsAndImports(db)
         db.execSQL("CREATE TABLE wallet_settings(singleton INTEGER PRIMARY KEY CHECK(singleton=1),default_account_uid TEXT,revision INTEGER NOT NULL DEFAULT 0)")
         db.execSQL("INSERT INTO wallet_settings(singleton) VALUES(1)")
         db.execSQL("CREATE TABLE app_wallet_bindings(package_name TEXT PRIMARY KEY NOT NULL,account_uid TEXT NOT NULL)")
@@ -61,22 +59,76 @@ internal object WalletAccounting {
         db.execSQL("CREATE TABLE wallet_submissions(token TEXT PRIMARY KEY NOT NULL,kind TEXT NOT NULL,result_uid TEXT NOT NULL,created_at INTEGER NOT NULL)")
     }
 
+    private fun createLinks(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE record_wallet_links(record_uid TEXT PRIMARY KEY NOT NULL,
+            eligibility TEXT NOT NULL CHECK(eligibility IN ('ACTIVE','LEGACY_EXCLUDED','RESTORE_EXCLUDED','IMPORT_EXCLUDED')),
+            account_uid TEXT,selection_source TEXT,manual_locked INTEGER NOT NULL DEFAULT 0,
+            payment_evidence TEXT,evidence_fingerprint TEXT,review_code TEXT,revision INTEGER NOT NULL DEFAULT 0,account_reference TEXT)""")
+        db.execSQL("CREATE INDEX wallet_links_account ON record_wallet_links(account_uid)")
+    }
+    private fun createEffectsAndImports(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE record_wallet_effects(record_uid TEXT NOT NULL,account_uid TEXT NOT NULL,
+            applied_cents INTEGER NOT NULL CHECK(applied_cents<>0),PRIMARY KEY(record_uid,account_uid))""")
+        db.execSQL("CREATE INDEX wallet_effects_account ON record_wallet_effects(account_uid)")
+        TransferAccounting.create(db)
+        db.execSQL("""CREATE TABLE import_batches(batch_uid TEXT PRIMARY KEY NOT NULL,kind TEXT NOT NULL,file_sha256 TEXT NOT NULL,
+            options_digest TEXT NOT NULL,submission_token TEXT NOT NULL UNIQUE,result_json TEXT NOT NULL,created_at INTEGER NOT NULL)""")
+        db.execSQL("CREATE TABLE import_batch_records(batch_uid TEXT NOT NULL,record_uid TEXT NOT NULL,PRIMARY KEY(batch_uid,record_uid))")
+        db.execSQL("CREATE INDEX import_records_record ON import_batch_records(record_uid)")
+        db.execSQL("""CREATE TABLE wallet_import_aliases(source_uid TEXT PRIMARY KEY NOT NULL,local_account_uid TEXT NOT NULL)""")
+        db.execSQL("CREATE INDEX wallet_aliases_account ON wallet_import_aliases(local_account_uid)")
+    }
+    /** SQLiteOpenHelper wraps the whole schema upgrade in its own transaction. No balance is recomputed. */
+    fun migrateV10(db: SQLiteDatabase) {
+        val invalid=db.rawQuery("""SELECT 1 FROM record_wallet_links l LEFT JOIN records r ON r.uid=l.record_uid
+            LEFT JOIN accounts a ON a.uid=l.applied_account_uid LEFT JOIN accounts selected ON selected.uid=l.account_uid
+            WHERE r.uid IS NULL OR (l.account_uid IS NOT NULL AND (selected.uid IS NULL OR selected.type<>'ASSET'))
+            OR (l.applied_account_uid IS NOT NULL AND (a.uid IS NULL OR a.type<>'ASSET'))
+            OR (l.eligibility='ACTIVE' AND r.state='POSTED' AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)
+                AND (l.account_uid IS NULL OR r.amount IS NULL OR r.amount<0 OR r.amount>${Money.MAX_CENTS} OR r.direction NOT IN ('EXPENSE','INCOME') OR r.direction IS NULL))
+            OR l.applied_cents<>CASE WHEN l.eligibility='ACTIVE' AND r.state='POSTED'
+                AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)
+                THEN CASE r.direction WHEN 'INCOME' THEN r.amount WHEN 'EXPENSE' THEN -r.amount ELSE 0 END ELSE 0 END
+            OR (l.applied_cents<>0 AND (l.applied_account_uid IS NULL OR l.account_uid<>l.applied_account_uid)) LIMIT 1""",null).use { it.moveToFirst() }
+        check(!invalid) { "Invalid pre-v10 wallet financial state" }
+        db.execSQL("ALTER TABLE record_wallet_links RENAME TO wallet_links_v9")
+        db.execSQL("DROP INDEX wallet_links_account")
+        createLinks(db);createEffectsAndImports(db)
+        db.execSQL("""INSERT INTO record_wallet_links(record_uid,eligibility,account_uid,selection_source,manual_locked,payment_evidence,
+            evidence_fingerprint,review_code,revision) SELECT record_uid,eligibility,account_uid,selection_source,manual_locked,
+            payment_evidence,evidence_fingerprint,review_code,revision FROM wallet_links_v9""")
+        db.execSQL("""INSERT INTO record_wallet_effects(record_uid,account_uid,applied_cents)
+            SELECT record_uid,applied_account_uid,applied_cents FROM wallet_links_v9 WHERE applied_cents<>0""")
+        db.execSQL("DROP TABLE wallet_links_v9")
+    }
     fun readLink(c: Cursor): RecordWalletLink {
         fun text(key:String):String?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it)) null else c.getString(it) }
         fun number(key:String)=c.getLong(c.getColumnIndexOrThrow(key))
         return RecordWalletLink(requireNotNull(text("record_uid")), WalletEligibility.valueOf(requireNotNull(text("eligibility"))),
             text("account_uid"),text("selection_source"),number("manual_locked")==1L,text("payment_evidence"),text("evidence_fingerprint"),
-            text("applied_account_uid"),number("applied_cents"),text("review_code"),number("revision"))
+            reviewCode=text("review_code"),revision=number("revision"),accountReference=text("account_reference"))
     }
+    fun effects(db: SQLiteDatabase, uid: String): Map<String,Long> = db.query("record_wallet_effects",null,
+        "record_uid=?",arrayOf(uid),null,null,"account_uid").use { c->buildMap {
+        while(c.moveToNext())put(c.getString(c.getColumnIndexOrThrow("account_uid")),c.getLong(c.getColumnIndexOrThrow("applied_cents")))
+    } }
+    fun saveEffects(db: SQLiteDatabase, uid: String, effects: Map<String,Long>) {
+        db.delete("record_wallet_effects","record_uid=?",arrayOf(uid))
+        effects.filterValues { it!=0L }.forEach { (account,amount)->db.insertOrThrow("record_wallet_effects",null,ContentValues().apply {
+            put("record_uid",uid);put("account_uid",account);put("applied_cents",amount)
+        }) }
+    }
+    fun project(link: RecordWalletLink, effects: Map<String,Long>): RecordWalletLink = link.copy(
+        appliedAccountUid=effects.keys.singleOrNull() ?: link.accountUid,
+        appliedCents=link.accountUid?.let { effects[it] } ?: 0L)
     fun link(db:SQLiteDatabase, uid:String):RecordWalletLink?=db.query("record_wallet_links",null,"record_uid=?",arrayOf(uid),null,null,null)
-        .use { if(it.moveToFirst())readLink(it) else null }
+        .use { if(it.moveToFirst())project(readLink(it),effects(db,uid)) else null }
     fun saveLink(db:SQLiteDatabase,link:RecordWalletLink) {
         check(db.insertWithOnConflict("record_wallet_links",null,ContentValues().apply {
             put("record_uid",link.recordUid);put("eligibility",link.eligibility.name);put("account_uid",link.accountUid)
             put("selection_source",link.selectionSource);put("manual_locked",if(link.manualLocked)1 else 0)
             put("payment_evidence",link.paymentEvidence);put("evidence_fingerprint",link.evidenceFingerprint)
-            put("applied_account_uid",link.appliedAccountUid);put("applied_cents",link.appliedCents)
-            put("review_code",link.reviewCode);put("revision",link.revision)
+            put("review_code",link.reviewCode);put("revision",link.revision);put("account_reference",link.accountReference)
         },SQLiteDatabase.CONFLICT_REPLACE)!=-1L) { "钱包关联写入失败" }
     }
     fun settings(db:SQLiteDatabase):WalletSettings {
@@ -101,6 +153,24 @@ internal object WalletAccounting {
         db.insertOrThrow("wallet_submissions",null,ContentValues().apply {
             put("token",token);put("kind",kind);put("result_uid",resultUid);put("created_at",System.currentTimeMillis())
         })
+    }
+    fun validateChanges(db: SQLiteDatabase, deltas: Map<String,Long>) {
+        deltas.filterValues { it!=0L }.forEach { (uid,delta)->
+            val (before,type)=db.rawQuery("SELECT amount,type FROM accounts WHERE uid=?",arrayOf(uid)).use {
+                if(!it.moveToFirst())throw WalletException("WALLET_MISSING","关联钱包已不存在")
+                it.getLong(0) to it.getString(1)
+            }
+            val after=try { Math.addExact(before,delta) } catch(_:ArithmeticException) {
+                throw WalletException("BALANCE_LIMIT","钱包余额超出允许范围")
+            }
+            if(after !in (if(type=="ASSET")-Money.MAX_CENTS else 0L)..Money.MAX_CENTS)
+                throw WalletException("BALANCE_LIMIT","钱包余额超出允许范围")
+        }
+    }
+    fun moveAll(db: SQLiteDatabase, deltas: Map<String,Long>, recordUid: String?, kind: String,
+        operationUid: String, summary: String="") {
+        validateChanges(db,deltas)
+        deltas.toSortedMap().forEach { (uid,delta)->move(db,uid,recordUid,delta,kind,operationUid,summary) }
     }
     fun move(db:SQLiteDatabase,accountUid:String,recordUid:String?,delta:Long,kind:String,operationUid:String,summary:String="") {
         if(delta==0L)return
