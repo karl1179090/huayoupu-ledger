@@ -28,27 +28,40 @@
 
 ## 2. 当前实现与改动位置
 
-当前 `Direction` 只有 `EXPENSE/INCOME`，`record_wallet_links` 只保存一个钱包及一个已生效金额。CSV 导入把新记录设为 `ACTIVE` 并执行余额联动；通用 CSV 尚无钱包列，钱迹导入未使用账户列且拒绝转账、非零手续费。统计存在“不是收入就是支出”的分支。项目尚无 AppWidget。
+实施前基线固定为 `91aad555`：当时仅有 EXPENSE/INCOME、单钱包 applied 字段、CSV 新记录默认联动且没有 AppWidget。S0 的逐行 Direction 分支、20 个 syncWallet 调用、基线命令和合成夹具保留于 [S0 契约与证据](CONTRACT-TRANSFERS-IMPORT-EXPORT-AND-WIDGET-S0.md)，不以中间工作树覆盖历史基线。
 
-S0 已按上述源码基线核实实现位置；这段描述固定为实施前状态，不随中间工作树变化改写成已完成功能。完整逐行分支／20 个 `syncWallet` 调用清单、冻结接口、真实基线命令结果和合成页面／CSV／v9 SQL 夹具见 [S0 契约与证据](CONTRACT-TRANSFERS-IMPORT-EXPORT-AND-WIDGET-S0.md)。核实补充：账单文件预览是 `ui/MainActivity.kt` 的原生对话框；分类循环另在 `LedgerBackup.kt` 与 `LedgerWebBridge.kt`；强身份实际存于 `record_identities`，识别提交恢复用 `wallet_submissions`，不是独立 payment_commits 表。基线 `identityMatch` 只接受 POSTED 且方向／金额一致的记录，待确认强身份防重必须同步修正。
+当前开发分支已通过 S1～S6 独立门槛：Direction 包含 TRANSFER，数据库 v10 使用 effects 集合，完整备份 JSON 为 v5/ZIP 容器 v1。S6 已接受提交为 `38aef03`，普通 REVIEW 补全修复为 `e0729e7`；用户已停止小组件工作，S7 保留当前实现且未封验收。S8 最终工程为 `7ef24b2`，指定非小组件回归与 ARM64／x86_64 产物已验证，跨 HEAD 的未变输入复用和每轮实际结果单列；全局 lint 仍因保留的小组件错误失败，不能称全部门槛通过。阶段结论分别见 [S1 纯规则](ACCEPTANCE-TRANSFERS-S1.md)、[S2 资金与迁移](ACCEPTANCE-TRANSFERS-S2.md)、[S3 手动转账与统计](ACCEPTANCE-TRANSFERS-S3.md)、[S4 识别](ACCEPTANCE-TRANSFERS-S4.md)、[S5 文件迁移](ACCEPTANCE-TRANSFERS-S5.md)、[S6 完整备份](ACCEPTANCE-TRANSFERS-S6.md)；最终逐项状态集中在 [S8 验证报告](VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)。这不代表已发布版本包含全部开发功能。
 
-下表的 `data/`、`capture/`、`ocr/`、`ui/` 均位于 `app/src/main/java/net/ankio/ledger/`；`core/` 是 `core/src/main/kotlin/net/ankio/ledger/core/` 的缩写；`assets/` 位于 `app/src/main/`。同一表格单元中省略目录的文件沿用该单元已注明的目录。
+下表中 data/、capture/、ocr/、ui/、widget/ 均位于 app/src/main/java/net/ankio/ledger/，core/ 为 core/src/main/kotlin/net/ankio/ledger/core/，web/ 为 app/src/main/assets/web/。
 
-| 领域 | 现有入口 | 必须处理 |
+| 领域 | 实际实现位置 | 当前状态 |
 | --- | --- | --- |
-| 交易类型 | `core/Models.kt`、`Money.kt` | 新增 `TRANSFER`；金额使用整数分，分离转账金额、手续费、实际扣款和到账。 |
-| 钱包计算 | `core/WalletEffectCalculator.kt`、`WalletResolver.kt` | 从单钱包金额扩展为按钱包 UID 的影响集合；转账两端不使用普通支出的默认钱包回退。 |
-| 持久化 | `data/LedgerStore.kt`、`WalletAccounting.kt` | 统一新增、编辑、删除、撤销、识别补充、合并、导入的事务入口；迁移数据库。 |
-| 识别 | `core/PaymentPageDetector.kt`、`LocalOcrBillParser.kt`、`PaymentMethodParser.kt` | 新增本人互转证据、双端账户和费用解析；成功页多金额以公式核对，保持隐私检查。 |
-| 识别编排 | `ocr/LocalRecognitionClient.kt`、`capture/CaptureProcessor.kt`、`PaymentPageMonitor.kt`、`PaymentRecognitionQueue.kt`、`data/CaptureCoordinator.kt` | 替换当前 `expenseOnly` 限制的语义，允许自动支出及可信互转，保留普通收入的现有自动采集边界。 |
-| 去重和恢复 | `core/DuplicateDetector.kt`、`data/TransactionIdentity.kt`、`RecognitionCommitRecovery.kt` | 不能因方向或手续费变化把同一交易当作新资金；待确认也参与强身份查询。 |
-| 导入导出 | `data/LedgerCsvImport.kt`、`LedgerCsvExport.kt`、`ui/MainActivity.kt` | 版本化账单格式、钱包映射、联动开关、预览、原子提交，新增钱包 CSV 编解码。 |
-| 完整备份 | `data/LedgerBackup.kt`、`LedgerArchive.kt`、`WalletBackupCodec.kt` | 元数据 v5，恢复双端关联、已生效影响和不联动状态；兼容 v1～v4。 |
-| 统计 | `data/LedgerReadView.kt`、`ui/LedgerWebBridge.kt`、`assets/web/app.js` | 公共开销投影、转账独立显示、手续费分类、通用日期范围统计。 |
-| 表单及详情 | `ui/LedgerWebBridge.kt`、`assets/web/app.js`、`index.html` 和现有样式 | 新增转账类型、两端钱包、费用方式、金额预览、待确认提示；维护分页及旧快照输出一致。 |
-| 刷新与组件 | `LedgerApp.kt`、`ui/MainActivity.kt`、`AndroidManifest.xml`、`res/` | 新增原生组件、每实例配置、更新调度和进入统计的入口。 |
+| 交易类型与费用 | core/Models.kt、TransferCalculator.kt | 整数分、EXTRA/DEDUCTED、M/F/D/C 及原始 TransferEvidence。 |
+| 资金规则与双端选择 | core/WalletEffectCalculator.kt、TransferWalletResolver.kt | 按 UID 的目标/差额集合；双端禁止普通钱包默认回退。 |
+| 持久化与迁移 | data/LedgerStore.kt、WalletAccounting.kt、TransferAccounting.kt | 唯一 syncWallet 入口；v9→v10 仅搬旧生效事实，旧 applied 持久列已移除。 |
+| 识别规则 | core/TransferEvidenceParser.kt、RecognitionPolicy.kt、LocalOcrBillParser.kt、PaymentPageDetector.kt、PaymentMethodParser.kt | 用户主动识别与自动支付策略分离，自动仅既有适配 App 的支出及可信本人充值/提现。 |
+| 识别证据与恢复 | data/TransferRecognitionEnricher.kt、TransferEvidenceCodec.kt、TransactionIdentity.kt、RecognitionCommitRecovery.kt | 强身份先查 REVIEW/跨类型冲突；完整有界识别证据持久化，两端/费用人工锁独立。 |
+| 识别编排 | ocr/LocalRecognitionClient.kt、OcrClient.kt、RecognitionBackend.kt；data/CaptureCoordinator.kt；capture/CaptureProcessor.kt、PaymentRecognitionQueue.kt、PaymentPageMonitor.kt | 端到端传递 RecognitionPolicy，保留隐私、白名单及普通收入边界。 |
+| 文件迁移 | data/PortableCsv.kt、ImportPlan.kt、ImportStorage.kt、LedgerCsvImport.kt、LedgerCsvExport.kt、WalletCsvImport.kt、WalletCsvExport.kt；ui/NativeFileImports.kt | 账单 v1/v2/钱迹、钱包 v1；默认关闭/显式映射、稳定预览、聚合原子提交及持久回执。 |
+| 完整备份 | data/LedgerBackup.kt、LedgerArchive.kt、WalletBackupCodec.kt、TransferBackupCodec.kt、BackupRestore.kt、BackupMediaValidator.kt、StagedLedgerBackup.kt、ImportAudit.kt | v5 复制余额/effects 而不重扣；v1～v4 兼容，快照与不可变媒体暂存，恢复审计不可重执行。 |
+| 统计 | core/ExpensePeriodBuckets.kt；data/LedgerStatistics.kt、LedgerReadView.kt；ui/LedgerWebBridge.kt；web/app.js | 同一开销投影，Long/十进制字符串/BigInt，周期与历史月共存，费用明细指向真实账单 UID。 |
+| 表单及详情 | ui/LedgerWebBridge.kt；web/app.js、index.html、app.css | 三种类型、双端交换/人工选择、费用预览、待确认提示，paged/legacy/details 一致。 |
+| 小组件与路由 | widget/ExpenseWidgetProvider.kt、ExpenseWidgetUpdater.kt、ExpenseChartRenderer.kt、ExpenseWidgetConfigStore.kt；LedgerApp.kt、ui/MainActivity.kt、res/ | 用户已停止修改与补测，保留 `43604f2` 的当前实现；S7 未封验收，最后一轮 27 项为 24 通过／3 失败，详见独立记录。 |
+| 合成页面与 CI | tools/payment-fixtures/、scripts/build-payment-fixtures.py、android-regression-classes.json、run-android-regressions.py；.github/workflows/android.yml | 补齐基线缺失的外部支付夹具；默认只构建，显式 qemu/标记/签名核验后才安装，实际执行/未覆盖以 XML 为准。 |
 
-建议新增纯规则 `TransferCalculator`、`TransferEvidenceParser`、`TransferWalletResolver`、`ExpensePeriodBuckets`；新增应用层 `LedgerStatistics`、`WalletCsvImport/Export`、`ImportPlan` 及 `widget/` 包。纯算法不依赖 Android UI、数据库或 OCR 引擎。
+### 2026-11-06 后续用户明确修订
+
+第 1 节逐字保留原已确认需求作为历史基线；以下后续明确指令覆盖其中月展示方式及第 8～10/12 节相应旧展示/测试备选：
+
+- WEEK 为当前自然周 7 柱、YEAR 为当前年 12 柱，每柱金额直接放在柱顶，取消独立金额格。
+- MONTH 改为当前月 **7 列日历、显示每天净开销**，覆盖原“按自然周切段的月柱状图”；不增加历史翻月。每天金额仍来自公共开销投影，日历合计须等于共享 month 总额，退款归原消费日、转账仅计手续费。
+- 三模式保持同一固定外框/内容区和一致字阶，切换不能使展示尺寸跳动。周/月/年小切换放在图表下方，底部仅保留切换，不恢复更新时间/含费文字。
+- 原底部金额网格和月 6 桶的用例/截图不再作为新展示通过证据；日历 daily 数据、每格金额、空白日期格与总额需要新测试和真实 Launcher 图。
+- 后续参考位于 `docs/design/expense-widget-2026-11-06/{week,month,year}.png` 与 `prompts.json`：纸白薄荷、顶部品牌/刷新、期标题左/总额右、统一内容区及底部小切换。它们是用户提供的 image_gen 设计示意，482/578/35178 等金额不是真实账本数据，不能作为 Launcher 运行证据。
+
+资金公式、来源权限、资格状态、统一统计投影及第 1 节其他范围不变。
+
+真实微信/支付宝充值、提现页面尚未取得，合成夹具不代替真实版本兼容声明。测试中的强杀/异常注入、模拟器与真实断电/真机也分别记录，不相互代替。正式测试类清单见 scripts/android-regression-classes.json；原第 12 节的建议类名已在实现中收敛到现有类。
 
 ## 3. 转账账单的业务规则
 
@@ -563,7 +576,7 @@ Provider 回调仅做校验和分发；短查询／渲染使用受限后台执�
 | W11 | 跨日／跨周／跨月／跨年休眠后再刷新 | 正确计算当前范围；承认后台调度可能延迟，主动刷新后不得保留旧周期。 |
 | W12 | 记账、修改、退款、删除／撤销、导入、恢复后刷新 | 主动更新请求在提交后发出；正常测试设备上目标 2 秒内显示新统计，记录实测，不承诺休眠系统准点。 |
 | W13 | 反复切换周期和同时导入；故意延迟旧查询 | 迟到结果不覆盖最新选择和数据；刷新失败不回滚已提交账单。 |
-| W14 | Android 11、Android 12+、Android 14、targetSdk36 设备／模拟器；不同 launcher 尺寸、明暗主题、大字号、极大金额 | 完整可读，无数字重叠／裁切，12个月不被隐藏；底部金额网格可使用；截图记录实际尺寸。 |
+| W14 | Android 11、Android 12+、Android 14、targetSdk36 设备／模拟器；不同 launcher 尺寸、明暗主题、大字号、极大金额 | 完整可读，无数字重叠／裁切，12个月不被隐藏；月日历及周/年柱顶金额完整显示，底部仅小周期切换；截图记录实际尺寸。展示以第 2 节“后续用户明确修订”为准。 |
 | W15 | 标题／图表点击，应用冷启动和热启动 | 打开对应周／月／年统计，金额与组件一致，不统一跳月视图。 |
 | W16 | 无障碍朗读与未知 widgetId／伪造周期动作 | 日期／金额顺序可读；非法动作拒绝且不能写账单。 |
 | W17 | 无组件时、纯刷新启动时、连续多次图像刷新 | 无无用轮询／常驻服务；纯刷新不加载 OCR 模型；内存不随部分图片更新累积。 |

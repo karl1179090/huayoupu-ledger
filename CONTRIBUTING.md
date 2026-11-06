@@ -9,6 +9,8 @@
 3. 运行受影响的测试。仅使用合成数据，禁止提交真实交易、截图、密钥或未脱敏诊断。
 4. 说明问题、修改后的行为、验证命令和未覆盖范围；界面变化提供同尺寸、同状态的改前 / 改后截图。
 
+专项开发参考：[钱包转账、独立导入导出与开销小组件方案](.github/DEVELOPMENT-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)（S0～S6 已通过阶段门槛，S7 按用户要求停止且未封验收，S8 非小组件回归已完成，全局 lint 仍失败；[实际验证](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)另记）；前置行为见[钱包联动与摇一摇白名单方案](.github/DEVELOPMENT-WALLET-LINKAGE-AND-SHAKE-WHITELIST.md)。
+
 ## 代码归属
 
 - `app/src/main/java/net/ankio/ledger/capture/`：权限、页面采集、摇动监听和识别队列。
@@ -32,12 +34,19 @@ bash ./gradlew -PledgerPython=python3 :core:test :app:testDebugUnitTest :app:lin
 ```sh
 npm ci --prefix tools/ui-checks --ignore-scripts --no-audit --no-fund
 npx --prefix tools/ui-checks playwright install chromium
-PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-record-motion.cjs
-PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-tab-navigation.cjs
-PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-ledger-optimization.cjs
-PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-ledger-search.cjs
-PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-wallet-whitelist.cjs
+PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-transfer-regressions.cjs
 ```
+
+该入口顺序执行原有五个脚本及转账/独立状态恢复两个脚本。Android 类清单由 `scripts/android-regression-classes.json` 与实际 CI 共用；可先用 `python3 scripts/run-android-regressions.py api30 --list` 检查。 下列 `api30` 示例是通用完整 CI 清单，含小组件，不能作为本次已执行范围；本次按用户要求仅执行非小组件 69／19／4 类及独立外部支付组，精确过滤清单、命令和逐轮实际结果见[验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)。完整 manifest 与 CI 不因本次停止范围而移除小组件。
+
+```sh
+python3 scripts/verify-transfer-fixtures.py
+ANDROID_SERIAL=emulator-5554 python3 scripts/run-android-regressions.py api30 --abi arm64-v8a
+python3 scripts/build-payment-fixtures.py --install emulator-5554
+ANDROID_SERIAL=emulator-5554 python3 scripts/run-android-regressions.py external-payment --abi arm64-v8a
+```
+
+外部支付夹具默认只构建到忽略目录；安装要求显式模拟器并通过 qemu、版本前缀、标记和签名核验，不能覆盖未知同包名应用。原始 XML 按每个系统/轮次归档，跳过与失败分别报告，不把前轮结果混入最终数量。组件截图必须来自真实 Launcher pin，当前设计为周/年柱顶金额、月日历、三模式同尺寸及图下小周期切换，不使用独立金额网格或更新时间/footer。
 
 Windows 使用 `gradlew.bat`，通过 `$env:PLAYWRIGHT_MODULE` 设置模块路径。新依赖须说明用途、许可和包体影响；原生库或模型更新须同步锁文件、通知、复现步骤与回归结果。
 
