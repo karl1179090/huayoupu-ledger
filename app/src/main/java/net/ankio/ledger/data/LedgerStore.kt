@@ -569,11 +569,25 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val enriched=identified.identities!=get(identified.id)?.identities
                 persistIdentities(db,identified.id,identified.identities)
                 val supplemented=appendPaymentScreenshot(db,identified,capture,screenshot)
-                val presentation=enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                // Strong identity also owns ordinary incomplete drafts. Complete the original
+                // draft under the same reliability gate as exact-duplicate supplementation.
+                val promoted=identified.state==RecordState.REVIEW && identified.duplicateId==null &&
+                    identified.bill.refund==null && identified.bill.standaloneRefund==null &&
+                    identified.transfer==null && identified.bill.transfer==null && bill.transfer==null &&
+                    identified.capture.source in setOf(Source.OCR,Source.IMAGE) && capture.source in setOf(Source.OCR,Source.IMAGE) &&
+                    !requireReview && bill.reliable && bill.amountCents?.let { it in 1..Money.MAX_CENTS }==true &&
+                    bill.direction in setOf(Direction.EXPENSE,Direction.INCOME)
+                val presentation=if(promoted)identified.copy(bill=bill,state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
+                    else enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                if(promoted) {
+                    check(db.update("records",values(presentation),"id=?",arrayOf(presentation.id.toString()))==1)
+                    linkMerchantIcon(db,presentation.id,presentation.bill.merchant,merchantIcon)
+                }
                 val presented=syncWallet(db,presentation,
-                    incomingEvidence=bill.paymentMethod,changed=enriched || presentation!=identified)
+                    incomingEvidence=bill.paymentMethod,changed=enriched || promoted || presentation!=identified)
                 db.setTransactionSuccessful()
-                return if(supplemented || enriched || presented!=identified) IngestResult.Saved(presented,supplemented=supplemented)
+                return if(supplemented || enriched || presented!=identified) IngestResult.Saved(presented,
+                    updated=promoted && presented.state==RecordState.POSTED,supplemented=supplemented)
                     else IngestResult.DuplicateSkipped
             }
             val automatic = if(!requireReview) uniqueAutomaticPayment(capture,bill) else null

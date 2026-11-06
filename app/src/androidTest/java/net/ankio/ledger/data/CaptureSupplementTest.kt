@@ -151,6 +151,44 @@ class CaptureSupplementTest {
         assertEquals(2,store.captureHistory(pending.id).size)
     }
 
+    @Test fun strongIdentityCompletionCannotOverrideReviewOrUnreliableInputOrAmbiguousTransferType() {
+        for((index,required) in listOf(true,false).withIndex()) {
+            val fields=bill("SYNTHETIC-REVIEW-GATE-$index")
+            val pending=(store.ingest(capture("合成缺项$index"),fields.copy(reliable=false),screenshot=first) as IngestResult.Saved).record
+            val result=store.ingest(capture("合成后续$index"),fields.copy(reliable=required),screenshot=second,requireReview=required) as IngestResult.Saved
+            assertEquals(pending.uid,result.record.uid);assertEquals(RecordState.REVIEW,result.record.state);assertTrue(result.record.walletEffects.isEmpty())
+        }
+        val fields=bill("SYNTHETIC-AMBIGUOUS-TYPE")
+        val evidence=TransferEvidence(TransferIntent.AMBIGUOUS,terminalState=TransferTerminalState.COMPLETED,amountCents=10000,feeCents=0,feeMode=FeeMode.EXTRA)
+        val ambiguous=(store.ingest(capture("本人或对外待核对"),fields.copy(direction=null,transfer=evidence),screenshot=first) as IngestResult.Saved).record
+        val result=store.ingest(capture("普通付款后续"),fields,screenshot=second) as IngestResult.Saved
+        assertEquals(ambiguous.uid,result.record.uid);assertEquals(RecordState.REVIEW,result.record.state);assertNull(result.record.bill.direction)
+        assertEquals(evidence,result.record.bill.transfer);assertTrue(result.record.walletEffects.isEmpty())
+    }
+
+    @Test fun strongIdentityCompletionPreservesManualWalletAndEveryEligibilityAndPostsEffectsOnce() {
+        for(eligibility in WalletEligibility.entries) {
+            val chosen=store.saveAccount(LedgerAccount(name="合成人工卡$eligibility",amountCents=50000,kind="bank",bankCode="cmb",cardLast4="0007"))
+            val other=store.saveAccount(LedgerAccount(name="合成新默认$eligibility",amountCents=50000,kind="bank",bankCode="icbc",cardLast4="0008"))
+            val fields=bill("SYNTHETIC-COMPLETE-${eligibility.name}")
+            val pending=(store.ingest(capture("合成缺项$eligibility"),fields.copy(reliable=false),screenshot=first) as IngestResult.Saved).record
+            WalletAccounting.saveLink(store.writableDatabase,pending.wallet!!.copy(eligibility=eligibility,
+                accountUid=chosen.uid,selectionSource="MANUAL",manualLocked=true))
+            store.setDefaultWallet(other.uid)
+            val reliable=fields.copy(paymentMethod=PaymentMethodEvidence("BANK_CARD","DEBIT","icbc","0008"))
+            val result=store.ingest(capture("合成可靠补全$eligibility"),reliable,screenshot=second) as IngestResult.Saved
+            val saved=result.record
+            assertEquals(pending.uid,saved.uid);assertEquals(RecordState.POSTED,saved.state);assertEquals(eligibility,saved.wallet!!.eligibility)
+            assertTrue(saved.wallet!!.manualLocked);assertEquals(chosen.uid,saved.wallet!!.accountUid)
+            assertEquals(if(eligibility==WalletEligibility.ACTIVE)40000L else 50000L,store.getAccount(chosen.id)!!.amountCents)
+            assertEquals(50000L,store.getAccount(other.id)!!.amountCents)
+            val balances=store.accounts().associate {it.uid to it.amountCents};val movements=store.walletSnapshot().movements
+            store.ingest(capture("同笔已正式账单再补充$eligibility"),reliable,screenshot=third)
+            assertEquals(balances,store.accounts().associate {it.uid to it.amountCents});assertEquals(movements,store.walletSnapshot().movements)
+            assertEquals(saved.walletEffects,store.get(saved.id)!!.walletEffects)
+        }
+    }
+
     @Test fun severalHistoricalOrdersRemainSeparateAfterRepeatCaptureAndDatabaseReopen() {
         val entries=listOf(1256L,563L,2250L,2000L).mapIndexed { index,amount ->
             val fields=bill("TAOBAO-ORDER-$index").copy(amountCents=amount,merchant="同一家旗舰店",
