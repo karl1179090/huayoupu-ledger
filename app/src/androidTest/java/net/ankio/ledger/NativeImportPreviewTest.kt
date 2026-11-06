@@ -37,6 +37,30 @@ class NativeImportPreviewTest {
         assertTrue("Native action not clickable: $text",node?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true)
         instrumentation.waitForIdleSync()
     }
+    private fun nodes(node:AccessibilityNodeInfo?):List<AccessibilityNodeInfo> = if(node==null)emptyList() else
+        listOf(node)+(0 until node.childCount).flatMap {nodes(node.getChild(it))}
+    /** A chooser can contain more wallets than the native ListView viewport can attach. */
+    private fun clickListItem(label:String) {
+        val deadline=System.currentTimeMillis()+15000
+        var scrolls=0
+        while(System.currentTimeMillis()<deadline) {
+            val tree=nodes(instrumentation.uiAutomation.rootInActiveWindow)
+            var target=tree.firstOrNull {it.isVisibleToUser && it.text?.toString()==label}
+            if(target!=null) {
+                while(target!=null && !target.isClickable)target=target.parent
+                assertTrue("Exact native list item not clickable: $label",target?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true)
+                println("S8_PICKER exact=$label scrolls=$scrolls")
+                instrumentation.waitForIdleSync();return
+            }
+            val list=tree.firstOrNull {it.isVisibleToUser && it.isScrollable && it.className?.toString()=="android.widget.ListView"}
+            if(list!=null) {
+                if(scrolls==0)println("S8_PICKER offscreen=$label visible="+tree.filter {it.isVisibleToUser && !it.text.isNullOrEmpty()}.joinToString {it.text.toString()})
+                if(list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))scrolls++
+            }
+            Thread.sleep(100)
+        }
+        throw AssertionError("Exact native list item not reachable after $scrolls scrolls: $label")
+    }
     private fun screenshot(name:String) {
         instrumentation.waitForIdleSync();Thread.sleep(200)
         val image=requireNotNull(instrumentation.uiAutomation.takeScreenshot())
@@ -54,6 +78,8 @@ class NativeImportPreviewTest {
     }
     @Test fun pickerPreviewDefaultsClosedRemapsAtomicallyAndWalletOverwriteNeedsExplicitChoice() {
         val store=app.store;val suffix=UUID.randomUUID().toString().take(5)
+        // The full suite leaves many legitimate wallets; make the picker viewport boundary explicit.
+        val offscreenAccounts=List(24) { index->store.saveAccount(LedgerAccount(name="合成滚动候选$suffix-$index",amountCents=0)) }
         val a=store.saveAccount(LedgerAccount(name="合成转出$suffix",amountCents=100000))
         val b=store.saveAccount(LedgerAccount(name="合成目标$suffix",amountCents=20000))
         val snapshot=store.saveAccount(LedgerAccount(name="合成快照$suffix",amountCents=50000))
@@ -70,7 +96,7 @@ class NativeImportPreviewTest {
                 screenshot("01-bills-default-closed")
                 click("钱包映射（")
                 click("${b.name} → 未关联")
-                click("${b.name} · ${b.uid.take(8)}")
+                clickListItem("${b.name} · ${b.uid.take(8)}")
                 waitFor("导入账单预览");click("联动钱包余额（新文件默认关闭）")
                 waitFor("${a.name}：¥1000.00 → ¥899.00");waitFor("${b.name}：¥200.00 → ¥300.00")
                 screenshot("02-bills-remapped-linked-preview")
@@ -80,7 +106,7 @@ class NativeImportPreviewTest {
                 screenshot("03-wallet-default-retain-500")
                 click("账户匹配／新建／合并／跳过")
                 click("${snapshot.name} · ${snapshot.uid.take(8)}")
-                click("合并到 ${snapshot.name} · ${snapshot.uid.take(8)}")
+                clickListItem("合并到 ${snapshot.name} · ${snapshot.uid.take(8)}")
                 click("用文件余额覆盖本地余额")
                 click("重算预览")
                 waitFor("${snapshot.name}：本地 ¥500.00 · 文件 ¥300.00 → ¥300.00")
@@ -90,7 +116,7 @@ class NativeImportPreviewTest {
         } finally {
             billFile.delete();walletFile.delete()
             synchronized(store) { val db=store.writableDatabase;db.beginTransaction();try {
-                listOf(a,b,snapshot).forEach { account->db.delete("wallet_movements","account_uid=?",arrayOf(account.uid));db.delete("accounts","uid=?",arrayOf(account.uid)) }
+                (offscreenAccounts+listOf(a,b,snapshot)).forEach { account->db.delete("wallet_movements","account_uid=?",arrayOf(account.uid));db.delete("accounts","uid=?",arrayOf(account.uid)) }
                 db.setTransactionSuccessful()
             } finally { db.endTransaction() } }
             app.changed()

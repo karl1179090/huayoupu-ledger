@@ -273,23 +273,23 @@ class WalletAcceptanceTest {
         val store = store(); val wallet = account(store, 10_000); store.setDefaultWallet(wallet.uid)
         val original = LedgerRecord(capture = capture("合成CSV原始付款"), bill = bill().copy(amountCents = 1000), state = RecordState.POSTED)
         fun document(vararg records: LedgerRecord) = LedgerCsvImport.Document("合成CSV身份", records.toList(), emptyList(), records.size)
-        assertEquals(1, LedgerCsvImport.apply(store, document(original)).posted)
+        assertEquals(1, LedgerCsvImport.apply(store, document(original), linkWalletBalances = true).posted)
         val before = store.walletSnapshot().movements
         val variants = listOf(original.copy(uid = UUID.randomUUID().toString(), bill = original.bill.copy(amountCents = 2000)),
             original.copy(uid = UUID.randomUUID().toString(), bill = original.bill.copy(direction = Direction.INCOME)),
             original.copy(uid = UUID.randomUUID().toString(), bill = original.bill.copy(amountCents = 400, refund = RefundInfo("wechat", 1000, 600))))
         for (variant in variants) {
-            assertEquals(0, LedgerCsvImport.preview(store, document(variant)).ready)
-            assertEquals(0, LedgerCsvImport.apply(store, document(variant)).imported)
+            assertEquals(0, LedgerCsvImport.preview(store, document(variant), linkWalletBalances = true).ready)
+            assertEquals(0, LedgerCsvImport.apply(store, document(variant), linkWalletBalances = true).imported)
         }
         assertEquals(9000L, store.getAccount(wallet.id)!!.amountCents); assertEquals(before, store.walletSnapshot().movements)
         store.ingest(original.capture, original.bill.copy(amountCents = 400, refund = RefundInfo("wechat", 1000, 600)))
         assertEquals(9600L, store.getAccount(wallet.id)!!.amountCents)
-        assertEquals(0, LedgerCsvImport.apply(store, document(original.copy(uid = UUID.randomUUID().toString()))).imported)
+        assertEquals(0, LedgerCsvImport.apply(store, document(original.copy(uid = UUID.randomUUID().toString())), linkWalletBalances = true).imported)
         assertEquals(400L, store.all().single().bill.amountCents)
         val realNew = (1..2).map { index -> original.copy(uid = UUID.randomUUID().toString(),
             bill = original.bill.copy(transactionId = "SYNTHETIC-CSV-NEW-$index")) }
-        assertEquals(2, LedgerCsvImport.apply(store, document(*realNew.toTypedArray())).posted)
+        assertEquals(2, LedgerCsvImport.apply(store, document(*realNew.toTypedArray()), linkWalletBalances = true).posted)
         assertEquals(3, store.all().size); assertEquals(7600L, store.getAccount(wallet.id)!!.amountCents)
     }
 
@@ -297,14 +297,14 @@ class WalletAcceptanceTest {
         val store = store(); val wallet = account(store, 10_000); store.setDefaultWallet(wallet.uid)
         val original = LedgerRecord(capture = capture(), bill = bill().copy(amountCents = 1000), state = RecordState.POSTED)
         fun document(records: List<LedgerRecord>) = LedgerCsvImport.Document("合成CSV删除窗口", records, emptyList(), records.size)
-        LedgerCsvImport.apply(store, document(listOf(original)))
+        LedgerCsvImport.apply(store, document(listOf(original)), linkWalletBalances = true)
         val saved = store.all().single(); store.softDelete(saved.id, now)
         assertTrue(store.all().isEmpty()); assertEquals(10_000L, store.getAccount(wallet.id)!!.amountCents)
         val replay = listOf(original.copy(uid = UUID.randomUUID().toString(), bill = original.bill.copy(amountCents = 2000, direction = Direction.INCOME)),
             original.copy(bill = original.bill.copy(transactionId = "SYNTHETIC-CSV-DIFFERENT-ORDER")))
-        val preview = LedgerCsvImport.preview(store, document(replay))
+        val preview = LedgerCsvImport.preview(store, document(replay), linkWalletBalances = true)
         assertEquals(0, preview.ready); assertEquals(2, preview.duplicates)
-        assertEquals(0, LedgerCsvImport.apply(store, document(replay)).imported)
+        assertEquals(0, LedgerCsvImport.apply(store, document(replay), linkWalletBalances = true).imported)
         assertEquals(10_000L, store.getAccount(wallet.id)!!.amountCents); assertNull(store.get(saved.id))
         assertTrue(store.undoDelete(saved.id, now + 1)); assertEquals(9000L, store.getAccount(wallet.id)!!.amountCents)
         assertEquals(listOf(original.uid), store.all().map { it.uid })
