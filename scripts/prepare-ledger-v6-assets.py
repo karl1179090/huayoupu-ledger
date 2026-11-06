@@ -4,6 +4,8 @@ Run by PrepareLedgerAssets after web protection. Only its generated output is ch
 No network access, user screenshots or source assets are used as output targets.
 """
 import argparse
+import os
+import re
 import hashlib
 import html
 import json
@@ -11,6 +13,29 @@ from pathlib import Path
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def generated_output(value):
+    explicit_root = os.environ.get('LEDGER_GENERATED_BUILD_ROOT')
+    if explicit_root and not Path(explicit_root).is_absolute():
+        raise RuntimeError('Generated build root must be absolute')
+    build_root = Path(explicit_root or ROOT / 'app/build').resolve()
+    output = Path(value).resolve()
+    source_assets = (ROOT / 'app/src/main/assets').resolve()
+    if build_root == source_assets or build_root in source_assets.parents or source_assets in build_root.parents:
+        raise RuntimeError('Generated build root must remain separate from source assets')
+    try:
+        parts = output.relative_to(build_root / 'generated').parts
+    except ValueError as error:
+        raise RuntimeError('Only a generated ledger assets directory may be modified') from error
+    if len(parts) != 2 or not (
+        parts[0] == 'ledgerAssets' and re.fullmatch(r'[A-Za-z0-9_-]+', parts[1]) or
+        parts[0] == 'assets' and re.fullmatch(r'prepare[A-Za-z0-9]+LedgerAssets', parts[1])
+    ):
+        raise RuntimeError('Only a generated ledger assets directory may be modified')
+    if output == source_assets or output in source_assets.parents or source_assets in output.parents:
+        raise RuntimeError('Generated output must remain separate from source assets')
+    return output
 
 
 def digest(path):
@@ -28,10 +53,7 @@ def main():
     parser.add_argument('--abi', required=True, choices=['arm64-v8a', 'x86_64'])
     parser.add_argument('--coordinates', required=True, type=Path)
     args = parser.parse_args()
-    output = args.output.resolve()
-    generated = output.relative_to((ROOT / 'app/build/generated').resolve())
-    if generated.parts[0] not in {'assets', 'ledgerAssets'} or len(generated.parts) < 2:
-        raise RuntimeError('Only a generated ledger assets directory may be modified')
+    output = generated_output(args.output)
     lock = json.loads((ROOT / 'third_party/ocr-runtime/config/upstream-lock.json').read_text(encoding='utf-8'))
     native = json.loads((ROOT / 'third_party/ocr-runtime/config/ledger-v6-runtime-lock.json').read_text(encoding='utf-8'))
     if digest(ROOT / 'third_party/ocr-runtime/config/paddle-sdk.gradle.kts') != digest(ROOT / '.tools/ocr-ab/sdk/build.gradle.kts'):

@@ -7,13 +7,33 @@ const [sourceArgument, outputArgument, mode] = process.argv.slice(2);
 if (!sourceArgument || !outputArgument || !['debug', 'release'].includes(mode)) {
   throw new Error('Usage: node prepare-assets.cjs <source-assets> <generated-output> <debug|release>');
 }
-const source = path.resolve(sourceArgument);
-const output = path.resolve(outputArgument);
-const buildRoot = path.resolve(source, '../../..', 'build');
+// Resolve existing ancestors as well, so a generated-directory symlink cannot reach source files.
+function canonicalPath(value) {
+  let existing = path.resolve(value);
+  const missing = [];
+  while (!fs.existsSync(existing)) {
+    if (fs.lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw new Error('Dangling symlink is not a valid generated output');
+    }
+    missing.unshift(path.basename(existing));
+    const parent = path.dirname(existing);
+    if (parent === existing) throw new Error('Cannot resolve generated output root');
+    existing = parent;
+  }
+  return path.resolve(fs.realpathSync(existing), ...missing);
+}
+const source = canonicalPath(sourceArgument);
+const output = canonicalPath(outputArgument);
+const explicitBuildRoot = process.env.LEDGER_GENERATED_BUILD_ROOT;
+if (explicitBuildRoot && !path.isAbsolute(explicitBuildRoot)) throw new Error('Generated build root must be absolute');
+const buildRoot = canonicalPath(explicitBuildRoot || path.resolve(source, '../../..', 'build'));
 // Build cleanup is restricted to an explicit generated output directory, never the source tree.
-const allowedOutput = output.includes(`${path.sep}generated${path.sep}ledgerAssets${path.sep}`) ||
-  new RegExp(`[\\\\/]generated[\\\\/]assets[\\\\/]prepare[A-Za-z0-9]+LedgerAssets$`).test(output);
+const relative = path.relative(buildRoot, output).split(path.sep);
+const allowedOutput = relative.length === 3 && relative[0] === 'generated' &&
+  (relative[1] === 'ledgerAssets' && /^[A-Za-z0-9_-]+$/.test(relative[2]) ||
+   relative[1] === 'assets' && /^prepare[A-Za-z0-9]+LedgerAssets$/.test(relative[2]));
 if (!allowedOutput || !output.startsWith(buildRoot + path.sep) ||
+    buildRoot === source || source.startsWith(buildRoot + path.sep) || buildRoot.startsWith(source + path.sep) ||
     output === source || source.startsWith(output + path.sep) || output.startsWith(source + path.sep)) {
   throw new Error(`Output must be a separate generated/ledgerAssets/<variant> directory: ${source} -> ${output}`);
 }

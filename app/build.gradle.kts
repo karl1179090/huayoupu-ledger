@@ -34,6 +34,7 @@ abstract class PrepareLedgerAssets : DefaultTask() {
 
     @TaskAction fun prepare() {
         project.exec {
+            environment("LEDGER_GENERATED_BUILD_ROOT", project.layout.buildDirectory.get().asFile.absolutePath)
             commandLine("node", protectionTools.file("prepare-assets.cjs").get().asFile.absolutePath,
                 sourceAssets.get().asFile.absolutePath, outputDirectory.get().asFile.absolutePath,
                 if (protectJavaScript.get()) "release" else "debug")
@@ -42,6 +43,7 @@ abstract class PrepareLedgerAssets : DefaultTask() {
             val coordinates = temporaryDir.resolve("coordinates.txt")
             coordinates.writeText(runtimeCoordinates.get().joinToString("\n"))
             project.exec {
+                environment("LEDGER_GENERATED_BUILD_ROOT", project.layout.buildDirectory.get().asFile.absolutePath)
                 commandLine(project.providers.gradleProperty("ledgerPython").getOrElse("python"),
                     project.rootProject.file("scripts/prepare-ledger-v6-assets.py"),
                     "--output", outputDirectory.get().asFile, "--abi", targetAbi.get(), "--coordinates", coordinates)
