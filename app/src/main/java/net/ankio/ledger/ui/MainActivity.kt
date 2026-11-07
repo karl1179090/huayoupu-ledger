@@ -133,6 +133,7 @@ class MainActivity : Activity() {
                     renderImportState(ledger.importer.state.value)
                     permissionSetup.resume()
                     resumeCaptureRepair()
+                    openShortcutApplications()
                     openPendingRecord()
                     openPendingStatistics()
                 }
@@ -259,6 +260,12 @@ class MainActivity : Activity() {
         if(intent.action==OPEN_STATISTICS) {pendingStatisticsPeriod=statisticsPeriod(intent);openPendingStatistics()}
         if(intent.action==net.ankio.ledger.capture.CaptureHealth.REPAIR) { pendingCaptureRepair=true;resumeCaptureRepair() }
         if(intent.action==OPEN_RECORD) { pendingRecordId=intent.getLongExtra("recordId",0).takeIf { it>0 };openPendingRecord() }
+        openShortcutApplications()
+    }
+    private fun openShortcutApplications() {
+        if(!ready || intent.action!=net.ankio.ledger.capture.CaptureShortcutActivity.SELECT_APPLICATIONS)return
+        intent.action=null
+        showShakeApplications()
     }
     private fun statisticsPeriod(source:Intent):net.ankio.ledger.core.ExpensePeriod? {
         if(source.action!=OPEN_STATISTICS)return null

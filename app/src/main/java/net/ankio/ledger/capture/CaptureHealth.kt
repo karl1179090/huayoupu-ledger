@@ -46,7 +46,12 @@ class CaptureHealth(private val context:Context) {
         return enabled.split(':').mapNotNull(android.content.ComponentName::unflattenFromString).none { it==captureServiceComponent(context) }
     }
     fun suspendForMissingPermission():Boolean {
-        if(!context.ledger.channels.captureEnabled() || !permissionDefinitelyMissing())return false
+        if(!permissionDefinitelyMissing())return false
+        if(!context.ledger.channels.captureEnabled()) {
+            context.ledger.channels.invalidateShortcuts()
+            ScreenCaptureService.current?.cancelRecognition()
+            return false
+        }
         prefs.edit().putBoolean("repairShake",context.ledger.channels.enabled(ChannelSettings.Channel.OCR)).apply()
         blocked()
         context.ledger.channels.pauseForMissingPermission()

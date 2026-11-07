@@ -90,6 +90,21 @@ class ShakeWhitelistTest {
         assertNull(ShakeAuthorization.decode("{\"type\":\"PAYMENT_AUTO\",\"packageName\":\"$installedFixture\",\"masterGeneration\":17,\"applicationGeneration\":23}"))
         assertNull(ShakeAuthorization.decode("x".repeat(4_096)))
     }
+    @Test fun shortcutAuthorizationIsIndependentOfTheMotionSwitchButRevokesWithPermissionOrApplication() {
+        settings.setShakePackage(installedFixture,true)
+        val shortcut=settings.shortcutAuthorization(installedFixture)!!
+        assertTrue(shortcut.shortcut)
+        assertEquals(shortcut,ShakeAuthorization.decode(shortcut.encode()))
+        assertEquals("shortcut:$installedFixture",shortcut.origin)
+        assertTrue(settings.shakeAuthorized(shortcut));assertFalse(settings.shakeAllowed(installedFixture))
+        settings.set(ChannelSettings.Channel.OCR,true);settings.set(ChannelSettings.Channel.OCR,false)
+        assertTrue(ChannelSettings(settingsContext).shakeAuthorized(shortcut))
+        settings.invalidateShortcuts()
+        assertFalse(settings.shakeAuthorized(shortcut))
+        val fresh=settings.shortcutAuthorization(installedFixture)!!
+        settings.setShakePackage(installedFixture,false);settings.setShakePackage(installedFixture,true)
+        assertFalse(settings.shakeAuthorized(fresh))
+    }
     @Test fun aReplacementInstallationRequiresFreshSelectionAndCannotReuseTheOldTask() {
         settings.set(ChannelSettings.Channel.OCR,true);settings.setShakePackage(installedFixture,true)
         val old=settings.shakeAuthorization(installedFixture)!!

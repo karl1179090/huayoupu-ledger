@@ -61,7 +61,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     }
     private var firstSessionTaskId:Long?=null
     @Synchronized fun create(source:Source,origin:String,authorization:ShakeAuthorization?=null):Long {
-        require(authorization==null || source==Source.OCR && origin=="shake:${authorization.packageName}")
+        require(authorization==null || source==Source.OCR && origin==authorization.origin)
         return writableDatabase.insertOrThrow("tasks",null,ContentValues().apply {
         put("source",source.name);put("origin",origin);put("created_at",System.currentTimeMillis())
         put("status","CAPTURING");put("message","正在获取账单截图")
@@ -76,7 +76,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     /** A context with the wrong source or package is as untrusted as a missing legacy context. */
     fun shakeAuthorization(id:Long):ShakeAuthorization?=readableDatabase.rawQuery("SELECT source,origin,shake_authorization FROM tasks WHERE id=?",arrayOf(id.toString())).use {
         if(!it.moveToFirst() || it.getString(0)!=Source.OCR.name)return@use null
-        ShakeAuthorization.decode(if(it.isNull(2))null else it.getString(2))?.takeIf { authorization -> it.getString(1)=="shake:${authorization.packageName}" }
+        ShakeAuthorization.decode(if(it.isNull(2))null else it.getString(2))?.takeIf { authorization -> it.getString(1)==authorization.origin }
     }
     @Synchronized fun update(id:Long,status:String,message:String,recordId:Long?=null):Boolean {
         require(status in STATUSES)
@@ -109,6 +109,9 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     fun pendingShake(packageName:String?=null):List<Long> = readableDatabase.rawQuery(
         "SELECT id FROM tasks WHERE status IN ('CAPTURING','QUEUED','RECOGNIZING') AND "+(if(packageName==null)"origin LIKE 'shake:%'" else "origin=?"),
         packageName?.let { arrayOf("shake:$it") }).use { c -> buildList { while(c.moveToNext())add(c.getLong(0)) } }
+    fun pendingShortcut(packageName:String?=null):List<Long> = readableDatabase.rawQuery(
+        "SELECT id FROM tasks WHERE status IN ('CAPTURING','QUEUED','RECOGNIZING') AND "+(if(packageName==null)"origin LIKE 'shortcut:%'" else "origin=?"),
+        packageName?.let { arrayOf("shortcut:$it") }).use { c -> buildList { while(c.moveToNext())add(c.getLong(0)) } }
     fun exists(id:Long):Boolean=readableDatabase.rawQuery("SELECT 1 FROM tasks WHERE id=?",arrayOf(id.toString())).use { it.moveToFirst() }
     fun automatic(id:Long):Boolean=readableDatabase.rawQuery("SELECT origin FROM tasks WHERE id=?",arrayOf(id.toString())).use {
         it.moveToFirst() && it.getString(0).startsWith("payment_auto:")
@@ -196,7 +199,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     @Synchronized fun recoverInterrupted(preserveCurrentSession:Boolean=false) {
         // Old queue entries never had app-specific consent. Reject them even while
         // accessibility is disconnected, before resume's permission gate can return.
-        pendingShake().forEach { id ->
+        (pendingShake()+pendingShortcut()).forEach { id ->
             val authorization=shakeAuthorization(id)
             if(authorization==null || app?.channels?.shakeAuthorized(authorization)==false)
                 update(id,"CANCELLED","请重新选择应用后摇一摇，未新增账单")
@@ -209,10 +212,10 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             buildList { while(c.moveToNext())add(Triple(c.getLong(0),c.getString(1),c.getString(2))) }
         }
         for((id,status,origin) in entries) {
-            if(origin.startsWith("shake:") && shakeAuthorization(id)==null) {
+            if((origin.startsWith("shake:") || origin.startsWith("shortcut:")) && shakeAuthorization(id)==null) {
                 update(id,"CANCELLED","请重新选择应用后摇一摇，未新增账单");continue
             }
-            val resume=status=="RECOGNIZING" && (origin.startsWith("payment_auto:") || origin.startsWith("shake:")) && screenshots.contains(imageOwner(id))
+            val resume=status=="RECOGNIZING" && (origin.startsWith("payment_auto:") || origin.startsWith("shake:") || origin.startsWith("shortcut:")) && screenshots.contains(imageOwner(id))
             update(id,if(resume)"QUEUED" else "FAILED",if(resume)"已恢复截图，等待识别" else "上次识别被系统中断，请重新摇动或导入截图")
         }
     }

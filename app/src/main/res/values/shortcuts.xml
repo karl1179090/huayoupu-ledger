@@ -1,0 +1,4 @@
+<resources>
+    <string name="capture_shortcut_label">识别当前账单</string>
+    <string name="capture_shortcut_long_label">花有谱：识别当前账单</string>
+</resources>

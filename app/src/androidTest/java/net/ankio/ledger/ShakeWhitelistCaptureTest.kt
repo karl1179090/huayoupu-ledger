@@ -183,6 +183,85 @@ class ShakeWhitelistCaptureTest {
         assertEquals(count,service.screenshotRequests);assertEquals(before,taskIds());assertEquals(0,calls.get())
     }
 
+    @Test fun shortcutIsPublishedAndReturnsToTheSelectedBillBeforeCapturing() {
+        val shortcut=app.getSystemService(android.content.pm.ShortcutManager::class.java)
+            .manifestShortcuts.single { it.id=="capture_current_bill" }
+        assertEquals("识别当前账单",shortcut.shortLabel.toString())
+        assertEquals(CaptureShortcutActivity.CAPTURE_CURRENT_BILL,shortcut.intent!!.action)
+        val legacy=Intent(Intent.ACTION_CREATE_SHORTCUT).setPackage(app.packageName)
+        assertTrue(app.packageManager.queryIntentActivities(legacy,0).any {
+            it.activityInfo.name==CaptureShortcutActivity::class.java.name
+        })
+        startFixture("safe")
+        val count=service.screenshotRequests
+        startShortcut()
+        await { calls.get()==1 && app.captureQueue.size()==0 }
+        assertEquals(count+1,service.screenshotRequests)
+        assertEquals(fixturePackage,foregroundPackage())
+        assertTrue(app.store.all().any { it.bill.merchant.startsWith(merchant) })
+    }
+
+    @Test fun shortcutRetainsPrivacyChecksAndRejectsAnUnselectedApplication() {
+        val count=service.screenshotRequests;val before=taskIds()
+        for(mode in listOf("password","editable","verification","blank")) {
+            startFixture(mode);startShortcut();SystemClock.sleep(1_900)
+            assertEquals("Shortcut requested pixels for $mode",count,service.screenshotRequests)
+            assertEquals(before,taskIds())
+        }
+        startLedger();startShortcut();SystemClock.sleep(1_900)
+        assertEquals(count,service.screenshotRequests);assertEquals(before,taskIds())
+        startFixture("safe")
+        app.channels.setShakePackage(fixturePackage,false)
+        startShortcut();SystemClock.sleep(1_900)
+        assertEquals(count,service.screenshotRequests);assertEquals(before,taskIds());assertEquals(0,calls.get())
+    }
+
+    @Test fun shortcutWorksWithMotionAndAutomaticRecognitionDisabled() {
+        startFixture("safe")
+        val count=service.screenshotRequests
+        app.channels.set(ChannelSettings.Channel.OCR,false)
+        CaptureRuntime.refreshHealth()
+        await { !CaptureRuntime.running && !CaptureRuntime.sensorRunning }
+        startShortcut();await { calls.get()==1 && app.captureQueue.size()==0 }
+        assertFalse(app.channels.enabled(ChannelSettings.Channel.OCR))
+        assertFalse(app.channels.automaticEnabled());assertFalse(CaptureRuntime.sensorRunning)
+        assertEquals(count+1,service.screenshotRequests)
+        val task=(taskIds()-previousTasks).single()
+        assertTrue(app.tasks.shakeAuthorization(task)!!.shortcut)
+        assertTrue(app.store.all().any { it.bill.merchant.startsWith(merchant) })
+    }
+
+    @Test fun turningOffMotionDoesNotCancelAnAcquiredShortcutOrder() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        service.processorFactory=factory(entered,release)
+        startFixture("safe");startShortcut();await { entered.isCompleted }
+        app.channels.set(ChannelSettings.Channel.OCR,false)
+        service.cancelChannel(ChannelSettings.Channel.OCR);CaptureRuntime.refreshHealth()
+        await { !CaptureRuntime.sensorRunning }
+        release.complete(Unit)
+        await { app.captureQueue.size()==0 && app.store.all().any { it.bill.merchant.startsWith(merchant) } }
+        assertEquals(1,calls.get())
+    }
+
+    @Test fun shortcutCancelsIfTheBillWindowChangesBeforeTheScreenshot() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        service.beforeScreenshot={ entered.complete(Unit);release.await() }
+        startFixture("safe")
+        val count=service.screenshotRequests;val before=taskIds()
+        startShortcut();await { entered.isCompleted }
+        startLedger();release.complete(Unit);SystemClock.sleep(500)
+        assertEquals(count,service.screenshotRequests);assertEquals(before,taskIds());assertEquals(0,calls.get())
+    }
+
+    private fun startShortcut() {
+        val component=ComponentName(app,CaptureShortcutActivity::class.java)
+        // A NoDisplay activity cannot report a drawn window to `am start -W` on API 30.
+        automation.executeShellCommand("am start -n ${component.flattenToString()} -a ${CaptureShortcutActivity.CAPTURE_CURRENT_BILL} -f 0x10000000").use {
+            val output=java.io.FileInputStream(it.fileDescriptor).readBytes().toString(Charsets.UTF_8)
+            assertFalse("Shortcut activity failed: $output",output.contains("Error:"))
+        }
+    }
+
     private fun startFixture(mode:String) {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         automation.waitForIdle(250,3_000)
