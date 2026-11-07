@@ -56,8 +56,13 @@ class CaptureHealth(private val context:Context) {
     }
     fun snapshot():JSONObject {
         val state=state()
-        return JSONObject().put("enabled",state.enabled).put("ready",state.blocker==CaptureBlocker.NONE)
-            .put("blocker",state.blocker.name).put("message",message(state.blocker))
+        val selected=context.ledger.channels.selectedShakePackages().size
+        val selectionRequired=context.ledger.channels.enabled(ChannelSettings.Channel.OCR) && selected==0
+        val onlySelection=selectionRequired && !context.ledger.channels.automaticEnabled()
+        return JSONObject().put("enabled",state.enabled).put("ready",!onlySelection && state.blocker==CaptureBlocker.NONE)
+            .put("blocker",if(onlySelection)"APPLICATIONS" else state.blocker.name)
+            .put("message",if(onlySelection)"请选择允许摇一摇记账的应用" else message(state.blocker))
+            .put("shakeSelectedCount",selected).put("shakeSelectionRequired",selectionRequired).put("sensorRunning",CaptureRuntime.sensorRunning)
             .put("permitted",state.permitted).put("connected",state.connected).put("runtimeRunning",state.runtimeRunning)
             .put("deviceGuide",DevicePermissionGuidance.payload())
             .put("lastBlockedAt",prefs.getLong("lastBlockedAt",0)).put("lastBlockedReason",prefs.getString("lastBlockedReason",""))

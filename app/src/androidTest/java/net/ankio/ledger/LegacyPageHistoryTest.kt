@@ -37,7 +37,10 @@ class LegacyPageHistoryTest {
             assertEquals(RecordState.REVIEW,saved.record.state);assertEquals("REVIEW",app.tasks.status(task));assertNotNull(app.tasks.image(task))
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 val web=WebUiProbe(scenario);web.ready()
-                web.await("document.querySelector('[data-pending=\"${saved.record.id}\"]')?.textContent.includes('交易自动 · AI识别')")
+                // This historical fixture has a fixed transaction date, which need not
+                // fall in the device's current month used by the first paged snapshot.
+                web.run("month=localMonth(${saved.record.bill.occurredAt});filter='expense';viewKey='';refresh()")
+                web.await("document.querySelector('[data-pending=\"${saved.record.id}\"]')?.textContent.includes('自动记账')")
                 assertEquals("page",web.text("records.find(r=>r.id===${saved.record.id}).captureMode"))
             }
         } finally { image.recycle();app.tasks.delete(task);app.store.all().filter { it.id !in before }.forEach { app.store.delete(it.id) };app.recognitionSession.invalidate();app.changed() }
@@ -56,7 +59,7 @@ class LegacyPageHistoryTest {
         val task=app.tasks.create(Source.OCR,"page_auto");app.tasks.update(task,"FAILED","合成识别失败")
         try { ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val web=WebUiProbe(scenario);web.ready()
-            web.await("document.querySelector('[data-task=\"$task\"]')?.textContent.includes('交易自动 · AI识别')")
+            web.await("document.querySelector('[data-task=\"$task\"]')?.textContent.includes('自动记账')")
             web.run("document.querySelector('[data-task=\"$task\"]').click()")
             web.await("document.querySelector('#record-panel').open && document.querySelector('#source-label').textContent==='交易自动识别'")
         } } finally { app.tasks.delete(task);app.changed() }

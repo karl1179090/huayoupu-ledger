@@ -1,0 +1,4 @@
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/widget_year_card_bg"/>
+    <corners android:radius="10dp"/>
+</shape>

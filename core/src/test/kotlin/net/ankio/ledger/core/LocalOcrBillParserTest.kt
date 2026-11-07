@@ -6,6 +6,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocalOcrBillParserTest {
+    @Test fun fullRefundStatusWithCompleteEvidenceRemainsAZeroNetAdjustment() {
+        val result = parse("微信支付", "已全额退款", "原付款金额：100.00元", "累计退款：100.00元",
+            "原支付时间：2026-10-17 12:00:00", "原交易单号：202610171234567890123456",
+            "付款方式：招商银行（0007）")!!
+        assertTrue(result.reason, result.reliable); assertEquals(0L, result.amountCents)
+        assertEquals(10000L, result.refund!!.refundedCents)
+        assertEquals("0007", result.paymentMethod!!.cardLast4)
+        assertNull(TransactionRejection.reason("已全额退款"))
+    }
+
+    @Test fun standaloneReceiptRetainsItsRefundIdentityWhileWaitingForOriginalAmount() {
+        val result = parse("支付宝", "退款已到账", "退款金额：20.00元", "退款方式：余额",
+            "退款单号：202610181234567890123456", "原交易单号：202610171234567890123456")!!
+        assertFalse(result.reliable); assertNull(result.amountCents); assertNull(result.refund)
+        assertEquals(2000L, result.standaloneRefund!!.refundedCents)
+        assertEquals("202610181234567890123456", result.standaloneRefund.refundId)
+        assertEquals("202610171234567890123456", result.standaloneRefund.originalTransactionId)
+    }
+
     @Test fun closedShoppingOrderNeverCreatesARefundReviewDraft() {
         for(status in listOf("交易关闭", "订单已关闭", "订单已取消")) {
             assertNull(status,parse(status,"店铺名称：合成旗舰店","实付价¥14.90",
@@ -99,10 +118,11 @@ class LocalOcrBillParserTest {
             assertNull(parse("待收货","实付价：${price}元","实付款：0元",origin=PaymentApps.TAOBAO,expenseOnly=true))
         }
     }
-    @Test fun fullyRefundedOriginalPageHasAConciseSkipReason() {
+    @Test fun incompleteFullyRefundedPageStaysAReviewDraft() {
         val raw="账单详情 120.00 已全额退款 查看关联记录 支付时间 2026-10-18 22:23:45"
         assertTrue(StandaloneRefundReceipt.matches(raw))
-        assertNull(parse(raw))
+        val result = parse(raw)!!
+        assertFalse(result.reliable); assertNull(result.amountCents)
     }
     @Test fun actualPayLaterOcrKeepsPriceDetailSuffixAndCurrencyZeroConfusionOutOfTheAmount() {
         for((label,expected) in listOf("实付价¥12.56 价格明细>" to 1256L,"实付价¥5.63 价格明细〉" to 563L)) {
@@ -116,9 +136,10 @@ class LocalOcrBillParserTest {
             LocalOcrLine("收款方全称"),LocalOcrLine("合成云计算有限公司")),0,0,System.currentTimeMillis())!!
         assertEquals("合成云计算有限公司",bill.merchant)
     }
-    @Test fun standaloneRefundReceiptIsNotAnExpenseOrIncome() {
-        assertNull(LocalOcrBillParser.parse(listOf(LocalOcrLine("退款成功"),LocalOcrLine("120.00"),
-            LocalOcrLine("关联记录"),LocalOcrLine("查看原账单"),LocalOcrLine("退款方式"),LocalOcrLine("余额")),0,0,System.currentTimeMillis()))
+    @Test fun standaloneRefundReceiptCannotPostAsAnExpenseOrIncome() {
+        val result = LocalOcrBillParser.parse(listOf(LocalOcrLine("退款成功"),LocalOcrLine("120.00"),
+            LocalOcrLine("关联记录"),LocalOcrLine("查看原账单"),LocalOcrLine("退款方式"),LocalOcrLine("余额")),0,0,System.currentTimeMillis())!!
+        assertFalse(result.reliable); assertNull(result.amountCents); assertEquals(Direction.EXPENSE, result.direction)
     }
     @Test fun explicitManualPaidAmountPostsWithoutMerchantDateOrSuccessWords() {
         val result=parse("订单详情","实付款：26.90元",origin=PaymentApps.TAOBAO)!!

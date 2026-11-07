@@ -1,0 +1,163 @@
+Baseline: 91aad555f01772e9f4c8f8e70e2da70a30f0879b
+26:    fun existing() = ExistingBill(id, capture.source, capture.origin, capture.text,
+40:    private fun imageOwner(id: Long) = "ledger:$name:$id"
+41:    private fun historyOwner(id: Long, sequence: Int) = if (sequence == 1) imageOwner(id) else "ledger:$name:$id:history:$sequence"
+42:    override fun onOpen(db:SQLiteDatabase) {
+60:    override fun onCreate(db: SQLiteDatabase) {
+80:    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+116:    private fun migrateWallets(db: SQLiteDatabase) {
+131:    private fun createIdentitiesAndUndo(db:SQLiteDatabase) {
+141:    private fun identities(record:LedgerRecord)=(record.identities+TransactionIdentities.from(record.capture,record.bill)).distinct()
+142:    private fun identitiesConflict(old:LedgerRecord,capture:Capture,bill:ParsedBill):Boolean {
+146:    private fun primaryIssuerConflictsWithCapture(capture:Capture,bill:ParsedBill):Boolean {
+152:    private fun persistIdentities(db:SQLiteDatabase,id:Long,ids:List<TransactionIdentity>) {
+163:    private fun identityMatch(db:SQLiteDatabase,capture:Capture,bill:ParsedBill):LedgerRecord? {
+177:    fun matchingIdentity(capture:Capture,bill:ParsedBill):LedgerRecord? = identityMatch(readableDatabase,capture,bill)?.let { get(it.id) }
+179:    private fun createRefunds(db: SQLiteDatabase) {
+191:    private fun createMerchantIcons(db: SQLiteDatabase) {
+197:    private fun linkMerchantIcon(db: SQLiteDatabase, id: Long, merchant: String, image: ByteArray?) {
+212:    private fun iconKey(db: SQLiteDatabase, id: Long): String? = db.query("merchant_icons", arrayOf("merchant_key"),
+215:    private fun pruneIcon(db: SQLiteDatabase, key: String?) {
+223:    private fun enrichPaymentPresentation(db:SQLiteDatabase,original:LedgerRecord,capture:Capture,bill:ParsedBill,image:ByteArray?):LedgerRecord {
+224:        fun compact(value:String)=java.text.Normalizer.normalize(value,java.text.Normalizer.Form.NFKC)
+250:    private fun migratePreviewIcons(db: SQLiteDatabase) {
+269:    private fun createCaptureImages(db: SQLiteDatabase) {
+273:    private fun createAccountsAndCategories(db: SQLiteDatabase) {
+280:    private fun createAccounts(db: SQLiteDatabase) {
+290:    private fun withWallet(record: LedgerRecord): LedgerRecord {
+295:    private fun encodePaymentEvidence(e: PaymentMethodEvidence?): String? = e?.let {
+302:    private fun decodePaymentEvidence(value: String?): PaymentMethodEvidence? = value?.let {
+304:        fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotEmpty)
+309:    private fun encodeStandaloneRefund(e:StandaloneRefundEvidence?):String?=e?.let {
+315:    private fun decodeStandaloneRefund(value:String?):StandaloneRefundEvidence?=value?.let {
+317:        fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotBlank)
+322:    private fun syncWallet(db:SQLiteDatabase,record:LedgerRecord,isNew:Boolean=false,kind:String="EDIT",
+384:    private fun recordIncludingDeleted(id:Long):LedgerRecord?=readableDatabase.query("records",null,"id=?",arrayOf(id.toString()),null,null,null)
+386:    private fun getByUid(uid:String):LedgerRecord?=readableDatabase.query("records",null,"uid=?",arrayOf(uid),null,null,null)
+388:    private fun checkRecordRevision(record:LedgerRecord,expectedRevision:Long?) {
+396:    @Synchronized fun committedCapture(operationKey:String):CommittedCapture? {
+401:    @Synchronized fun committedPaymentEvent(eventKey:String):CommittedCapture? {
+406:    private fun redirectCaptureReceipts(db:SQLiteDatabase,fromUid:String,toUid:String) {
+411:    @Synchronized fun ingestRecognition(capture:Capture,bill:ParsedBill,operationKey:String,eventKey:String?=null,
+434:    fun hasCaptureEvent(key:String):Boolean=readableDatabase.rawQuery("SELECT 1 FROM capture_events WHERE event_key=?",arrayOf(key)).use { it.moveToFirst() }
+436:    @Synchronized fun rememberCaptureEvent(key:String) {
+443:    fun ingest(capture: Capture, bill: ParsedBill, eventKey: String? = null, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, requireReview: Boolean = false): IngestResult {
+482:                val presented=syncWallet(db,presentation,
+490:                val completed=syncWallet(db,completePaymentIdentity(db,automatic,bill),incomingEvidence=bill.paymentMethod)
+500:                val linked=syncWallet(db,repeated,incomingEvidence=bill.paymentMethod,changed=false)
+519:                val linked=syncWallet(db,refundedOriginal,incomingEvidence=bill.paymentMethod,changed=false)
+556:                original=syncWallet(db,original,incomingEvidence=bill.paymentMethod,changed=promoted)
+578:            syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
+586:    private fun uniqueRepeatedPayment(capture:Capture,bill:ParsedBill):LedgerRecord? {
+605:    @Synchronized fun reconcilePendingDuplicates():Map<Long,Long> {
+624:                syncWallet(db,requireNotNull(get(record.id)))
+652:                        syncWallet(db,requireNotNull(get(current.id)))
+677:    @Synchronized fun repairMerchantLabel(id:Long,recognized:ParsedBill,icon:ByteArray?):Boolean {
+690:            syncWallet(db,requireNotNull(get(id)));db.setTransactionSuccessful();return true
+694:    fun merchantLabelRepairCandidates():List<LedgerRecord> = query("source IN ('OCR','IMAGE') AND " +
+698:    @Synchronized fun discardStandaloneRefundReceipts():List<Long> = readableDatabase.rawQuery(
+705:    @Synchronized fun discardRejectedDrafts():Map<Long,String> = query("state='REVIEW' AND source IN ('OCR','IMAGE')",null).filter {
+712:    fun saveEdited(record: LedgerRecord, walletAccountUid:String?=null,manualWalletSelected:Boolean=false,
+749:            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected)
+756:    fun get(id: Long): LedgerRecord? = readableDatabase.query("records", null, "id = ? AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=records.id)",
+759:    fun captureHistory(recordId: Long): List<RecordCaptureHistory> = readableDatabase.query("capture_history", null,
+762:            fun text(key:String)=c.getString(c.getColumnIndexOrThrow(key))
+763:            fun number(key:String)=c.getLong(c.getColumnIndexOrThrow(key))
+764:            fun optional(key:String):Long?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it))null else c.getLong(it) }
+771:    fun historyScreenshot(recordId: Long, sequence: Int): ByteArray? {
+779:    fun historyRevisions(availableOwners: Set<String>,recordIds:Set<Long>?=null): Map<Long,String> = readableDatabase.rawQuery(
+791:    private fun idFilter(ids:Set<Long>?,column:String="record_id"):String {
+797:    fun availableScreenshotOwners(recordIds:Set<Long>):Set<String> {
+807:    fun captureHistories(availableOwners: Set<String> = screenshots.availableOwners()): Map<Long,List<RecordCaptureHistory>> =
+810:            fun text(key:String)=c.getString(c.getColumnIndexOrThrow(key))
+811:            fun number(key:String)=c.getLong(c.getColumnIndexOrThrow(key))
+812:            fun optional(key:String):Long?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it))null else c.getLong(it) }
+822:    private fun insertHistory(db: SQLiteDatabase, id: Long, entry: RecordCaptureHistory) {
+831:    private fun appendPaymentScreenshot(db: SQLiteDatabase, original: LedgerRecord, capture: Capture, image: ByteArray?, kind: String = "payment_supplement"): Boolean {
+854:    @Synchronized fun restoreHistory(recordId:Long, entries:List<RestoredCaptureHistory>) =
+858:    @Synchronized fun restoreHistory(recordId:Long, entries:List<RestoredCaptureHistory>,
+888:    private fun refundIdentityMatches(original:LedgerRecord,incoming:ParsedBill):Boolean {
+896:    private fun postedRefundIdentityCandidates(bill:ParsedBill):List<LedgerRecord> {
+903:    private fun refundAmountCandidates(bill:ParsedBill):List<LedgerRecord> {
+914:    private fun compatibleRefund(original:LedgerRecord, incoming:ParsedBill):Boolean {
+923:    private fun isAutomaticPayment(record:LedgerRecord):Boolean = record.state==RecordState.POSTED &&
+929:    private fun uniqueAutomaticPayment(capture:Capture,bill:ParsedBill):LedgerRecord? {
+939:    private fun automaticPaymentCandidates(capture:Capture,bill:ParsedBill):List<LedgerRecord> {
+953:    private fun completePaymentIdentity(db:SQLiteDatabase,original:LedgerRecord,bill:ParsedBill):LedgerRecord {
+961:    private fun matchingRefundCandidates(capture:Capture,bill:ParsedBill):List<LedgerRecord> {
+970:    private fun standaloneRefundCandidates(capture:Capture,evidence:StandaloneRefundEvidence,exactOnly:Boolean):List<LedgerRecord> {
+982:    private fun completeStandaloneRefund(original:LedgerRecord,bill:ParsedBill):ParsedBill {
+990:    private fun ingestStandaloneRefund(db:SQLiteDatabase,capture:Capture,bill:ParsedBill,image:ByteArray?,requireReview:Boolean,merchantIcon:ByteArray?):IngestResult {
+1016:        syncWallet(db,pending.copy(id=id),isNew=true,kind="REFUND")
+1020:    fun refundCandidates(pendingId:Long):List<LedgerRecord> {
+1028:    @Synchronized fun confirmRefund(pendingId:Long,targetId:Long):IngestResult.Saved {
+1048:    private fun ingestRefund(db:SQLiteDatabase,capture:Capture,bill:ParsedBill,image:ByteArray?,requireReview:Boolean,merchantIcon:ByteArray?=null):IngestResult {
+1088:        syncWallet(db,pending.copy(id=id),isNew=true,kind="POST")
+1092:    private fun canCreateNetRefund(capture:Capture,bill:ParsedBill):Boolean {
+1099:    private fun insertNetRefund(db:SQLiteDatabase,capture:Capture,bill:ParsedBill,image:ByteArray?,merchantIcon:ByteArray?):IngestResult.Saved {
+1114:            syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
+1120:    @Synchronized fun reconcilePendingRefunds():Map<Long,Long> {
+1140:                    syncWallet(db,settled,kind="REFUND")
+1149:    private fun refundConflict(original:LedgerRecord,bill:ParsedBill):String? {
+1167:    private fun applyRefund(db:SQLiteDatabase,original:LedgerRecord,capture:Capture,bill:ParsedBill,image:ByteArray?):IngestResult.Saved {
+1178:            return IngestResult.Saved(syncWallet(db,original,kind="REFUND",incomingEvidence=null,changed=false),supplemented=supplemented)
+1194:            syncWallet(db,updated,kind="REFUND",incomingEvidence=null)
+1203:    fun posted(start: Long, end: Long): List<LedgerRecord> = query(
+1207:    fun pending(): List<LedgerRecord> = query("state = ?", arrayOf(RecordState.REVIEW.name))
+1208:    fun all(): List<LedgerRecord> = query(null, null)
+1210:    @Synchronized internal fun importIdentityRecords():List<LedgerRecord> = readableDatabase.query(
+1213:    internal fun activeRecordIdsByUid():Map<String,Long> = readableDatabase.rawQuery(
+1218:    @Synchronized internal fun releaseImportedMedia(recordIds:Collection<Long>) {
+1224:    fun screenshotIds(availableOwners: Set<String> = screenshots.availableOwners(),recordIds:Set<Long>?=null): Set<Long> =
+1228:    fun merchantIconKeys(recordIds:Set<Long>?=null): Map<Long, String> {
+1235:    fun merchantIconIds(): Set<Long> = merchantIconKeys().keys
+1237:    fun merchantIconRevisions(recordIds:Set<Long>?=null):Map<String,Int> = readableDatabase.rawQuery(
+1243:    fun merchantIconAsset(key: String): ByteArray? = readableDatabase.query("merchant_icon_assets", arrayOf("image"),
+1246:    fun merchantIcon(id: Long): ByteArray? = readableDatabase.rawQuery("SELECT a.image FROM merchant_icons l " +
+1251:    @Synchronized fun restoreMerchantIcon(id:Long,image:ByteArray) {
+1260:    @Synchronized fun attachScreenshot(id:Long,image:ByteArray) {
+1267:    fun screenshot(id: Long): ByteArray? {
+1272:    @Synchronized fun delete(id: Long,expectedRevision:Long?=null,submissionToken:String?=null) {
+1278:            deleting?.let { checkRecordRevision(it,expectedRevision);syncWallet(db,it,kind="DELETE",deleted=true) }
+1296:    @Synchronized fun softDelete(id:Long,now:Long=System.currentTimeMillis(),expectedRevision:Long?=null,submissionToken:String?=null):Boolean {
+1302:            syncWallet(db,record,kind="DELETE",deleted=true)
+1313:    private fun markDeletedMedia(id:Long,state:String) {
+1318:    @Synchronized fun undoDelete(id:Long,now:Long=System.currentTimeMillis(),expectedRevision:Long?=null,submissionToken:String?=null):Boolean {
+1326:                syncWallet(db,record,kind="UNDO_DELETE")
+1334:    fun pendingDeletion(now:Long=System.currentTimeMillis()):DeletedRecord? = readableDatabase.rawQuery(
+1338:    @Synchronized fun purgeExpiredDeletes(now:Long=System.currentTimeMillis()):List<Long> {
+1347:    fun accounts(): List<LedgerAccount> = readableDatabase.query("accounts", null, null, null,
+1350:    fun getAccount(id: Long): LedgerAccount? = readableDatabase.query("accounts", null, "id = ?",
+1353:    fun getAccountByUid(uid:String):LedgerAccount?=readableDatabase.query("accounts",null,"uid=?",arrayOf(uid),null,null,null)
+1357:    fun saveAccount(account: LedgerAccount, calibrateBalance:Boolean=false,expectedRevision:Long?=null,submissionToken:String?=null): LedgerAccount {
+1397:    private fun hasWalletHistory(db:SQLiteDatabase,uid:String):Boolean = db.rawQuery(
+1400:    private fun validateArchive(db:SQLiteDatabase,uid:String) {
+1403:    @Synchronized fun archiveAccount(id:Long):LedgerAccount {
+1407:    @Synchronized fun deleteAccount(id: Long) {
+1418:    @Synchronized fun walletSettings():WalletSettings=WalletAccounting.settings(readableDatabase)
+1419:    private fun requireAvailableWallet(uid:String):LedgerAccount {
+1424:    @Synchronized fun setDefaultWallet(uid:String?):WalletSettings {
+1432:    @Synchronized fun setAppWallet(packageName:String,uid:String?):WalletSettings {
+1444:    @Synchronized fun walletMovements(accountUid:String,limit:Int=50,offset:Int=0):List<WalletMovement> {
+1449:    @Synchronized fun walletSnapshot():WalletSnapshot {
+1460:    fun customCategories(): List<CustomCategory> = readableDatabase.query("custom_categories", null,
+1467:    fun addCategory(category: CustomCategory): Boolean {
+1473:    @Synchronized fun deleteCategory(category: CustomCategory) {
+1482:    fun merge(records: List<LedgerRecord>, accounts: List<LedgerAccount> = emptyList(),
+1514:    @Synchronized fun restoreBackup(backup:ValidatedBackup):Int=restoreBackupDetailed(backup).imported
+1515:    @Synchronized fun restoreBackupDetailed(backup:ValidatedBackup):RestoreSummary {
+1561:    private fun movementValues(m:WalletMovement)=ContentValues().apply {
+1567:    @Synchronized fun importTransactions(records:List<LedgerRecord>):List<LedgerRecord> {
+1579:                    saved.add(syncWallet(db,record.copy(id=id,duplicateId=null),isNew=true,kind="POST",incomingEvidence=null,sourcePackage=null))
+1585:    @Synchronized fun previewWallet(record:LedgerRecord):WalletResolution {
+1590:    @Synchronized fun walletConfigurationToken():String {
+1601:    private fun accountValues(account: LedgerAccount) = ContentValues().apply {
+1608:    private fun categoryValues(category: CustomCategory) = ContentValues().apply {
+1612:    private fun readAccount(cursor: Cursor) = LedgerAccount(
+1623:    private fun query(where: String?, args: Array<String>?): List<LedgerRecord> = readableDatabase.query(
+1628:    private fun values(r: LedgerRecord) = ContentValues().apply {
+1642:    private fun read(c: Cursor): LedgerRecord {
+1643:        fun text(key: String) = c.getString(c.getColumnIndexOrThrow(key))
+1644:        fun number(key: String) = c.getLong(c.getColumnIndexOrThrow(key))
+1645:        fun optionalNumber(key: String): Long? = c.getColumnIndexOrThrow(key).let { if (c.isNull(it)) null else c.getLong(it) }
+1646:        fun optionalText(key: String): String? = c.getColumnIndexOrThrow(key).let { if (c.isNull(it)) null else c.getString(it) }

@@ -1,0 +1,55 @@
+{
+  "synthetic": true,
+  "device": "huayoupu-api30-arm64",
+  "serial": "emulator-5554",
+  "android": "11",
+  "api": 30,
+  "abi": "arm64-v8a",
+  "test": "NativeImportPreviewTest.pickerPreviewDefaultsClosedRemapsAtomicallyAndWalletOverwriteNeedsExplicitChoice",
+  "bill": {
+    "amountCents": 10000,
+    "feeCents": 100,
+    "feeMode": "EXTRA",
+    "fromBeforeCents": 100000,
+    "toBeforeCents": 20000,
+    "defaultLinkBalances": false,
+    "previewAfterMapping": {
+      "fromCents": 89900,
+      "toCents": 30000
+    },
+    "committed": false
+  },
+  "wallet": {
+    "localCents": 50000,
+    "fileCents": 30000,
+    "defaultFinalCents": 50000,
+    "explicitOverwriteFinalCents": 30000,
+    "committed": false
+  },
+  "images": [
+    {
+      "file": "huayoupu-s5-01-bills-default-closed.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "b219c2cfcd4c1b0eb40466930e7242fe5dcf98ab9f05f6b53b716d81a8dc91f7"
+    },
+    {
+      "file": "huayoupu-s5-02-bills-remapped-linked-preview.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "42267acc1592f73743a701225c5f408e04cd141e3f74894e0d4e087973c2055f"
+    },
+    {
+      "file": "huayoupu-s5-03-wallet-default-retain-500.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "a8c326b53618253191c8c7b20545ad5e844d70ced261889ddeeeb61f24d8b41f"
+    },
+    {
+      "file": "huayoupu-s5-04-wallet-explicit-overwrite-300.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "571cb0da849e19fad1f27124261595d597364b21914c90cd3f195a61d75e5901"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "deviceScaleFactor": 1,
+  "reducedMotion": "reduce",
+  "timezoneId": "Asia/Shanghai",
+  "now": "2026-11-06T04:00:00Z",
+  "fixture": "same check-wallet-whitelist fixture as S0 for six comparison states; extra transfer/precision fixtures are separate",
+  "errors": [],
+  "note": "Synthetic browser fixtures; native 100000-record aggregation is independently tested by LedgerStatisticsTest."
+}

@@ -16,7 +16,7 @@ class LedgerCandidateOptimizationTest {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val namespace="candidate-${UUID.randomUUID()}"
     private val images=ScreenshotStore(context,namespace)
-    private val store=LedgerStore(context,"$namespace-ledger.db",images)
+    private val store=LedgerStore(context,"$namespace-ledger.db",images).prepareSyntheticDefaultWallet()
     private val at=1_790_000_000_000L
     private fun capture(text:String="合成付款",time:Long=at,origin:String=PaymentApps.WECHAT)=Capture(Source.OCR,origin,text,time)
     private fun bill(id:String?=null,time:Long=at)=ParsedBill(10000,Direction.EXPENSE,"合成候选商户","购物",time,id,true,"",true)

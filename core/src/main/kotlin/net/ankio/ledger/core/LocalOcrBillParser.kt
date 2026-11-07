@@ -25,10 +25,10 @@ object LocalOcrBillParser {
     private val originalLabel = Regex("^(?:原(?:付款|支付|交易|订单)(?:$amountWord)?|原$amountWord|原付|付款$amountWord|支付$amountWord|交易$amountWord|订单$amountWord)[：:]?")
     private val refundLabel = Regex("^(?:累计(?:成功)?退款(?:$amountWord)?|退款总额|已(?:成功)?退款(?:$amountWord)?|已退$amountWord|已退)[：:]?")
     private val singleRefundLabel = Regex("^(?:本次退款(?:$amountWord)?|退款$amountWord)[：:]?")
-    private val refundIntent = Regex("累计(?:成功)?退款|退款总额|已(?:成功|部分|全部|全额)?退款|已退金额|退款(?:成功|完成|处理中|申请中|审核中|失败|金额|单号)|本次退款")
+    private val refundIntent = Regex("累计(?:成功)?退款|退款总额|已(?:成功|部分|全部|全额)?退款|全额退款成功|已退金额|退款(?:成功|完成|已到账|到账成功|处理中|申请中|审核中|失败|金额|单号)|本次退款")
     private val merchantLabel = Regex("^(?:商[户戶](?:全称|名称|金称|各称)|商家名称|店铺名称|收款方(?:全称|名称)?(?!备注|服务)|付款方(?:全称|名称)?(?!备注|服务)|交易对方|对方账户|对方账号)[：:]?")
     private val paymentTimeLabel = Regex("^(?:原(?:支付|付款|交易|转账)时间|支付时间|付款时间|交易时间|转账时间)[：:]?")
-    private val idLabel = Regex("^(?:(?:原)?(?:微信|支付宝)?(?:支付|付款|交易|转账|订单))(?:编号|单号|号)[：:]?")
+    private val idLabel = Regex("^(?:(?:原)?(?:微信|支付宝)?(?:支付|付款|交易|转账|充值|提现|订单))(?:编号|单号|号)[：:]?")
     private val datePattern = Regex("(20[0-9]{2})[年/.-]([0-9]{1,2})[月/.-]([0-9]{1,2})日?\\s*([0-9]{1,2})[:：]([0-9]{2})(?:[:：]([0-9]{2}))?")
     private val uiText = Regex("支付成功|付款成功|转账成功|交易成功|账单详情|交易详情|转账详情|全部账单|返回商家|完成|当前状态|账单服务|收款方服务|支付方式|付款方式|零钱|余额|银行卡|对订单有疑惑|电子凭证|退款|返回|服务由|¥|^[+-]?[0-9,.]+$")
     private val ignoredMoney = Regex("优惠|红包|立减|折扣|优惠券|积分|余额|手续费|服务费|奖励|最多|最高|原价|订单金额|退款|已退")
@@ -49,7 +49,7 @@ object LocalOcrBillParser {
     private val wechatProvider = Regex("微信|财付通|WeChat", RegexOption.IGNORE_CASE)
     private val alipayProvider = Regex("支付宝|Alipay", RegexOption.IGNORE_CASE)
     private val refundSuccess = Regex("退款成功|已(?:成功|部分|全额|全部)?退款|已退金额|退款完成|退款(?:已)?到账|成功退款")
-    private val refundInProgress = Regex("退款处理中|退款申请中|申请退款|退款失败|待退款|退款中|退款审核|退款受理中")
+    private val refundInProgress = Regex("退款处理中|退款申请中|退款失败|待退款|退款中|退款审核|退款受理中")
     private val transactionIdentifier = Regex("(?<![A-Za-z0-9])([A-Za-z0-9_-]{10,160})(?![A-Za-z0-9])")
     private val orderInfoLabel = Regex("^订单信息(?:共[0-9]+[项页])?[>〉⌄∨vV√]?$" )
     private val amountDecorations = Regex("[（(]免运费[）)]|价格明细[>〉]?|[?？]")
@@ -79,11 +79,37 @@ object LocalOcrBillParser {
         livePaymentAt: Long? = null,
         expenseOnly: Boolean = false,
         origin: String = "",
+    ): ParsedBill? = parse(lines, width, height, capturedAt, livePaymentAt,
+        RecognitionPolicy.fromExpenseOnly(expenseOnly), origin)
+
+    fun parse(
+        lines: List<LocalOcrLine>, width: Int, height: Int, capturedAt: Long,
+        livePaymentAt: Long? = null, policy: RecognitionPolicy, origin: String = "",
     ): ParsedBill? {
+        val expenseOnly = policy == RecognitionPolicy.AUTOMATIC_PAYMENT
         val clean = lines.map { it.copy(text = normalize(it.text).trim().trim('|', '丨').trim()) }
             .filter { it.text.isNotBlank() }
         if (clean.isEmpty()) return null
         val text = clean.joinToString("\n") { it.text }
+        val transfer = TransferEvidenceParser.parse(clean, origin)
+        if (transfer != null && transfer.intent != TransferIntent.EXTERNAL) {
+            if (expenseOnly && !TransferEvidenceParser.automaticCandidate(transfer, origin)) return null
+            val times = labeledValues(clean, Regex("^(?:转账时间|充值时间|提现时间|交易时间|到账时间|完成时间)[：:]?"))
+                .mapNotNull { parseDate(it, capturedAt) }.distinct()
+            val observed = livePaymentAt?.takeIf { expenseOnly && it in 946_656_000_000L..capturedAt }
+            val codes = transfer.reviewCodes + if (times.size > 1) listOf("TRANSFER_AMOUNT_CONFLICT") else emptyList()
+            val evidence = transfer.copy(reviewCodes = codes.distinct())
+            val reliable = evidence.reviewCodes.isEmpty() && runCatching { TransferCalculator.validateEvidence(evidence) }.isSuccess
+            val reason = if (reliable) "已识别本人钱包互转，请核对双方账户" else transferReason(evidence.reviewCodes)
+            val merchant = when (evidence.scenario) {
+                TransferScenario.TOP_UP -> "钱包充值"
+                TransferScenario.WITHDRAWAL -> "余额提现"
+                else -> "本人钱包转账"
+            }
+            return ParsedBill(evidence.amountCents, if (evidence.intent == TransferIntent.SELF_TRANSFER) Direction.TRANSFER else null,
+                merchant, "转账", times.singleOrNull() ?: observed ?: capturedAt, transactionId(clean), reliable, reason,
+                times.size == 1, transfer = evidence)
+        }
         if(TransactionRejection.reason(text)!=null)return null
         val compact = text.filterNot(Char::isWhitespace)
         val isRefund = refundIntent.containsMatchIn(compact)
@@ -141,16 +167,20 @@ object LocalOcrBillParser {
         val transactionId = transactionId(clean)
         val amount: Long?
         var refund: RefundInfo? = null
+        var standaloneRefund: StandaloneRefundEvidence? = null
         if (isRefund) {
-            val original = agreedAmount(clean, originalLabel, header?.second)
-            val cumulative = uniqueLabeledAmount(clean, refundLabel)
+            // On arrival receipts the prominent number is the returned sum, never the original payment.
+            val original = agreedAmount(clean, originalLabel, total ?: if (StandaloneRefundReceipt.matches(text)) null else header?.second)
+            val completedAmountLabel = Regex("^退款(?:成功|完成)(?:支付宝|微信(?:支付渠道)?)?[：:]?")
+            val hasCumulative = clean.any { refundLabel.containsMatchIn(it.text.filterNot(Char::isWhitespace)) }
+            val cumulative = if (hasCumulative) uniqueLabeledAmount(clean, refundLabel) else uniqueLabeledAmount(clean, completedAmountLabel)
             val single = uniqueLabeledAmount(clean, singleRefundLabel)
             val refundId = labeledValues(clean, refundIdLabel)
                 .mapNotNull { refundIdentifier.find(it)?.value }.distinct().singleOrNull()
             val refundProvider = when {
                 provider(origin) in setOf("wechat", "alipay") -> provider(origin)
-                wechatProvider.containsMatchIn(compact) -> "wechat"
-                alipayProvider.containsMatchIn(compact) -> "alipay"
+                wechatProvider.containsMatchIn(compact) && !alipayProvider.containsMatchIn(compact) -> "wechat"
+                alipayProvider.containsMatchIn(compact) && !wechatProvider.containsMatchIn(compact) -> "alipay"
                 else -> null
             }
             val successful = refundSuccess.containsMatchIn(compact)
@@ -161,12 +191,19 @@ object LocalOcrBillParser {
             if (original == null || original <= 0) reasons += "原付款金额不明确"
             if (refundAmount == null || refundAmount <= 0) reasons += "已成功退款金额不明确"
             if (refundAmount != null && original != null && refundAmount > original) reasons += "退款金额超过原付款金额"
+            if (Regex("已全额退款|已全部退款|全额退款成功").containsMatchIn(compact) &&
+                original != null && refundAmount != null && refundAmount != original) reasons += "全额退款状态与退款金额不一致"
             if (mode == "single" && refundId == null) reasons += "单次退款缺少退款单号"
             if (refundProvider == null) reasons += "退款支付平台不明确"
             if (transactionId == null) reasons += "退款原交易单号缺失"
             if (successful && !refundPending && original != null && original > 0 && refundAmount != null && refundAmount in 1..original &&
                 refundProvider != null && (mode == "cumulative" || refundId != null)) {
                 refund = RefundInfo(refundProvider, original, refundAmount, mode, refundId)
+            }
+            if (refund == null && original == null && successful && !refundPending && refundProvider != null) {
+                val returned = refundAmount ?: header?.second
+                if (returned != null && returned in 1..Money.MAX_CENTS)
+                    standaloneRefund = StandaloneRefundEvidence(refundProvider, returned, refundId, transactionId)
             }
             amount = refund?.let { it.originalAmountCents - it.refundedCents }
         } else {
@@ -181,8 +218,18 @@ object LocalOcrBillParser {
                 else if(explicitTime==null) "已识别；页面未显示有效付款时间，使用识别时间"
                 else "已识别，已校验交易信息"
             } else reasons.distinct().joinToString("；"),
-            explicitTime != null, refund)
+            explicitTime != null, refund, PaymentMethodParser.parse(clean, direction, origin), standaloneRefund)
     }
+
+    private fun transferReason(codes: List<String>): String = codes.map { code -> when (code) {
+        "TRANSFER_ACCOUNT_UNSUPPORTED" -> "该账户或币种不支持钱包互转，请核对交易类型"
+        "TRANSFER_STATUS_REQUIRED" -> "转账尚未确认完成，请核对终态"
+        "TRANSFER_IDENTITY_CONFLICT" -> "请确认是否为本人钱包互转"
+        "TRANSFER_WALLET_REQUIRED" -> "请确认转出与转入钱包"
+        "TRANSFER_FEE_AMBIGUOUS" -> "请确认转账手续费及费用方式"
+        "TRANSFER_AMOUNT_CONFLICT", "INVALID_AMOUNT" -> "转账金额与扣款、到账或手续费不一致，请核对"
+        else -> "转账信息需核对"
+    } }.distinct().joinToString("；").ifBlank { "请核对转账信息" }
 
     private fun uniqueLabeledAmount(lines: List<LocalOcrLine>, label: Regex): Long? =
         labeledValues(lines, label).mapNotNull(::readMoney).distinct().singleOrNull()

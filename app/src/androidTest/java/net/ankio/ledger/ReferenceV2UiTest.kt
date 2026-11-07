@@ -11,6 +11,7 @@ import net.ankio.ledger.data.LedgerRecord
 import net.ankio.ledger.ui.MainActivity
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.time.LocalDateTime
@@ -20,6 +21,7 @@ import java.util.UUID
 /** UI events must persist through the actual native bridge, rather than prototype-only arrays. */
 @RunWith(AndroidJUnit4::class)
 class ReferenceV2UiTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun manualEntryCategoryDirectionNoteAndDraftSurviveRecreation() {
@@ -29,11 +31,11 @@ class ReferenceV2UiTest {
                 val web = WebUiProbe(scenario)
                 web.ready()
                 web.run("document.querySelector('[aria-label=\"添加记账\"]').click()")
-                web.await("document.querySelector('#manual').classList.contains('mobile-active')")
+                web.await("manualOpen && !document.querySelector('#manual-panel').hidden")
                 web.run("document.querySelector('#manual-type [data-type=\"expense\"]').click();document.querySelector('#category-grid [data-category=\"交通\"]').click();document.querySelector('#manual-amount').value='12.34';document.querySelector('#manual-note').value=${quote(prefix + " 支出")};document.querySelector('#manual-note').dispatchEvent(new Event('input',{bubbles:true}))")
                 scenario.recreate()
                 web.ready()
-                web.await("document.querySelector('#manual').classList.contains('mobile-active') && document.querySelector('#manual-amount').value==='12.34' && document.querySelector('#manual-note').value===${quote(prefix + " 支出")} && document.querySelector('#category-grid [data-category=\"交通\"]').classList.contains('active')")
+                web.await("manualOpen && !document.querySelector('#manual-panel').hidden && document.querySelector('#manual-amount').value==='12.34' && document.querySelector('#manual-note').value===${quote(prefix + " 支出")} && document.querySelector('#category-grid [data-category=\"交通\"]').classList.contains('active')")
                 web.run("document.querySelector('#manual-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
                 web.await("document.querySelector('#ledger').classList.contains('mobile-active') && JSON.parse(LedgerNative.snapshot()).records.some(r=>r.note===${quote(prefix + " 支出")}&&r.amountCents===1234&&r.direction==='EXPENSE'&&r.category==='交通'&&r.source==='MANUAL')")
                 web.run("document.querySelector('[aria-label=\"添加记账\"]').click();document.querySelector('#manual-type [data-type=\"income\"]').click();document.querySelector('#manual-amount').value='56.78';document.querySelector('#manual-note').value=${quote(prefix + " 收入")};document.querySelector('#manual-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
@@ -109,7 +111,7 @@ class ReferenceV2UiTest {
         }
     }
 
-    @Test fun assetsAddEditLiabilityHideAndDeletePersistAcrossRecreation() {
+    @Test fun assetsAddEditLiabilityHideAndArchivePersistAcrossRecreation() {
         val prefix = "V2-${UUID.randomUUID()}"
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val web = WebUiProbe(scenario)
@@ -138,18 +140,31 @@ class ReferenceV2UiTest {
                 web.run("document.querySelector('#delete-account').click()")
                 web.await("!document.querySelector('[data-account=\"$id\"]') || document.querySelector('#confirm-delete-account')")
                 web.run("document.querySelector('#confirm-delete-account')?.click()")
-                web.await("!JSON.parse(LedgerNative.snapshot()).accounts.some(a=>a.id===$id) && !document.querySelector('[data-account=\"$id\"]')")
+                web.await("document.querySelector('.toast').textContent.includes('请归档')")
+                assertTrue(snapshotItems(web,"accounts").any { it.getLong("id")==id })
+                web.run("closeSheet(false);editAccount($id);document.querySelector('#archive-account').click()")
+                web.await("JSON.parse(LedgerNative.snapshot()).accounts.some(a=>a.id===$id&&a.archived) && document.querySelector('.archived-accounts [data-account=\"$id\"]')")
+                web.await("document.querySelector('#net-amount').textContent.includes(${quote(money(expected))})")
                 scenario.recreate()
                 web.ready()
-                web.await("!document.querySelector('[data-account=\"$id\"]')")
+                web.await("JSON.parse(LedgerNative.snapshot()).accounts.some(a=>a.id===$id&&a.archived) && document.querySelector('.archived-accounts [data-account=\"$id\"]')")
             } finally {
-                snapshotItems(web, "accounts").filter { it.getString("name").startsWith(prefix) }.forEach { a -> web.run("LedgerNative.deleteAccount(${a.getLong("id")})") }
+                app.store.accounts().filter { it.name.startsWith(prefix) }.forEach { account ->
+                    synchronized(app.store) {
+                        val db=app.store.writableDatabase
+                        assertFalse(db.rawQuery("SELECT 1 FROM record_wallet_links WHERE account_uid=? OR applied_account_uid=? LIMIT 1",arrayOf(account.uid,account.uid)).use { it.moveToFirst() })
+                        db.delete("wallet_movements","account_uid=?",arrayOf(account.uid))
+                        app.store.deleteAccount(account.id)
+                    }
+                }
+                app.changed()
             }
         }
     }
 
     private fun fillAccount(web: WebUiProbe, name: String, amount: String, type: String) {
         web.run("document.querySelector('#account-name').value=${quote(name)};document.querySelector('#account-description').value='合成测试账户';document.querySelector('#account-amount').value=${quote(amount)};document.querySelector('#account-type').value=${quote(type)};document.querySelector('#account-kind').value='custom';document.querySelector('#save-account').click()")
+        if(web.value("!!document.querySelector('#confirm-calibration')")=="true")web.run("document.querySelector('#confirm-calibration').click()")
     }
 
     private fun snapshotItems(web: WebUiProbe, key: String): List<JSONObject> {

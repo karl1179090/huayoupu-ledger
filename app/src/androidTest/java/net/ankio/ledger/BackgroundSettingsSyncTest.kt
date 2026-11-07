@@ -1,6 +1,7 @@
 package net.ankio.ledger
 
 import android.app.UiAutomation
+import android.app.ActivityManager
 import android.content.Context
 import android.os.PowerManager
 import android.os.SystemClock
@@ -17,6 +18,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class BackgroundSettingsSyncTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private fun exercise(block:(LedgerApp,UiAutomation,ActivityScenario<MainActivity>,WebUiProbe,(Boolean)->Unit)->Unit) {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
         val automation=InstrumentationRegistry.getInstrumentation().getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
@@ -30,8 +32,12 @@ class BackgroundSettingsSyncTest {
             automation.executeShellCommand("cmd deviceidle whitelist ${if(value)"+" else "-"}${app.packageName}").use { java.io.FileInputStream(it.fileDescriptor).readBytes() }
             waitFor { app.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(app.packageName)==value }
         }
-        automation.adoptShellPermissionIdentity("android.permission.WRITE_SECURE_SETTINGS")
+        automation.adoptShellPermissionIdentity("android.permission.WRITE_SECURE_SETTINGS","android.permission.REAL_GET_TASKS")
         try {
+            // These assertions use WebUiProbe for content and task metadata for navigation.
+            // Clear nodes left by earlier cases; caching this app's WebView via UiAutomation
+            // can deadlock Android 11's accessibility event refresh against its main looper.
+            automation.serviceInfo=automation.serviceInfo
             Settings.Secure.putString(resolver,"enabled_accessibility_services",captureServiceComponent(app).flattenToString());Settings.Secure.putInt(resolver,"accessibility_enabled",1)
             waitFor { ScreenCaptureService.current!=null && app.channels.permitted(ChannelSettings.Channel.OCR) }
             battery(true)
@@ -57,6 +63,9 @@ class BackgroundSettingsSyncTest {
         try { app.openFileOutput(name,0).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) } } finally { bitmap.recycle() }
     }
     private fun waitFor(check:()->Boolean) { val until=SystemClock.elapsedRealtime()+8000;while(!check() && SystemClock.elapsedRealtime()<until)SystemClock.sleep(50);assertTrue(check()) }
+    @Suppress("DEPRECATION")
+    private fun foregroundPackage(app:LedgerApp):String? = app.getSystemService(ActivityManager::class.java)
+        .getRunningTasks(1).firstOrNull()?.topActivity?.packageName
     @Test fun revokedBatteryGrantCannotRemainConfirmedAndCanOpenSystemSettings()=exercise { app,automation,scenario,web,battery ->
         battery(false)
         scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED);scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
@@ -67,7 +76,7 @@ class BackgroundSettingsSyncTest {
         assertFalse(app.getSharedPreferences("background_setup",0).getBoolean("battery",true))
         screenshot(app,automation,"background-battery-revoked.png")
         web.run("setTimeout(()=>document.querySelector('#setup-primary').click(),0)")
-        waitFor { automation.rootInActiveWindow?.packageName?.toString()=="com.android.settings" }
+        waitFor { foregroundPackage(app)=="com.android.settings" }
         screenshot(app,automation,"background-system-settings.png");automation.performGlobalAction(1)
         battery(true)
         scenario.onActivity { it.permissionSetup.resume() }
@@ -85,7 +94,7 @@ class BackgroundSettingsSyncTest {
         web.await("document.querySelector('[data-setup-step=autostart]').textContent.includes('待检查')")
         screenshot(app,automation,"background-autostart-reset.png")
         web.run("setTimeout(()=>document.querySelector('#setup-primary').click(),0)")
-        waitFor { automation.rootInActiveWindow?.packageName?.toString()=="com.android.settings" }
+        waitFor { foregroundPackage(app)=="com.android.settings" }
         SystemClock.sleep(600);automation.performGlobalAction(1)
         scenario.onActivity { it.permissionSetup.resume() }
         assertFalse("Opening settings must not grant a manual confirmation",app.getSharedPreferences("background_setup",0).getBoolean("autostart",true))
@@ -100,7 +109,7 @@ class BackgroundSettingsSyncTest {
         web.run("setTimeout(()=>document.querySelector('#setup-primary').click(),0)")
         // Global Recents is asynchronous. Wait until it really leaves the app, then
         // return the existing task without queuing Back against the permission sheet.
-        waitFor { automation.rootInActiveWindow?.packageName?.toString()?.let { it!=app.packageName }==true }
+        waitFor { foregroundPackage(app)?.let { it!=app.packageName }==true }
         automation.waitForIdle(250,5_000)
         screenshot(app,automation,"background-recents.png")
         app.getSystemService(android.app.ActivityManager::class.java).appTasks.single().moveToFront()

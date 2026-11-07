@@ -19,7 +19,7 @@ class LedgerCsvImportTest {
     private val at=1_790_000_000_000L
     private fun store():LedgerStore {
         val name="csv-import-${UUID.randomUUID()}.db"
-        return LedgerStore(context,name).also { stores.add(name to it) }
+        return LedgerStore(context,name).prepareSyntheticDefaultWallet().also { stores.add(name to it) }
     }
     private fun record(amount:Long=12345,direction:Direction=Direction.EXPENSE)=LedgerRecord(
         capture=Capture(Source.OCR,"com.taobao.taobao","private OCR",at+1000),

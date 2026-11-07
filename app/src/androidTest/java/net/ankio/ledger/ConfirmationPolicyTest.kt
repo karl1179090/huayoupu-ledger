@@ -16,6 +16,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ConfirmationPolicyTest {
+    @get:org.junit.Rule val wallet = CaptureWalletFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun reopeningNeverPromotesHistoricalRemindersWithoutUserConfirmation() {
@@ -130,7 +131,7 @@ class ConfirmationPolicyTest {
                 assertEquals("保存修改",web.text("document.querySelector('#import-form .primary').textContent"))
                 assertEquals("true",web.value("document.querySelector('.scanner').hidden && !document.querySelector('#capture-gallery').hidden"))
                 val input=JSONObject().put("id",record.id).put("amount","1.00").put("direction","INCOME")
-                    .put("merchant","被修改").put("category","其他").put("occurredAt",now).put("note","")
+                    .put("merchant","被修改").put("category","其他").put("occurredAt",now).put("note","").put("submissionToken",UUID.randomUUID().toString()).put("expectedRevision",app.store.get(record.id)!!.wallet!!.revision)
                 lateinit var bridge:LedgerWebBridge
                 scenario.onActivity { bridge=LedgerWebBridge(it) }
                 assertTrue(JSONObject(bridge.save(input.toString())).getBoolean("ok"))
@@ -156,13 +157,14 @@ class ConfirmationPolicyTest {
         }
     }
 
-    @Test fun homepageHasOnlyDirectionalTabsAndMigratesOldHiddenSearchState() {
+    @Test fun homepageHasExplicitTransactionTypeTabsAndPreservesAllWithoutHiddenSearch() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val web=WebUiProbe(scenario);web.ready()
-            assertEquals("支出,收入",web.text("Array.from(document.querySelectorAll('[data-filter]')).map(b=>b.textContent.trim()).join(',')"))
+            assertEquals("全部,支出,收入,转账",web.text("Array.from(document.querySelectorAll('[data-filter]')).map(b=>b.textContent.trim()).join(',')"))
             assertEquals("true",web.value("!!document.querySelector('#search-toggle') && document.querySelector('.search-box').hidden"))
             web.run("restoreState({page:'ledger',filter:'all',query:'old hidden filter'});refresh()")
-            assertEquals("expense",web.text("window.LedgerUI.getState().filter"))
+            assertEquals("all",web.text("window.LedgerUI.getState().filter"))
+            assertEquals("",web.text("query"))
         }
     }
 
@@ -186,7 +188,7 @@ class ConfirmationPolicyTest {
                 val web=WebUiProbe(scenario);web.ready()
                 lateinit var bridge:LedgerWebBridge;scenario.onActivity { bridge=LedgerWebBridge(it) }
                 val prefix="曲线-${UUID.randomUUID()}"
-                fun input(day:Int,amount:String,direction:String,id:Long=0):JSONObject=JSONObject().put("id",id)
+                fun input(day:Int,amount:String,direction:String,id:Long=0):JSONObject=JSONObject().put("id",id).put("submissionToken",UUID.randomUUID().toString()).put("expectedRevision",app.store.get(id)?.wallet?.revision ?: 0)
                     .put("amount",amount).put("direction",direction).put("merchant",prefix).put("category","其他").put("note","")
                     .put("occurredAt",java.time.LocalDate.of(2037,2,day).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli())
                 for(data in listOf(input(1,"100.00","INCOME"),input(3,"25.00","EXPENSE"),input(3,"12.00","EXPENSE"))) {

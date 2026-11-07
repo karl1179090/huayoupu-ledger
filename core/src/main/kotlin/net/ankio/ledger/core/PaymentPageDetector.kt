@@ -1,7 +1,8 @@
 package net.ankio.ledger.core
 
 data class PaymentPage(val packageName: String, val windowId: Int, val activity: String, val texts: List<String>, val editable: Boolean = false)
-data class PaymentMatch(val signature: String, val transactionId: String?, val packageName: String, val windowId: Int, val activity: String, val eventIdentity: String = signature)
+data class PaymentMatch(val signature: String, val transactionId: String?, val packageName: String, val windowId: Int, val activity: String, val eventIdentity: String = signature,
+    val transfer: TransferEvidence? = null)
 
 object PaymentPageDetector {
     const val WECHAT_FRAMEWORK_RESULT = "com.tencent.mm.framework.app.UIPageFragmentActivity"
@@ -48,6 +49,15 @@ object PaymentPageDetector {
         if (texts.isEmpty()) return null
         val joined = texts.joinToString("|")
         if (prohibited.any(joined::contains)) return null
+        val transfer = TransferEvidenceParser.parse(texts.map(::LocalOcrLine), page.packageName)
+        if (transfer != null) {
+            if (!TransferEvidenceParser.automaticCandidate(transfer, page.packageName)) return null
+            val genericWeb = listOf("webview", "webactivity", "h5", "nebula", "browser").any(page.activity.lowercase()::contains)
+            if (genericWeb && (texts.none { it in setOf("完成", "返回应用", "返回", "关闭") } ||
+                texts.none { it.contains("微信零钱") || it.contains("支付宝余额") })) return null
+            val transaction = LocalOcrBillParser.transactionId(texts.map(::LocalOcrLine))
+            return match(page, texts, transaction, requireNotNull(transfer.amountCents), visitId).copy(transfer = transfer)
+        }
         val success = texts.any { value ->
             val status = value.removePrefix("当前状态").removePrefix("交易状态").trimStart(':', '：')
             status in successStatuses ||

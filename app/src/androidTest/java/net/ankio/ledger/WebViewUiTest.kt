@@ -18,6 +18,9 @@ import net.ankio.ledger.data.LedgerRecord
 import net.ankio.ledger.ui.MainActivity
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.After
+import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -28,7 +31,18 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class WebViewUiTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
+    private var beforeRecordIds=emptySet<Long>()
+    private fun recordIdsIncludingDeleted():Set<Long> = app.store.readableDatabase.rawQuery("SELECT id FROM records",null).use { cursor ->
+        buildSet { while(cursor.moveToNext())add(cursor.getLong(0)) }
+    }
+    @Before fun rememberOwnedRecords() { beforeRecordIds=recordIdsIncludingDeleted() }
+    @After fun removeOwnedRecordsIncludingTheUndoWindow() {
+        // all() deliberately omits soft-deleted bills; clean only rows this test created.
+        (recordIdsIncludingDeleted()-beforeRecordIds).forEach { app.store.delete(it) }
+        app.changed()
+    }
 
     @Test fun legacyShakeRecordShowsItsFieldsAndDoesNotPretendToHaveAScreenshot() {
         val now = System.currentTimeMillis()
@@ -151,7 +165,7 @@ class WebViewUiTest {
                 val web = WebUiProbe(scenario)
                 web.ready()
                 scenario.onActivity { app.importer.state.value = ImageImportState.Working }
-                web.await("document.querySelector('.scanning').textContent==='AI 正在识别账单…' && document.querySelector('#import-form .primary').disabled")
+                web.await("document.querySelector('.scanning').textContent==='正在识别账单…' && document.querySelector('#import-form .primary').disabled")
                 imported = publishSyntheticRemoteResult(fixture)
                 assertImportedPayment(imported!!)
                 awaitImportedEditor(web, imported!!)

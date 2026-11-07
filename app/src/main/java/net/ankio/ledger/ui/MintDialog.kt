@@ -73,7 +73,7 @@ class MintDialog(val context: Context, title: String, subtitle: String = "") {
     fun showEmbedded(activity:MainActivity,origin:RectF?,originRadius:Float?=null,pageTag:String="embedded-panel-page") {
         (root.parent as? android.view.ViewGroup)?.removeView(root)
         root.tag=pageTag
-        root.addView(View(context).apply { background=shape(Color.rgb(196,217,206),2);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO },0,LinearLayout.LayoutParams(dp(30),dp(4)).apply { gravity=Gravity.CENTER_HORIZONTAL;bottomMargin=dp(8) })
+        root.addView(View(context).apply { background=shape(Color.rgb(214,206,232),2);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO },0,LinearLayout.LayoutParams(dp(30),dp(4)).apply { gravity=Gravity.CENTER_HORIZONTAL;bottomMargin=dp(8) })
         (root.background as GradientDrawable).cornerRadii=floatArrayOf(dp(30).toFloat(),dp(30).toFloat(),dp(30).toFloat(),dp(30).toFloat(),0f,0f,0f,0f)
         root.setOnApplyWindowInsetsListener(null)
         embedded=EmbeddedModelPage(activity,root,origin,originRadius) { embedded=null;embeddedDismiss?.invoke() }
@@ -117,11 +117,11 @@ class MintDialog(val context: Context, title: String, subtitle: String = "") {
         }
     }
     companion object {
-        val GREEN = Color.rgb(39,158,128)
-        val PALE = Color.rgb(227,243,239)
-        val INK = Color.rgb(16,20,33)
-        val MUTED = Color.rgb(105,118,139)
-        val LINE = Color.rgb(224,230,236)
+        val GREEN = Color.rgb(125,91,226)
+        val PALE = Color.rgb(239,233,252)
+        val INK = Color.rgb(55,48,75)
+        val MUTED = Color.rgb(117,111,138)
+        val LINE = Color.rgb(227,223,240)
         fun confirm(context: Context, title: String, message: String, positive: String, onConfirm: () -> Unit) {
             val sheet = MintDialog(context,title)
             sheet.content.addView(sheet.text(message,14,MUTED))

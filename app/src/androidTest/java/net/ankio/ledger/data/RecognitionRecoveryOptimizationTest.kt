@@ -13,10 +13,10 @@ class RecognitionRecoveryOptimizationTest {
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val name="recovery-${System.nanoTime()}.db"
         val oldTasks=RecognitionTasks(context,name)
-        val oldId=oldTasks.create(Source.OCR,"shake:com.tencent.mm")
+        val oldId=oldTasks.create(Source.OCR,"payment_auto:com.tencent.mm")
         oldTasks.close()
         val tasks=RecognitionTasks(context,name)
-        val newId=tasks.create(Source.OCR,"shake:com.tencent.mm")
+        val newId=tasks.create(Source.OCR,"payment_auto:com.tencent.mm")
         try {
             tasks.recoverInterrupted(preserveCurrentSession=true)
             assertEquals("FAILED",tasks.status(oldId))

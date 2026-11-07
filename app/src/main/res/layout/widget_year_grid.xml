@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+        <LinearLayout android:id="@+id/widget_year_card_0" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_0" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_0" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_0" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_1" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_1" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_1" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_2" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_2" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_2" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+        <LinearLayout android:id="@+id/widget_year_card_3" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_3" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_3" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_3" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_4" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_4" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_4" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_4" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_5" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_5" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_5" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_5" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+        <LinearLayout android:id="@+id/widget_year_card_6" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_6" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_6" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_6" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_7" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_7" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_7" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_7" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_8" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_8" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_8" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_8" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal">
+        <LinearLayout android:id="@+id/widget_year_card_9" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_9" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_9" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_9" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_10" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_10" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_10" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_10" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+        <LinearLayout android:id="@+id/widget_year_card_11" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent" android:orientation="vertical" android:gravity="center_vertical" android:paddingHorizontal="9dp" android:paddingVertical="3dp" android:layout_margin="2.5dp" android:background="@drawable/widget_year_card_normal">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:id="@+id/widget_axis_11" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:includeFontPadding="false" android:textSize="12.5sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+                <TextView android:id="@+id/widget_year_tag_11" android:layout_width="wrap_content" android:layout_height="wrap_content" android:includeFontPadding="false" android:text="本月" android:textSize="9.5sp" android:textColor="@color/widget_muted" android:visibility="gone" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <TextView android:id="@+id/widget_bucket_11" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="11.5sp" android:textColor="@color/widget_text" android:singleLine="true"/>
+        </LinearLayout>
+    </LinearLayout>
+
+</LinearLayout>

@@ -136,7 +136,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         if(!ready())return@withLock null
         val result=readPage()
         val match=result.value?.takeIf { service.ledger.channels.autoAllowed(it.packageName) }?.let(visits::detect)
-        val reason=if(match!=null)"matched" else "not_completed_single_payment:${result.outcome}"
+        val reason=if(match!=null)"matched" else "not_completed_supported_payment:${result.outcome}"
         observation=JSONObject().put("activity",match?.activity?:lastActivity).put("package",match?.packageName.orEmpty())
             .put("outcome",reason).put("observedAt",System.currentTimeMillis())
         if(reason!=lastReason) { lastReason=reason;service.ledger.executionLog.event("payment_auto","page_probe",reason,diagnostics()) }
@@ -153,6 +153,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         visits.detect(page)?.let { it.activity==match.activity && it.signature==match.signature && it.eventIdentity==match.eventIdentity }==true
     }
     suspend fun manualCheck(pkg:String,window:Int):CaptureProbeResult<PaymentPage> = readLock.withLock {
+        if(!service.ledger.channels.shakeAllowed(pkg))return@withLock CaptureProbeResult(null,"application_not_selected")
         val result=readManualCapturePage { readPage(pkg,window,700,automatic=false) }
         val accepted=result.value?.let(CapturePrivacy::manualAllowed)==true
         service.ledger.executionLog.event("ocr","preflight",if(accepted)"accepted" else "blocked",
@@ -174,14 +175,15 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
                 detail.put("cachedPackage",pkg).put("cachedActivity",activity)
                 if(expectedWindow!=null && selected.id!=expectedWindow || expectedPackage!=null && pkg!=expectedPackage)return@readResult missing("target_changed")
                 if(automatic && !service.ledger.channels.autoAllowed(pkg))return@readResult missing("application_not_selected")
-                if(!automatic && !CapturePrivacy.manualPackageAllowed(pkg))return@readResult missing("activity_not_eligible")
+                if(!automatic && !service.ledger.channels.shakeAllowed(pkg))return@readResult missing("application_not_selected")
                 available.firstOrNull { it.id==selected.id }?.let { if(Build.VERSION.SDK_INT>=33)it.getRoot(0) else it.root }
             } finally { available.forEach { it.recycle() } }?:return@readResult missing("root_unavailable")
             val pkg=root.packageName?.toString().orEmpty()
             detail.put("rootPackage",pkg).put("rootWindow",root.windowId)
             if(root.windowId!=detail.optInt("selectedWindow",-1) ||
                 !CapturePrivacy.manualPackageAllowed(pkg) || expectedPackage!=null && pkg!=expectedPackage ||
-                automatic && (!service.ledger.channels.autoAllowed(pkg) || pkg!=detail.optString("cachedPackage"))) { root.recycle();return@readResult missing("root_package_mismatch") }
+                automatic && (!service.ledger.channels.autoAllowed(pkg) || pkg!=detail.optString("cachedPackage")) ||
+                !automatic && !service.ledger.channels.shakeAllowed(pkg)) { root.recycle();return@readResult missing("root_package_mismatch") }
             val window=root.windowId
             val activity=activities[window].orEmpty()
             if(automatic && (PaymentVisits.isNavigation(pkg,activity) || !PaymentPageDetector.eligibleActivity(pkg,activity))) {

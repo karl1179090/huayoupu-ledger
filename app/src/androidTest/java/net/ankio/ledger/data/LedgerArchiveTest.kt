@@ -65,7 +65,7 @@ class LedgerArchiveTest {
     @Test fun zipDeduplicatesImagesAndRestoresUidIconHistoryWithoutOverwritingEditsOrPermissions() {
         val source=store();val target=store();val shared=image();val icon=image(8)
         val original=record();val other=record("另一个归档商户")
-        val account=LedgerAccount(name="归档银行卡",amountCents=123456,kind="bank_icbc")
+        val account=LedgerAccount(name="归档银行卡",amountCents=123456,kind="bank_icbc",bankCode="icbc")
         val category=CustomCategory("归档自定义分类",Direction.EXPENSE)
         source.merge(listOf(original,other),listOf(account),listOf(category));val saved=source.all().associateBy { it.uid }
         listOf(original,other).forEach { r -> source.restoreHistory(saved.getValue(r.uid).id,listOf(

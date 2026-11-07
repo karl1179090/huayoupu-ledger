@@ -8,6 +8,7 @@ import net.ankio.ledger.LedgerApp
 import net.ankio.ledger.ocr.OcrClient
 import net.ankio.ledger.core.Capture
 import net.ankio.ledger.core.Source
+import net.ankio.ledger.core.RecognitionPolicy
 import net.ankio.ledger.data.IngestResult
 
 /** Shared local persistence pipeline; the bundled recognizer reads the exact stored image. */
@@ -23,24 +24,32 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
     private suspend fun recognize(image:ByteArray,taskId:Long?,origin:String,guard:()->Boolean):net.ankio.ledger.ocr.RecognitionResult {
         val prepared:(ByteArray)->Unit={ bytes -> taskId?.let { app.tasks.prepared(it,bytes);app.changed() } }
         val liveAt=taskId?.let(app.tasks::livePaymentAt)
-        val expenseOnly=taskId?.let(app.tasks::automatic)?:false
-        return client.recognizePrepared(image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,expenseOnly=expenseOnly,origin=origin)
+        return client.recognizePrepared(image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,policy=policy(taskId),origin=origin)
     }
 
-    private fun recordedMessage(cents:Long?)=if(cents==null)"已记账" else "已记账 ¥${net.ankio.ledger.core.Money.format(cents)}"
+    private fun policy(taskId:Long?) = if(taskId?.let(app.tasks::automatic)==true)
+        RecognitionPolicy.AUTOMATIC_PAYMENT else RecognitionPolicy.USER_INITIATED
+
+    private fun recordedMessage(cents:Long?,transfer:Boolean=false)=if(cents==null)"已记账" else
+        "已记账 ¥${net.ankio.ledger.core.Money.format(cents)}${if(transfer)"（钱包转账）" else ""}"
 
     private suspend fun processRecognition(source:Source,origin:String,taskId:Long?,beforeAccept:suspend ()->Unit,allowed:()->Boolean,
         recognize:suspend (()->Boolean)->net.ankio.ledger.ocr.RecognitionResult):IngestResult {
         require(source == Source.OCR || source == Source.IMAGE)
         val guard={ allowed() && (taskId==null || app.tasks.exists(taskId)) }
         try {
+            val operationKey=taskId?.let(app.tasks::operationKey)
+            if(taskId!=null && net.ankio.ledger.data.RecognitionCommitRecovery.recover(app.tasks,app.store,taskId)) {
+                app.changed();return IngestResult.DuplicateSkipped
+            }
             val identity=taskId?.let(app.tasks::paymentIdentity)
             if(identity!=null && (app.store.hasCaptureEvent(identity) || app.tasks.legacyFrameRecords(taskId).any { app.store.get(it)!=null })) {
                 if(!guard())throw CancellationException("识别已停止")
                 app.store.rememberCaptureEvent(identity)
-                val record=(app.tasks.recordForPaymentIdentity(identity)?.let(app.store::get)
+                val record=(app.store.committedPaymentEvent(identity)?.record
+                    ?:app.tasks.recordForPaymentIdentity(identity)?.let(app.store::get)
                     ?:app.tasks.legacyFrameRecords(taskId).firstNotNullOfOrNull(app.store::get))
-                app.tasks.update(taskId,"DUPLICATE",recordedMessage(record?.bill?.amountCents),record?.id)
+                app.tasks.update(taskId,"DUPLICATE",recordedMessage(record?.bill?.amountCents,record?.bill?.direction==net.ankio.ledger.core.Direction.TRANSFER),record?.id)
                 app.tasks.diagnose(taskId,"stage","duplicate_before_model")
                 app.changed();return IngestResult.DuplicateSkipped
             }
@@ -49,8 +58,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
             currentCoroutineContext().ensureActive()
             beforeAccept()
             if(!guard())throw CancellationException("识别已停止")
-            val skip=recognized.skipReason ?: net.ankio.ledger.core.TransactionRejection.reason(recognized.rawText) ?:
-                recognized.bill?.takeIf { it.refund!=null && it.amountCents==0L }?.let { "已全额退款，不予记账" }
+            val skip=recognized.skipReason ?: net.ankio.ledger.core.TransactionRejection.reason(recognized.rawText)
             skip?.let { message ->
                 taskId?.let { app.tasks.update(it,"SKIPPED",message);app.tasks.diagnose(it,"stage","skipped_transaction") }
                 app.changed();return IngestResult.Skipped(message)
@@ -60,7 +68,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 if(recognized.iconDetails.isNotBlank())app.tasks.diagnose(it,"icon_details",recognized.iconDetails)
                 app.tasks.diagnose(it,"stage","save_result")
             }
-            val result=app.coordinator.acceptRecognition(Capture(source, origin, recognized.rawText), recognized.bill, recognized.screenshot, recognized.merchantIcon, eventKey=identity, allowed=guard)
+            val result=app.coordinator.acceptRecognition(Capture(source, origin, recognized.rawText), recognized.bill, recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), allowed=guard)
             if(result==IngestResult.Ignored&&!guard())throw CancellationException("识别已停止")
             taskId?.let { id ->
                 // Explain REVIEW without exporting the model response or financial fields.
@@ -74,16 +82,26 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                     } else put("outcome",if(result==IngestResult.DuplicateSkipped)"duplicate_skipped" else "no_bill")
                 }.toString())
                 when(result) {
-                    is IngestResult.Saved -> app.tasks.update(id,if(result.record.state==net.ankio.ledger.core.RecordState.REVIEW) "REVIEW" else "SUCCEEDED",if(result.record.state==net.ankio.ledger.core.RecordState.REVIEW) result.record.reason else recordedMessage(result.record.bill.amountCents),result.record.id)
+                    is IngestResult.Saved -> {
+                        val conflict=result.record.state==net.ankio.ledger.core.RecordState.POSTED && result.record.wallet?.reviewCode?.startsWith("TRANSFER_")==true
+                        val review=result.record.state==net.ankio.ledger.core.RecordState.REVIEW || conflict
+                        val message=if(conflict)net.ankio.ledger.data.TransferRecognitionEnricher.message(result.record.wallet?.reviewCode)
+                            else if(review)result.record.reason else if(recognized.bill?.refund!=null || recognized.bill?.standaloneRefund!=null) "退款已更新"
+                            else recordedMessage(result.record.bill.amountCents,result.record.bill.direction==net.ankio.ledger.core.Direction.TRANSFER)
+                        app.tasks.update(id,if(review)"REVIEW" else "SUCCEEDED",message,result.record.id)
+                    }
                     IngestResult.DuplicateSkipped -> {
                         val capture=Capture(source,origin,recognized.rawText)
                         // The primary legacy field may still be a Taobao order ID;
                         // resolve an Alipay/WeChat alias through the scoped index first.
-                        val original=recognized.bill?.let { app.store.matchingIdentity(capture,it) } ?: run {
+                        val original=operationKey?.let(app.store::committedCapture)?.record
+                            ?:identity?.let(app.store::committedPaymentEvent)?.record
+                            ?:recognized.bill?.let { app.store.matchingIdentity(capture,it) } ?: run {
                             val exact=recognized.bill?.let { bill -> net.ankio.ledger.core.DuplicateDetector.find(capture,bill,app.store.all().map { it.existing() }) } as? net.ankio.ledger.core.Duplicate.Exact
                             exact?.id?.let(app.store::get)
                         }
-                        app.tasks.update(id,"DUPLICATE",recordedMessage(original?.bill?.amountCents ?: recognized.bill?.amountCents),original?.id)
+                        app.tasks.update(id,"DUPLICATE",recordedMessage(original?.bill?.amountCents ?: recognized.bill?.amountCents,
+                            original?.bill?.direction==net.ankio.ledger.core.Direction.TRANSFER),original?.id)
                     }
                     IngestResult.Ignored -> app.tasks.update(id,"NO_BILL","未识别到单笔账单，可换到账单详情页重试")
                     is IngestResult.Skipped -> app.tasks.update(id,"SKIPPED",result.message)

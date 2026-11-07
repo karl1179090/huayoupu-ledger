@@ -12,6 +12,7 @@ import net.ankio.ledger.ocr.MerchantIconRegion
 import net.ankio.ledger.ocr.RecognitionResult
 import net.ankio.ledger.core.LocalOcrBillParser
 import net.ankio.ledger.core.LocalOcrLine
+import net.ankio.ledger.core.RecognitionPolicy
 
 /** Bundled recognition of the exact stored screenshot. This client has no network dependency. */
 class LocalRecognitionClient(context: android.content.Context) {
@@ -24,6 +25,7 @@ class LocalRecognitionClient(context: android.content.Context) {
         livePaymentAt: Long? = null,
         expenseOnly: Boolean = false,
         origin: String = "",
+        policy: RecognitionPolicy = RecognitionPolicy.fromExpenseOnly(expenseOnly),
     ): RecognitionResult = withContext(Dispatchers.IO) {
         val taskContext=currentCoroutineContext()
         fun checkAllowed() {
@@ -50,7 +52,9 @@ class LocalRecognitionClient(context: android.content.Context) {
                     val box = line.box
                     LocalOcrLine(line.text, box?.left ?: 0, box?.top ?: 0, box?.right ?: 0, box?.bottom ?: 0)
                 }
-                val bill = LocalOcrBillParser.parse(lines, ocr.width, ocr.height, receivedAt, livePaymentAt, expenseOnly, origin)
+                val bill = LocalOcrBillParser.parse(lines, ocr.width, ocr.height, receivedAt, livePaymentAt, policy, origin)
+                // Completed refunds, including a zero net amount, continue to storage association.
+                // Only closed, pending or failed transactions stop this pipeline.
                 net.ankio.ledger.core.TransactionRejection.reason(ocr.rawText)?.let { reason ->
                     return@run RecognitionResult(ocr.rawText.take(16_384),null,screenshot=submitted,skipReason=reason)
                 }

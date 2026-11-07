@@ -13,6 +13,7 @@ import net.ankio.ledger.ui.LedgerWebBridge
 import net.ankio.ledger.ui.MainActivity
 import org.json.JSONObject
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
@@ -20,6 +21,7 @@ import java.util.UUID
 /** Exercises the real JavaScript boundary and SQLite store without replacing the native bridge. */
 @RunWith(AndroidJUnit4::class)
 class LedgerWebBridgeTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun saveEditSnapshotAndDeleteKeepTheRealRecordIdentity() = withBridge { bridge ->
@@ -48,10 +50,12 @@ class LedgerWebBridgeTest {
             assertEquals(record.uid, shown.getString("uid"))
             assertEquals(101L, shown.getLong("amountCents"))
             assertEquals("POSTED", shown.getString("state"))
-            assertEquals("", shown.getString("rawText"))
+            assertFalse(shown.has("rawText"))
+            assertEquals("",JSONObject(bridge.recordDetails(id)).getString("rawText"))
             assertTrue(shown.isNull("duplicateId"))
             val channels = snapshot.getJSONObject("channels")
-            listOf("ocr", "sms", "notification").forEach { key ->
+            assertFalse(channels.has("sms"));assertFalse(channels.has("notification"))
+            listOf("ocr").forEach { key ->
                 assertTrue(channels.getJSONObject(key).get("enabled") is Boolean)
                 assertTrue(channels.getJSONObject(key).get("permitted") is Boolean)
             }
@@ -83,15 +87,40 @@ class LedgerWebBridgeTest {
             input(9_007_199_254_740_991L),
         )
         val before = app.store.all().map { it.uid }.toSet()
+        val financialBefore=app.store.walletSnapshot()
+        val selectedBefore=app.channels.selectedShakePackages()
         invalid.forEach { data ->
             val result = JSONObject(bridge.save(data.toString()))
             assertFalse("Unexpectedly accepted $data: $result", result.getBoolean("ok"))
             assertTrue(result.getString("error").isNotBlank())
+            assertEquals(result.toString(),"INVALID_INPUT",result.getString("code"))
         }
-        assertFalse(JSONObject(bridge.save("not JSON")).getBoolean("ok"))
-        assertFalse(JSONObject(bridge.delete(0)).getBoolean("ok"))
-        assertFalse(JSONObject(bridge.delete(-1)).getBoolean("ok"))
+        fun rejected(json:String,code:String="INVALID_INPUT") {
+            val result=JSONObject(json)
+            assertFalse(result.toString(),result.getBoolean("ok"))
+            assertEquals(result.toString(),code,result.getString("code"))
+            assertTrue(result.getString("error").isNotBlank())
+        }
+        rejected(bridge.save("not JSON"))
+        rejected(bridge.delete(0));rejected(bridge.delete(-1))
+        fun account()=JSONObject().put("id",0).put("name","合成无效输入账户").put("amount","1.00")
+            .put("kind","bank").put("type","ASSET").put("bankCode","cmb").put("cardLast4","0007")
+        for(data in listOf(account().put("amount","1e2"),account().put("amount","0.001"),
+                account().put("cardLast4","123"),account().put("cardLast4","12O4"),account().put("cardLast4","１２３４"),
+                account().put("bankCode","invalid bank"),account().put("amount","-1.00").put("type","LIABILITY"))) {
+            rejected(bridge.saveAccount(data.toString()))
+        }
+        rejected(bridge.saveAccount("not JSON"))
+        rejected(bridge.listInstalledApplications("",0,0,false))
+        rejected(bridge.setShakeApplication("invalid",true))
+        rejected(bridge.setAutoApplication("invalid",false))
+        rejected(bridge.categoryRecords("not-a-month","餐饮","EXPENSE",0))
+        rejected(bridge.setDefaultWallet("missing-synthetic-wallet"),"INVALID_WALLET")
+        val default=app.store.walletSettings().defaultAccountUid!!
+        rejected(bridge.archiveAccount(app.store.accounts().single { it.uid==default }.id),"DEFAULT_WALLET_IN_USE")
         assertEquals(before, app.store.all().map { it.uid }.toSet())
+        assertEquals(financialBefore,app.store.walletSnapshot())
+        assertEquals(selectedBefore,app.channels.selectedShakePackages())
     }
 
     @Test fun possibleDuplicateRequiresExplicitConfirmationAndPreservesCapturedSource() = withBridge { bridge ->
@@ -135,7 +164,8 @@ class LedgerWebBridgeTest {
             assertTrue(shown.isNull("direction"))
             assertEquals("REVIEW", shown.getString("state"))
             assertEquals("IMAGE", shown.getString("source"))
-            assertEquals(capture.text, shown.getString("rawText"))
+            assertFalse(shown.has("rawText"))
+            assertEquals(capture.text,JSONObject(bridge.recordDetails(record.id)).getString("rawText"))
             assertEquals(bill.reason, shown.getString("reason"))
         } finally { app.store.delete(record.id) }
     }
@@ -144,6 +174,7 @@ class LedgerWebBridgeTest {
         .put("direction", "EXPENSE").put("merchant", "桥接合成测试商户")
         .put("category", "餐饮").put("occurredAt", System.currentTimeMillis())
         .put("note", "测试备注").put("confirmDuplicate", false)
+        .put("submissionToken",UUID.randomUUID().toString()).put("expectedRevision",app.store.get(id)?.wallet?.revision ?: 0)
 
     private fun withBridge(test: (LedgerWebBridge) -> Unit) {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->

@@ -38,7 +38,7 @@ class MerchantEnrichmentTest {
     }
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val name="merchant-enrichment-${UUID.randomUUID()}.db"
-    private val store=LedgerStore(context,name)
+    private val store=LedgerStore(context,name).prepareSyntheticDefaultWallet()
     private val at=System.currentTimeMillis()
     private fun capture(name:String,delta:Long=0)=Capture(Source.OCR,PaymentApps.WECHAT,
         "$name\n-100.60\n支付成功\n商品\n$name\n商户全称\n合成市${name}有限公司\n交易单号\n4200003144202610117903762623",at+delta)

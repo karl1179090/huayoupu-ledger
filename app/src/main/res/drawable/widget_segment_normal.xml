@@ -1,0 +1,10 @@
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:insetLeft="3dp" android:insetRight="3dp" android:insetTop="10dp" android:insetBottom="10dp">
+    <ripple android:color="@color/widget_pressed">
+        <item>
+            <shape>
+                <solid android:color="@android:color/transparent"/>
+                <corners android:radius="15dp"/>
+            </shape>
+        </item>
+    </ripple>
+</inset>

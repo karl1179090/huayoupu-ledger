@@ -3,18 +3,20 @@ package net.ankio.ledger.ocr
 import android.content.Context
 import android.graphics.Bitmap
 import java.io.ByteArrayOutputStream
+import net.ankio.ledger.core.RecognitionPolicy
 
 /** One bundled recognizer for capture, import and automatic bookkeeping. */
 class OcrClient(context: Context, private val backend: RecognitionBackend =
-    RecognitionBackend { image, prepared, guard, liveAt, expenseOnly, origin ->
+    RecognitionBackend { image, prepared, guard, liveAt, policy, origin ->
         LocalRecognitionClient(context).recognizePrepared(
-            image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,expenseOnly=expenseOnly,origin=origin)
+            image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,policy=policy,origin=origin)
     }) {
     suspend fun recognize(bitmap: Bitmap,onPrepared:(ByteArray)->Unit={},stillAllowed:()->Boolean={true}):RecognitionResult =
         recognizePrepared(prepareScreenshot(bitmap),onPrepared,stillAllowed)
     suspend fun recognizePrepared(image:ByteArray,onPrepared:(ByteArray)->Unit={},stillAllowed:()->Boolean={true},
-        livePaymentAt:Long?=null,expenseOnly:Boolean=false,origin:String=""):RecognitionResult =
-        backend.recognize(image,onPrepared,stillAllowed,livePaymentAt,expenseOnly,origin)
+        livePaymentAt:Long?=null,expenseOnly:Boolean=false,origin:String="",
+        policy:RecognitionPolicy=RecognitionPolicy.fromExpenseOnly(expenseOnly)):RecognitionResult =
+        backend.recognize(image,onPrepared,stillAllowed,livePaymentAt,policy,origin)
     fun prepareScreenshot(bitmap:Bitmap):ByteArray {
         if (bitmap.isRecycled || bitmap.width < 1 || bitmap.height < 1) throw RecognitionException("截图已失效，请重新截图")
         val longest = maxOf(bitmap.width, bitmap.height)

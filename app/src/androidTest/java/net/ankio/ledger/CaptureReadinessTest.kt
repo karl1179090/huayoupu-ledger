@@ -16,7 +16,13 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class CaptureReadinessTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
+    @Test fun disconnectedServiceScopeRefreshDoesNotRecreateOrDereferenceItsConfiguration() {
+        val disconnected=object:ScreenCaptureService() { init { attachBaseContext(app) } }
+        disconnected.refreshScope()
+        assertNull(disconnected.serviceInfo)
+    }
     private fun waitFor(condition:()->Boolean) {
         val deadline=SystemClock.elapsedRealtime()+6500
         while(!condition()&&SystemClock.elapsedRealtime()<deadline)SystemClock.sleep(100)

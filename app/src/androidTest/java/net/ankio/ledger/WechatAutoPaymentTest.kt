@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class WechatAutoPaymentTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
+    @get:org.junit.Rule val wallet=CaptureWalletFixture()
     @Test fun realAccessibilityEventCapturesCompletedPaymentWithoutShakeOrNotification()=captureCompletedPayment(null)
     @Test fun liteSdkDescriptionOnlySuccessCapturesWithoutShake()=captureCompletedPayment("lite_readable",true)
     @Test fun coldFirstTreeReplyCapturesWithoutReenteringOrOpeningLedger()=captureCompletedPayment("lite_cold_ready",true)
@@ -52,6 +54,8 @@ class WechatAutoPaymentTest {
         val lite=mode?.startsWith("lite_")==true
         val framework=mode?.startsWith("framework")==true || lite
         val component=ComponentName(packageName,if(packageName==PaymentApps.ALIPAY)"com.alipay.fixture.PaymentResultActivity" else if(lite)"com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI" else if(framework)PaymentPageDetector.WECHAT_FRAMEWORK_RESULT else "com.tencent.mm.plugin.remittance.ui.RemittanceResultNewUI")
+        assumeTrue("External synthetic payment fixture is not installed: $component",runCatching { app.packageManager.getActivityInfo(component,0) }.isSuccess)
+        app.channels.setShakePackage(packageName,true)
         assertNull(PaymentPageDetector.detect(PaymentPage(PaymentApps.WECHAT,1,component.className,emptyList())))
         val automation=InstrumentationRegistry.getInstrumentation().getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
         val resolver=app.contentResolver
@@ -63,7 +67,8 @@ class WechatAutoPaymentTest {
         val homeActivity=if(packageName==PaymentApps.ALIPAY)"com.alipay.mobile.quinox.LauncherActivity" else "com.tencent.mm.ui.LauncherUI"
         fun setAuto(enabled:Boolean) { app.channels.setAutoPackage(packageName,enabled);app.channels.setAutomaticEnabled(enabled) }
         val before=app.store.all().map { it.id }.toSet()
-        val taskIds=(0 until app.tasks.snapshot().length()).map { app.tasks.snapshot().getJSONObject(it).getLong("id") }.toSet()
+        val receiptIsolation=CaptureReceiptIsolation(app)
+        val taskIds=receiptIsolation.entryTaskIds
         val calls=AtomicInteger()
         val releaseModel=java.util.concurrent.CountDownLatch(if(leaveDuringModel)1 else 0)
         fun waitFor(timeout:Long=10000,check:()->Boolean) {
@@ -129,15 +134,49 @@ class WechatAutoPaymentTest {
                     if(mode=="framework_password") {
                         // A success match queued before a password overlay appeared must be
                         // re-read, not trusted at the actual acquisition boundary.
-                        val windows=automation.windows
-                        val window=try { windows.first { it.isActive && it.type==1 }.id } finally { windows.forEach { it.recycle() } }
-                        val stale=PaymentPageDetector.detect(PaymentPage("com.tencent.mm",window,component.className,listOf("支付成功","¥12.34","完成")))!!
-                        ScreenCaptureService.current!!.captureAutomatic(stale)
-                        SystemClock.sleep(1200)
+                        val originalFlags=automation.serviceInfo.flags
+                        try {
+                            // API34 UiAutomation does not retrieve interactive windows by default.
+                            // This test needs the real target window to inject the queued stale match.
+                            automation.serviceInfo=automation.serviceInfo.apply {
+                                flags=flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                            }
+                            fun containsPassword(node:android.view.accessibility.AccessibilityNodeInfo):Boolean {
+                                if(node.isPassword)return true
+                                for(index in 0 until node.childCount) {
+                                    val child=node.getChild(index) ?: continue
+                                    try {if(containsPassword(child))return true} finally {child.recycle()}
+                                }
+                                return false
+                            }
+                            var targetWindow:Int?=null
+                            waitFor {
+                                val windows=automation.windows
+                                try {
+                                    targetWindow=windows.firstOrNull { candidate->
+                                        if(!candidate.isActive || candidate.type!=android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION)false
+                                        else {
+                                            val root=candidate.root
+                                            try {root!=null && root.packageName?.toString()==packageName && containsPassword(root)}
+                                            finally {root?.recycle()}
+                                        }
+                                    }?.id
+                                    targetWindow!=null
+                                } finally {windows.forEach {it.recycle()}}
+                            }
+                            val window=requireNotNull(targetWindow)
+                            println("S8_PASSWORD_TARGET package=$packageName window=$window flags=${automation.serviceInfo.flags} originalFlags=$originalFlags")
+                            val stale=PaymentPageDetector.detect(PaymentPage(packageName,window,component.className,listOf("支付成功","¥12.34","完成")))!!
+                            ScreenCaptureService.current!!.captureAutomatic(stale)
+                            SystemClock.sleep(1200)
+                        } finally {
+                            automation.serviceInfo=automation.serviceInfo.apply {flags=originalFlags}
+                            println("S8_PASSWORD_FLAGS_RESTORED ${automation.serviceInfo.flags}")
+                        }
                     }
                     assertEquals("Sensitive/unknown pages must never call the screenshot API",initialRequests,ScreenCaptureService.current!!.screenshotRequests)
                     assertEquals(0,calls.get());assertEquals(before,app.store.all().map { it.id }.toSet())
-                    assertEquals(taskIds,(0 until app.tasks.snapshot().length()).map { app.tasks.snapshot().getJSONObject(it).getLong("id") }.toSet())
+                    assertEquals(taskIds,receiptIsolation.taskIds())
                     // An explicit shake may explain the privacy rejection; automatic checks stay silent.
                     if(!shakeOnBlocked)assertEquals("No automatic error/progress banner on a blocked page",initialStatus,app.channels.lastStatus())
                     return@use
@@ -226,11 +265,9 @@ class WechatAutoPaymentTest {
             ScreenCaptureService.current?.processorFactory={ CaptureProcessor(app) }
             CaptureRuntime.stopSafely()
             app.store.all().filter { it.id !in before }.forEach { app.store.delete(it.id) }
-            val tasks=app.tasks.snapshot()
-            for(i in 0 until tasks.length())tasks.getJSONObject(i).getLong("id").takeIf { it !in taskIds }?.let { id ->
-                app.tasks.paymentIdentity(id)?.let { app.store.writableDatabase.delete("capture_events","event_key=?",arrayOf(it)) }
-                app.tasks.delete(id)
-            }
+            val createdTaskIds=receiptIsolation.createdTaskIds()
+            receiptIsolation.clean(createdTaskIds)
+            createdTaskIds.forEach(app.tasks::delete)
             app.recognitionSession.invalidate()
             Settings.Secure.putString(resolver,"enabled_accessibility_services",previousServices)
             Settings.Secure.putInt(resolver,"accessibility_enabled",previousEnabled)

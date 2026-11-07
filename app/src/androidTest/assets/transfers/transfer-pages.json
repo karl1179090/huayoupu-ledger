@@ -1,0 +1,539 @@
+{
+  "fixtureVersion": 1,
+  "synthetic": true,
+  "nowMillis": 1793937600000,
+  "pages": [
+    {
+      "id": "wechat-topup-free",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "充值成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "充值金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "付款方式 招商银行储蓄卡（0007）",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "到账账户 微信零钱",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "手续费 ¥0.00",
+          "x": 24,
+          "y": 304,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "微信支付单号 SYNTHETIC-TOPUP-0001",
+          "x": 24,
+          "y": 360,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "intent": "SELF_TRANSFER",
+        "scenario": "TOP_UP",
+        "terminalState": "COMPLETED",
+        "amountCents": 10000,
+        "feeCents": 0,
+        "feeMode": "EXTRA",
+        "debitCents": 10000,
+        "creditCents": 10000
+      }
+    },
+    {
+      "id": "alipay-withdrawal-deducted",
+      "origin": "com.eg.android.AlipayGphone",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "提现成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "提现金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "实际扣款 ¥100.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "实际到账 ¥99.00",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "手续费 ¥1.00",
+          "x": 24,
+          "y": 304,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "转出账户 支付宝余额",
+          "x": 24,
+          "y": 360,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "到账银行卡 招商银行储蓄卡（0007）",
+          "x": 24,
+          "y": 416,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "支付宝交易号 SYNTHETIC-WITHDRAW-0001",
+          "x": 24,
+          "y": 472,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "intent": "SELF_TRANSFER",
+        "scenario": "WITHDRAWAL",
+        "terminalState": "COMPLETED",
+        "amountCents": 10000,
+        "feeCents": 100,
+        "feeMode": "DEDUCTED",
+        "debitCents": 10000,
+        "creditCents": 9900
+      }
+    },
+    {
+      "id": "topup-fee-missing",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "充值成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "充值金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "付款方式 招商银行储蓄卡（0007）",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "到账账户 微信零钱",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "intent": "SELF_TRANSFER",
+        "scenario": "TOP_UP",
+        "review": true,
+        "effects": {}
+      }
+    },
+    {
+      "id": "external-friend-transfer",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "转账成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "转账给 合成朋友",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "转账金额 ¥100.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "付款方式 招商银行（0007）",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "intent": "EXTERNAL",
+        "direction": "EXPENSE"
+      }
+    },
+    {
+      "id": "external-friend-income",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "收款成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "来自 合成朋友",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "收款金额 ¥100.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "intent": "EXTERNAL",
+        "direction": "INCOME",
+        "automaticCapture": false
+      }
+    },
+    {
+      "id": "withdrawal-pending",
+      "origin": "com.eg.android.AlipayGphone",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "提现申请已提交",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "预计两小时内到账",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "提现金额 ¥100.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "到账银行卡 招商银行（0007）",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "terminalState": "PENDING",
+        "automaticCapture": false,
+        "effects": {}
+      }
+    },
+    {
+      "id": "transfer-failed",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "充值失败",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "充值金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "terminalState": "FAILED",
+        "automaticCapture": false,
+        "effects": {}
+      }
+    },
+    {
+      "id": "transfer-reversed",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "充值退回",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "充值金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "terminalState": "REVERSED",
+        "automaticCapture": false,
+        "effects": {}
+      }
+    },
+    {
+      "id": "external-matching-card-tail",
+      "origin": "com.eg.android.AlipayGphone",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "转账成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "收款人 合成他人",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "收款银行卡 招商银行（0007）",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "转账金额 ¥100.00",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "intent": "EXTERNAL",
+        "direction": "EXPENSE"
+      }
+    },
+    {
+      "id": "credit-repayment-unsupported",
+      "origin": "com.eg.android.AlipayGphone",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "信用卡还款成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "还款金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "付款账户 支付宝余额",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "supportedTransfer": false
+      }
+    },
+    {
+      "id": "cross-currency-unsupported",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "充值成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "充值金额 USD 100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "实际到账 CNY 700.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "supportedTransfer": false
+      }
+    },
+    {
+      "id": "amount-conflict",
+      "origin": "com.eg.android.AlipayGphone",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "提现成功",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "提现金额 ¥100.00",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "实际扣款 ¥100.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "实际到账 ¥98.00",
+          "x": 24,
+          "y": 248,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "手续费 ¥1.00",
+          "x": 24,
+          "y": 304,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "转出账户 支付宝余额",
+          "x": 24,
+          "y": 360,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "到账银行卡 招商银行（0007）",
+          "x": 24,
+          "y": 416,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "error": "TRANSFER_AMOUNT_CONFLICT",
+        "effects": {}
+      }
+    },
+    {
+      "id": "sensitive-input",
+      "origin": "com.tencent.mm",
+      "source": "IMAGE",
+      "lines": [
+        {
+          "text": "充值",
+          "x": 24,
+          "y": 80,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "请输入支付密码",
+          "x": 24,
+          "y": 136,
+          "width": 340,
+          "height": 32
+        },
+        {
+          "text": "转账金额 ¥100.00",
+          "x": 24,
+          "y": 192,
+          "width": 340,
+          "height": 32
+        }
+      ],
+      "expected": {
+        "sensitive": true,
+        "editable": true,
+        "requestScreenshot": false,
+        "effects": {}
+      }
+    }
+  ]
+}

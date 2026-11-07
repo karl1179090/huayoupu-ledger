@@ -18,10 +18,10 @@ class AutomaticSupplementTest {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val namespace="auto-supplement-${UUID.randomUUID()}"
     private val images=ScreenshotStore(context,namespace)
-    private val store=LedgerStore(context,"$namespace-ledger.db",images)
+    private val store=LedgerStore(context,"$namespace-ledger.db",images).prepareSyntheticDefaultWallet()
     private val at=1_790_000_000_000L
-    private val first=byteArrayOf(21,22,23)
-    private val second=byteArrayOf(24,25,26)
+    private val first=syntheticBackupImage(21)
+    private val second=syntheticBackupImage(24)
     private fun capture(time:Long=at,text:String="账单详情",origin:String=PaymentApps.WECHAT)=Capture(Source.OCR,origin,text,time)
     private fun bill(id:String?="ORIGINAL-ORDER")=ParsedBill(10000,Direction.EXPENSE,"合成石化商户","交通",at,id,true,"",true)
     private fun refund()=bill().copy(amountCents=3654,refund=RefundInfo("wechat",10000,6346))

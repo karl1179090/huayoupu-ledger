@@ -21,7 +21,7 @@ class ScreenshotPerformanceTest {
     private val namespace="screenshot-perf-${UUID.randomUUID()}"
     private val images=ScreenshotStore(context,namespace)
     private val ledgerName="$namespace-ledger.db"
-    private val store=LedgerStore(context,ledgerName,images)
+    private val store=LedgerStore(context,ledgerName,images).prepareSyntheticDefaultWallet()
     private val now=System.currentTimeMillis()
 
     @After fun close() {

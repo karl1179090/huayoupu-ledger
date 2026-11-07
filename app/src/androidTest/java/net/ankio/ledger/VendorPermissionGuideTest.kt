@@ -20,6 +20,7 @@ import org.junit.Assume.assumeTrue
 
 @RunWith(AndroidJUnit4::class)
 class VendorPermissionGuideTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private val brands=listOf("Xiaomi","OPPO","OnePlus","realme","vivo","HUAWEI","HONOR","samsung","Meizu","google","unknown")
     private fun guide(brand:String,sdk:Int=36)=PermissionGuidance.forDevice(PermissionDevice(brand,brand,"vendor-fixture","16",sdk))
     private fun waitFor(check:()->Boolean) { val end=SystemClock.elapsedRealtime()+10000;while(!check()&&SystemClock.elapsedRealtime()<end)SystemClock.sleep(50);assertTrue(check()) }

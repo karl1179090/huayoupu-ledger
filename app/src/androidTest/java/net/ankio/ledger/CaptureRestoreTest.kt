@@ -17,6 +17,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class CaptureRestoreTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     @Test fun accessibilityRebindRestoresAutomaticListenerWithoutOpeningLedger() {
         assumeTrue(android.os.Build.MODEL.contains("sdk_gphone"))
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()

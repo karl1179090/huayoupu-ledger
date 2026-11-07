@@ -36,10 +36,11 @@ class MainActivity : Activity() {
     lateinit var pageHost: FrameLayout
         private set
     internal var modelPage: EmbeddedModelPage? = null
-    private var csvPreviewSheet: MintDialog? = null
+    private val fileImports by lazy { NativeFileImports(this) }
     private var ready = false
     private var pendingCaptureRepair=false
     private var pendingRecordId:Long?=null
+    private var pendingStatisticsPeriod:net.ankio.ledger.core.ExpensePeriod?=null
     private var pendingChannel: ChannelSettings.Channel? = null
     internal val permissionSetup by lazy { PermissionSetupController(this) }
     @Volatile private var savedPageState: String? = null
@@ -48,18 +49,22 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ledger.startInteractiveMaintenance()
+        pendingStatisticsPeriod=savedInstanceState?.getString("pendingStatisticsPeriod")?.let { runCatching {net.ankio.ledger.core.ExpensePeriod.valueOf(it)}.getOrNull() }
+            ?:statisticsPeriod(intent)
         pendingCaptureRepair=intent.action==net.ankio.ledger.capture.CaptureHealth.REPAIR
         pendingRecordId=savedInstanceState?.getLong("pendingRecordId",0)?.takeIf { it>0 }
             ?:intent.takeIf { it.action==OPEN_RECORD }?.getLongExtra("recordId",0)?.takeIf { it>0 }
         window.setDecorFitsSystemWindows(false)
         savedPageState = savedInstanceState?.getString("pageState")
         pendingChannel = savedInstanceState?.getString("pendingChannel")?.let { key -> ChannelSettings.Channel.entries.firstOrNull { it.key == key } }
+        fileImports.recover()
         savedInstanceState?.getString("permissionSetup")?.let { json -> runCatching { permissionSetup.restoreState(JSONObject(json)) } }
         previewBytes = ledger.importer.previewBytes
-        val outer = FrameLayout(this).apply { setBackgroundColor(Color.rgb(248,250,252)) }
+        val outer = FrameLayout(this).apply { setBackgroundColor(Color.rgb(247,246,252)) }
         pageHost = outer
         webView = WebView(this).apply {
-            setBackgroundColor(Color.rgb(248,250,252))
+            setBackgroundColor(Color.rgb(247,246,252))
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
@@ -82,6 +87,10 @@ class MainActivity : Activity() {
                                 ?.groupValues?.get(1)?.toLongOrNull() ?: return missing()
                             val bytes = ledger.tasks.image(id) ?: return missing()
                             WebResourceResponse("image/jpeg",null,ByteArrayInputStream(bytes))
+                        } else if (uri.path?.startsWith("/installed-app-icon/") == true) {
+                            val key=Regex("^/installed-app-icon/([a-f0-9]{64})\\.png$").matchEntire(uri.path!!)?.groupValues?.get(1) ?: return missing()
+                            val bytes=net.ankio.ledger.capture.InstalledAppsRepository.get(this@MainActivity).iconAsset(key) ?: return missing()
+                            WebResourceResponse("image/png",null,ByteArrayInputStream(bytes))
                         } else if (uri.path?.startsWith("/merchant-icon/") == true) {
                             val key = Regex("^/merchant-icon/([a-f0-9]{64})\\.img$").matchEntire(uri.path!!)
                                 ?.groupValues?.get(1) ?: return missing()
@@ -125,6 +134,7 @@ class MainActivity : Activity() {
                     permissionSetup.resume()
                     resumeCaptureRepair()
                     openPendingRecord()
+                    openPendingStatistics()
                 }
             }
         }
@@ -231,6 +241,7 @@ class MainActivity : Activity() {
     }
     override fun onResume() {
         super.onResume()
+        ledger.startInteractiveMaintenance()
         // Restore a previously enabled listener after an update/process stop. No new consent.
         captureRestoreResumed=true;restoreEnabledCapture(++captureRestoreEpoch)
         if(ledger.executionLog.active())ledger.executionLog.event("system","permissions","activity_resumed",net.ankio.ledger.data.RecognitionDiagnostics.permissions(ledger))
@@ -244,8 +255,25 @@ class MainActivity : Activity() {
     }
     override fun onNewIntent(intent:Intent) {
         super.onNewIntent(intent);setIntent(intent)
+        ledger.startInteractiveMaintenance()
+        if(intent.action==OPEN_STATISTICS) {pendingStatisticsPeriod=statisticsPeriod(intent);openPendingStatistics()}
         if(intent.action==net.ankio.ledger.capture.CaptureHealth.REPAIR) { pendingCaptureRepair=true;resumeCaptureRepair() }
         if(intent.action==OPEN_RECORD) { pendingRecordId=intent.getLongExtra("recordId",0).takeIf { it>0 };openPendingRecord() }
+    }
+    private fun statisticsPeriod(source:Intent):net.ankio.ledger.core.ExpensePeriod? {
+        if(source.action!=OPEN_STATISTICS)return null
+        val period=runCatching {net.ankio.ledger.core.ExpensePeriod.valueOf(source.getStringExtra(net.ankio.ledger.widget.ExpenseWidgetProvider.PERIOD)?:"")}.getOrNull()?:return null
+        val uri=source.data?:return null
+        val id=uri.pathSegments.getOrNull(0)?.toIntOrNull()?:return null
+        if(id !in net.ankio.ledger.widget.ExpenseWidgetProvider.ids(this) || uri.toString()!="ledger-statistics://widget/$id/${period.name}")return null
+        return period
+    }
+    private fun openPendingStatistics() {
+        if(!ready)return
+        val period=pendingStatisticsPeriod?:return
+        pendingStatisticsPeriod=null
+        intent.action=null;intent.data=null;intent.removeExtra(net.ankio.ledger.widget.ExpenseWidgetProvider.PERIOD)
+        dispatch("statisticsPeriod",JSONObject.quote(period.name))
     }
     private fun openPendingRecord() {
         if(!ready)return
@@ -281,62 +309,28 @@ class MainActivity : Activity() {
     }
     override fun onSaveInstanceState(outState: Bundle) {
         pendingRecordId?.let { outState.putLong("pendingRecordId",it) }
+        pendingStatisticsPeriod?.let {outState.putString("pendingStatisticsPeriod",it.name)}
         savedPageState?.let { outState.putString("pageState", it) }
         pendingChannel?.let { outState.putString("pendingChannel", it.key) }
         permissionSetup.saveState()?.let { outState.putString("permissionSetup",it.toString()) }
         super.onSaveInstanceState(outState)
     }
-    override fun onDestroy() { csvPreviewSheet?.dismiss();csvPreviewSheet=null;modelPage?.dismiss(false); uiScope.cancel(); webView.removeJavascriptInterface("LedgerNative"); webView.destroy(); super.onDestroy() }
+    override fun onDestroy() { fileImports.close();modelPage?.dismiss(false); uiScope.cancel(); webView.removeJavascriptInterface("LedgerNative"); webView.destroy(); super.onDestroy() }
 
     fun importImage() {
         if (ledger.importer.state.value == ImageImportState.Working) { message("正在识别，请稍候"); return }
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="image/*"; addCategory(Intent.CATEGORY_OPENABLE) }, IMAGE_REQUEST)
     }
     fun exportBackup() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-${java.time.LocalDate.now()}.zip")
+        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-v5-${java.time.LocalDate.now()}.zip")
     }, EXPORT_REQUEST) }
-    fun exportBills(format:String) {
-        val selected=LedgerCsvExport.Format.fromKey(format)
-        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            type="text/csv";addCategory(Intent.CATEGORY_OPENABLE)
-            putExtra(Intent.EXTRA_TITLE,"花有谱-${if(selected==LedgerCsvExport.Format.QIANJI)"钱迹模板" else "全部账单"}-${java.time.LocalDate.now()}.csv")
-        },if(selected==LedgerCsvExport.Format.QIANJI)CSV_QIANJI_REQUEST else CSV_GENERAL_REQUEST)
-    }
-    fun importBills() { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-        type="*/*";putExtra(Intent.EXTRA_MIME_TYPES,arrayOf("text/csv","text/comma-separated-values","application/csv","application/octet-stream"))
-        addCategory(Intent.CATEGORY_OPENABLE)
-    }, CSV_IMPORT_REQUEST) }
-
-    private fun previewBills(document:LedgerCsvImport.Document,preview:LedgerCsvImport.Preview) {
-        if(isDestroyed || isFinishing)return
-        csvPreviewSheet?.dismiss()
-        val sheet=MintDialog(this,"导入账单预览",preview.format)
-        csvPreviewSheet=sheet
-        sheet.dialog.setOnDismissListener { if(csvPreviewSheet===sheet)csvPreviewSheet=null }
-        sheet.content.addView(sheet.text("共 ${preview.total} 笔 · 可导入 ${preview.ready} 笔",20,MintDialog.INK,true))
-        sheet.content.addView(sheet.text("重复 ${preview.duplicates} 笔 · 无效 ${preview.errors.size} 笔",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(8),0,sheet.dp(8)) })
-        for(record in preview.samples)sheet.content.addView(sheet.text("${java.text.SimpleDateFormat("yyyy-MM-dd",java.util.Locale.ROOT).format(java.util.Date(record.bill.occurredAt))}  ${record.bill.merchant.take(20)}  ${if(record.bill.direction==net.ankio.ledger.core.Direction.INCOME)"收入" else "支出"} ¥${net.ankio.ledger.core.Money.format(record.bill.amountCents!!)}",13,MintDialog.INK))
-        if(preview.errors.isNotEmpty()) {
-            sheet.label("以下无效行将跳过")
-            preview.errors.take(4).forEach { sheet.content.addView(sheet.text("第 ${it.row} 行：${it.message}",13,MintDialog.MUTED)) }
-            if(preview.errors.size>4)sheet.content.addView(sheet.text("另有 ${preview.errors.size-4} 行无效",13,MintDialog.MUTED))
-        }
-        sheet.content.addView(sheet.text("按表头自动匹配字段；重复账单跳过，已有账单不覆盖。账户和图片不从 CSV 导入，识别开关保持当前设置。钱迹模板需为最终人民币金额；零金额退款请用花有谱通用 CSV。",12,MintDialog.MUTED).apply { setPadding(0,sheet.dp(16),0,0) })
-        if(preview.ready>0)sheet.action("确认导入 ${preview.ready} 笔",true) {
-            sheet.dismiss()
-            uiScope.launch {
-                dispatch("fileOperation",JSONObject.quote("正在导入账单"))
-                try {
-                    val result=withContext(Dispatchers.IO) { ensureActive();LedgerCsvImport.apply(ledger.store,document) }
-                    ledger.changed();message("已导入 ${result.imported} 笔，跳过 ${result.duplicates+result.invalid} 笔")
-                } catch(cancelled:CancellationException) { throw cancelled }
-                catch(_:Exception) { message("导入失败，账单未修改") }
-                finally { dispatch("fileOperation","null") }
-            }
-        }
-        sheet.action(if(preview.ready>0)"取消" else "关闭") { sheet.dismiss() }
-        sheet.show()
-    }
+    fun exportBills(format:String) = fileImports.exportBills(format)
+    fun importBills() = fileImports.importBills()
+    fun importWallets() = fileImports.importWallets()
+    fun exportWallets() = fileImports.exportWallets()
+    fun exportImportTemplate(kind:String) = fileImports.exportTemplate(kind)
+    fun exportImportErrors() = fileImports.exportErrors()
+    internal fun fileProgress(message:String?) = dispatch("fileOperation",message?.let(JSONObject::quote) ?: "null")
     private fun exportDiagnostics() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
         type="application/json";addCategory(Intent.CATEGORY_OPENABLE)
         putExtra(Intent.EXTRA_TITLE,"花有谱识别诊断-${java.time.LocalDate.now()}.json")
@@ -347,21 +341,10 @@ class MainActivity : Activity() {
     @Deprecated("Native document picker result")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode,resultCode,data)
+        if(fileImports.onResult(requestCode,resultCode,data))return
         if (resultCode!=RESULT_OK) return
         val uri=data?.data ?: return
         when(requestCode) {
-            CSV_IMPORT_REQUEST -> uiScope.launch {
-                dispatch("fileOperation",JSONObject.quote("正在检查 CSV"))
-                try {
-                    val result=withContext(Dispatchers.IO) {
-                        val document=(contentResolver.openInputStream(uri) ?: error("无法读取文件")).use { LedgerCsvImport.read(it) }
-                        document to LedgerCsvImport.preview(ledger.store,document)
-                    }
-                    previewBills(result.first,result.second)
-                } catch(cancelled:CancellationException) { throw cancelled }
-                catch(error:Exception) { message(error.message?.take(70) ?: "CSV 无法读取，请检查格式") }
-                finally { dispatch("fileOperation","null") }
-            }
             DIAGNOSTICS_REQUEST -> uiScope.launch {
                 try {
                     withContext(Dispatchers.IO) {
@@ -375,7 +358,7 @@ class MainActivity : Activity() {
                 dispatch("navigate", JSONObject.quote("import"))
                 ledger.importer.start(uri)
             }
-            EXPORT_REQUEST,CSV_GENERAL_REQUEST,CSV_QIANJI_REQUEST -> uiScope.launch {
+            EXPORT_REQUEST -> uiScope.launch {
                 dispatch("fileOperation",JSONObject.quote(if(requestCode==EXPORT_REQUEST)"正在生成完整备份" else "正在导出全部账单"))
                 try {
                     val result=withContext(Dispatchers.IO) {
@@ -389,24 +372,35 @@ class MainActivity : Activity() {
                             (contentResolver.openOutputStream(uri,"wt") ?: error("无法写入")).use { output -> temporary.inputStream().use { it.copyTo(output) } }
                             count
                         } finally { temporary.delete() }
-                    }; message(if(result==null)"完整备份已导出" else "已导出 $result 笔账单")
+                    }; message(if(result==null)"完整备份 v5 已导出" else "已导出 $result 笔账单")
                 } catch(cancelled:CancellationException) { throw cancelled }
                 catch(_:Exception) { message("导出失败，请检查文件位置或可用空间") }
                 finally { dispatch("fileOperation", "null") }
             }
             RESTORE_REQUEST -> AlertDialog.Builder(this).setTitle("恢复本地备份？")
-                .setMessage("将合并备份中的账单、账户、分类及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。旧版备份可能没有截图。")
-                .setPositiveButton("恢复") { _,_ -> uiScope.launch {
+                .setMessage("将合并备份中的账单、账户、分类及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。支持 v1～v5 备份；钱包余额以快照恢复，资金影响不会重放。旧版备份可能没有截图。")
+                .setPositiveButton("恢复") { _,_ ->
+                    // Pause both independent channels before taking the ledger write lock.
+                    // A late native OCR response must lose its session before restore starts.
+                    ledger.channels.set(ChannelSettings.Channel.OCR,false)
+                    ledger.channels.setAutomaticEnabled(false)
+                    ledger.recognitionSession.invalidate()
+                    ScreenCaptureService.current?.cancelRecognition()
+                    ledger.captureQueue.cancelAll()
+                    CaptureRuntime.stopSafely()
+                    ledger.changed()
+                    uiScope.launch {
                     dispatch("fileOperation",JSONObject.quote("正在校验并恢复备份"))
                     try {
                         val count=withContext(Dispatchers.IO) {
                             val imported=(contentResolver.openInputStream(uri) ?: error("无法读取")).use { input ->
-                                LedgerArchive.read(input,cacheDir).use { prepared -> LedgerArchive.restore(ledger.store,prepared) }
+                                LedgerArchive.read(input,cacheDir).use { prepared -> LedgerArchive.restoreDetailed(ledger.store,prepared) }
                             }
                             // Restoring data must never silently start collection or restore cloud consent.
                             ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
+                            ledger.channels.resetShakeSelectionForRestore()
                             imported
-                        }; CaptureRuntime.stopSafely(); ledger.changed(); message("已恢复 $count 笔账单，采集保持暂停，可按需开启")
+                        }; CaptureRuntime.stopSafely(); ledger.changed(true); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔保留为不联动历史；保留 ${count.retainedAccounts} 个本地钱包，跳过 ${count.skippedRecords} 笔重复（强身份 ${count.identityConflicts}）；${count.aliasConflicts} 个别名冲突保留本地映射。采集保持暂停，请重新选择摇一摇应用")
                     } catch(cancelled:CancellationException) { throw cancelled }
                     catch(_:Exception) { message("恢复失败，备份无效或已损坏，现有账单未修改") }
                     finally { dispatch("fileOperation","null") }
@@ -435,6 +429,10 @@ class MainActivity : Activity() {
     }
     private fun enableChannel(channel: ChannelSettings.Channel) {
         if (!ledger.channels.permitted(channel)) return
+        if(channel==ChannelSettings.Channel.OCR && ledger.channels.selectedShakePackages().isEmpty()) {
+            ledger.channels.set(channel,true);CaptureRuntime.refreshHealth();ledger.changed()
+            showShakeApplications();return
+        }
         if (channel.capture && permissionSetup.backgroundNeedsReview()) {
             permissionSetup.start(channel); return
         }
@@ -487,12 +485,14 @@ class MainActivity : Activity() {
         val running=state.optBoolean("running")&&state.optBoolean("accessibilityConnected")
         val sheet=MintDialog(this,"摇一摇运行状态")
         sheet.content.addView(sheet.text(when {
+            ledger.channels.selectedShakePackages().isEmpty() -> "请选择允许摇一摇记账的应用"
             !state.optBoolean("running") -> "摇一摇未运行"
             !state.optBoolean("accessibilityConnected") -> "页面识别尚未连接"
             state.optBoolean("backgroundRestricted") -> "后台运行受限"
             else -> "运行中"
         },20,if(running)MintDialog.GREEN else MintDialog.INK,true))
-        sheet.content.addView(sheet.text("打开单笔账单详情，摇一摇即可补录。",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(10),0,sheet.dp(16)) })
+        sheet.content.addView(sheet.text("仅在你选择的应用内，打开单笔账单详情后摇一摇补录。当前已选 ${ledger.channels.selectedShakePackages().size} 个应用。",14,MintDialog.MUTED).apply { setPadding(0,sheet.dp(10),0,sheet.dp(16)) })
+        sheet.action("应用白名单",true) { sheet.dismiss();showShakeApplications() }
         val recent=ledger.captureHealth.snapshot()
         val successfulAt=recent.optLong("lastSuccessfulAt",0)
         val recentRecord=recent.optLong("lastSuccessfulRecordId",0).takeIf { it>0 }?.let { ledger.store.get(it) }
@@ -502,10 +502,11 @@ class MainActivity : Activity() {
         if(ledger.channels.permitted(ChannelSettings.Channel.OCR))sheet.action("关闭并撤销识别授权") { sheet.dismiss();revokeChannel("ocr") }
         sheet.show()
     }
+    fun showShakeApplications() { permissionSetup.cancel();dispatch("shakeApplications","null") }
     fun configureWechatAuto() {
         val enabled=ledger.channels.wechatAutoConsented()
         val sheet=MintDialog(this,"微信支付自动识别",if(enabled)"已开启 · 与摇一摇共用无障碍授权" else "微信没发通知，也能识别前台支付结果")
-        sheet.content.addView(sheet.text("开启后，在微信付款或转账成功页、已完成交易详情页停留片刻，应用会检查交易页面；可读取文字时先核对状态和单笔金额，微信转账结果页没有提供文字时改用截图识别。匹配后弹出识别进度，全部在本机识别，截图不上传。有效结果直接记账，可再编辑或删除。\n\n不读取聊天内容，不点击、不支付；输入密码、待支付或交易失败的页面不采集。截图和账本保存在本机。\n\n此功能需要同时开启摇一摇及无障碍。后台代扣如果既没有通知、也没有显示支付结果页面，仍无法实时感知；可之后打开单笔详情识别。暂未适配的结果页请摇一摇补录。",14,MintDialog.MUTED))
+        sheet.content.addView(sheet.text("开启后，在微信付款或转账成功页、已完成交易详情页停留片刻，应用会检查交易页面；可读取文字时先核对状态和单笔金额，微信转账结果页没有提供文字时改用截图识别。匹配后弹出识别进度，全部在本机识别，截图不上传。有效结果直接记账，可再编辑或删除。\n\n不读取聊天内容，不点击、不支付；输入密码、待支付或交易失败的页面不采集。截图和账本保存在本机。\n\n此功能需要页面识别授权，自动识别与摇一摇开关独立。后台代扣如果既没有通知、也没有显示支付结果页面，仍无法实时感知；可之后打开单笔详情识别。暂未适配的结果页请摇一摇补录。",14,MintDialog.MUTED))
         sheet.action(if(enabled)"关闭微信自动识别" else "同意并开启微信自动识别",true) {
             ledger.channels.setWechatAuto(!enabled)
             ScreenCaptureService.current?.cancelRecognition()
@@ -520,7 +521,7 @@ class MainActivity : Activity() {
         if(modelPage?.isClosing==true)modelPage?.dismiss(false)
         if(modelPage!=null)return
         val sheet=MintDialog(this,"数据与隐私","截图与账本保存在本机")
-        sheet.content.addView(sheet.text("账单、账户、分类、备注及新增、修改、删除操作均在本机完成和保存。应用不自动同步完整账本。卸载或清除应用数据会删除本机账本，请主动导出备份。\n\n自动记账、摇一摇和截图导入均在本机识别，无需配置，截图不上传。主动摇动手机或选择图片时取图识别；另外同意并开启支付自动识别后，只会检查你主动选择的应用中的前台付款成功页，先从可读取的节点确认付款成功和单笔金额，再核对当前页面后截图识别。出现输入框、密码或验证提示，或无法确认页面时直接跳过，不用截图来猜测是否成功。摇一摇也不能绕过这层检查。仅自动记录支出，不等待对方确认收款；收入请手动记账、导入截图或主动摇一摇记录。识别成功后直接记账，可在详情中编辑或删除。不会代你点击、收款或支付。识别开始即保存本地任务；识别中、成功、失败均可查看。识别截图会压缩后保存在应用私有目录，用于详情核对。账单与任务共享同一张图片。已关联账单的付款及退款截图随识别历史保留，按第 1 次、第 2 次顺序核对。未关联的成功任务截图默认保留30天，失败截图7天，并按200MiB容量预算清理；仍被账单历史或待识别任务引用的图片继续保留。清理截图不删除账单、识别历史和商户图标，缺失图片会明确提示。删除最后一个引用后释放图片。完整 ZIP 备份包含账单、识别历史、截图、商户图标、账户及分类，相同图片只保存一次；支持恢复旧版 JSON。账单 CSV 可导出全部月份的已入账收支，通用格式保留商户与订单号，也提供钱迹官方模板格式。失败识别任务不作为账单导出，也不进入完整备份。\n\n此版本不再读取短信和其他应用通知。没有显示前台结果页的后台代扣可能漏记，可打开交易详情后摇一摇补录。暂停自动识别与关闭摇一摇分别生效；撤销无障碍授权会同时停止两种截图功能。",14,MintDialog.MUTED))
+        sheet.content.addView(sheet.text("账单、账户、分类、备注及新增、修改、删除操作均在本机完成和保存。应用不自动同步完整账本。卸载或清除应用数据会删除本机账本，请主动导出备份。\n\n自动记账、摇一摇和截图导入均在本机识别，无需配置，截图不上传。摇一摇仅在你主动勾选的应用白名单内、通过隐私检查后取图；应用目录和图标仅在本机用于选择，不上传。选择图片时主动导入识别；另外同意并开启支付自动识别后，只会检查你主动选择的应用中的前台付款成功页，先从可读取的节点确认付款成功和单笔金额，再核对当前页面后截图识别。出现输入框、密码或验证提示，或无法确认页面时直接跳过，不用截图来猜测是否成功。摇一摇也不能绕过这层检查。仅自动记录支出，不等待对方确认收款；收入请手动记账、导入截图或主动摇一摇记录。有效账单选择钱包后入账，可在详情中编辑或删除。优先使用明确的付款方式，再使用来源应用钱包和默认钱包；没有可用钱包时等待选择。新账单自动更新资产余额，退款回到原钱包，历史记录不追溯扣款，可手动校准余额。不会代你点击、收款或支付。识别开始即保存本地任务；识别中、成功、失败均可查看。识别截图会压缩后保存在应用私有目录，用于详情核对。账单与任务共享同一张图片。已关联账单的付款及退款截图随识别历史保留，按第 1 次、第 2 次顺序核对。未关联的成功任务截图默认保留30天，失败截图7天，并按200MiB容量预算清理；仍被账单历史或待识别任务引用的图片继续保留。清理截图不删除账单、识别历史和商户图标，缺失图片会明确提示。删除最后一个引用后释放图片。完整 ZIP 备份包含账单、识别历史、截图、商户图标、账户及分类，相同图片只保存一次；支持恢复旧版 JSON。账单 CSV 可导出全部月份的已入账收支，通用格式保留商户与订单号，也提供钱迹官方模板格式。失败识别任务不作为账单导出，也不进入完整备份。\n\n此版本不再读取短信和其他应用通知。没有显示前台结果页的后台代扣可能漏记，可打开交易详情后摇一摇补录。暂停自动识别与关闭摇一摇分别生效；撤销无障碍授权会同时停止两种截图功能。",14,MintDialog.MUTED))
         var afterDismiss:(()->Unit)?=null
         sheet.fixedActions(
             sheet.button("管理截图授权").apply { setOnClickListener { afterDismiss={ changeChannel("ocr",false) };sheet.dismiss() } },
@@ -593,5 +594,5 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode,permissions,grantResults); refresh()
         if(permissionSetup.active)permissionSetup.resume()
     }
-    companion object { const val OPEN_RECORD="net.ankio.ledger.OPEN_RECORD";const val IMAGE_REQUEST=10; const val EXPORT_REQUEST=11; const val RESTORE_REQUEST=12; const val DIAGNOSTICS_REQUEST=13;const val CSV_GENERAL_REQUEST=14;const val CSV_QIANJI_REQUEST=15;const val CSV_IMPORT_REQUEST=16 }
+    companion object { const val OPEN_STATISTICS="net.ankio.ledger.OPEN_STATISTICS"; const val OPEN_RECORD="net.ankio.ledger.OPEN_RECORD";const val IMAGE_REQUEST=10; const val EXPORT_REQUEST=11; const val RESTORE_REQUEST=12; const val DIAGNOSTICS_REQUEST=13;const val CSV_GENERAL_REQUEST=14;const val CSV_QIANJI_REQUEST=15;const val CSV_IMPORT_REQUEST=16 }
 }

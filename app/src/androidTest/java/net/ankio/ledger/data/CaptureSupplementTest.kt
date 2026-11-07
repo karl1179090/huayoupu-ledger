@@ -92,11 +92,11 @@ class CaptureSupplementTest {
     private val context=ApplicationProvider.getApplicationContext<Context>()
     private val namespace="supplement-${UUID.randomUUID()}"
     private val images=ScreenshotStore(context,namespace)
-    private var store=LedgerStore(context,"$namespace-ledger.db",images)
+    private var store=LedgerStore(context,"$namespace-ledger.db",images).prepareSyntheticDefaultWallet()
     private val now=System.currentTimeMillis()
-    private val first=byteArrayOf(1,2,3)
-    private val second=byteArrayOf(4,5,6)
-    private val third=byteArrayOf(7,8,9)
+    private val first=syntheticBackupImage(1)
+    private val second=syntheticBackupImage(2)
+    private val third=syntheticBackupImage(3)
     private fun capture(text:String="合成支付成功页",origin:String="com.tencent.mm")=Capture(Source.OCR,origin,text,now)
     private fun bill(id:String?="SYNTHETIC-ORDER")=ParsedBill(10000,Direction.EXPENSE,"合成商户","购物",now,id,true,"",true)
     private fun payment()=(store.ingest(capture(),bill(),screenshot=first) as IngestResult.Saved).record
@@ -151,6 +151,44 @@ class CaptureSupplementTest {
         assertEquals(2,store.captureHistory(pending.id).size)
     }
 
+    @Test fun strongIdentityCompletionCannotOverrideReviewOrUnreliableInputOrAmbiguousTransferType() {
+        for((index,required) in listOf(true,false).withIndex()) {
+            val fields=bill("SYNTHETIC-REVIEW-GATE-$index")
+            val pending=(store.ingest(capture("合成缺项$index"),fields.copy(reliable=false),screenshot=first) as IngestResult.Saved).record
+            val result=store.ingest(capture("合成后续$index"),fields.copy(reliable=required),screenshot=second,requireReview=required) as IngestResult.Saved
+            assertEquals(pending.uid,result.record.uid);assertEquals(RecordState.REVIEW,result.record.state);assertTrue(result.record.walletEffects.isEmpty())
+        }
+        val fields=bill("SYNTHETIC-AMBIGUOUS-TYPE")
+        val evidence=TransferEvidence(TransferIntent.AMBIGUOUS,terminalState=TransferTerminalState.COMPLETED,amountCents=10000,feeCents=0,feeMode=FeeMode.EXTRA)
+        val ambiguous=(store.ingest(capture("本人或对外待核对"),fields.copy(direction=null,transfer=evidence),screenshot=first) as IngestResult.Saved).record
+        val result=store.ingest(capture("普通付款后续"),fields,screenshot=second) as IngestResult.Saved
+        assertEquals(ambiguous.uid,result.record.uid);assertEquals(RecordState.REVIEW,result.record.state);assertNull(result.record.bill.direction)
+        assertEquals(evidence,result.record.bill.transfer);assertTrue(result.record.walletEffects.isEmpty())
+    }
+
+    @Test fun strongIdentityCompletionPreservesManualWalletAndEveryEligibilityAndPostsEffectsOnce() {
+        for(eligibility in WalletEligibility.entries) {
+            val chosen=store.saveAccount(LedgerAccount(name="合成人工卡$eligibility",amountCents=50000,kind="bank",bankCode="cmb",cardLast4="0007"))
+            val other=store.saveAccount(LedgerAccount(name="合成新默认$eligibility",amountCents=50000,kind="bank",bankCode="icbc",cardLast4="0008"))
+            val fields=bill("SYNTHETIC-COMPLETE-${eligibility.name}")
+            val pending=(store.ingest(capture("合成缺项$eligibility"),fields.copy(reliable=false),screenshot=first) as IngestResult.Saved).record
+            WalletAccounting.saveLink(store.writableDatabase,pending.wallet!!.copy(eligibility=eligibility,
+                accountUid=chosen.uid,selectionSource="MANUAL",manualLocked=true))
+            store.setDefaultWallet(other.uid)
+            val reliable=fields.copy(paymentMethod=PaymentMethodEvidence("BANK_CARD","DEBIT","icbc","0008"))
+            val result=store.ingest(capture("合成可靠补全$eligibility"),reliable,screenshot=second) as IngestResult.Saved
+            val saved=result.record
+            assertEquals(pending.uid,saved.uid);assertEquals(RecordState.POSTED,saved.state);assertEquals(eligibility,saved.wallet!!.eligibility)
+            assertTrue(saved.wallet!!.manualLocked);assertEquals(chosen.uid,saved.wallet!!.accountUid)
+            assertEquals(if(eligibility==WalletEligibility.ACTIVE)40000L else 50000L,store.getAccount(chosen.id)!!.amountCents)
+            assertEquals(50000L,store.getAccount(other.id)!!.amountCents)
+            val balances=store.accounts().associate {it.uid to it.amountCents};val movements=store.walletSnapshot().movements
+            store.ingest(capture("同笔已正式账单再补充$eligibility"),reliable,screenshot=third)
+            assertEquals(balances,store.accounts().associate {it.uid to it.amountCents});assertEquals(movements,store.walletSnapshot().movements)
+            assertEquals(saved.walletEffects,store.get(saved.id)!!.walletEffects)
+        }
+    }
+
     @Test fun severalHistoricalOrdersRemainSeparateAfterRepeatCaptureAndDatabaseReopen() {
         val entries=listOf(1256L,563L,2250L,2000L).mapIndexed { index,amount ->
             val fields=bill("TAOBAO-ORDER-$index").copy(amountCents=amount,merchant="同一家旗舰店",
@@ -194,10 +232,15 @@ class CaptureSupplementTest {
 
     @Test fun standaloneRefundCleanupPreservesOriginalAdjustedPaymentAndManualEntries() {
         val raw="退款成功 120.00 查看原账单 退款方式 余额"
-        val wrong=(store.ingest(capture(raw),bill().copy(merchant="退款来源"),screenshot=first) as IngestResult.Saved).record
+        val receipt=bill().copy(amountCents=null,reliable=false,merchant="退款来源",
+            standaloneRefund=StandaloneRefundEvidence("wechat",12000,"SYNTHETIC-COMPLETED-REFUND",null))
+        val wrong=(store.ingest(capture(raw),receipt,screenshot=first) as IngestResult.Saved).record
+        val rejected=(store.ingest(capture(raw+" 交易关闭"),receipt.copy(
+            standaloneRefund=receipt.standaloneRefund!!.copy(refundId="SYNTHETIC-CLOSED-REFUND"))) as IngestResult.Saved).record
         val manual=store.saveEdited(wrong.copy(id=0,uid=UUID.randomUUID().toString(),capture=Capture(Source.MANUAL,"manual",raw),bill=bill().copy(merchant="手动保留")))
         val adjusted=(store.ingest(capture("支付成功 已部分退款 原付款金额100 累计成功退款30"),bill().copy(merchant="调整后消费",transactionId="ADJUSTED",amountCents=7000,refund=RefundInfo("wechat",10000,3000)),screenshot=second) as IngestResult.Saved).record
-        assertEquals(listOf(wrong.id),store.discardStandaloneRefundReceipts())
+        assertEquals(listOf(rejected.id),store.discardStandaloneRefundReceipts())
+        assertEquals(RecordState.REVIEW,store.get(wrong.id)!!.state);assertEquals(0L,store.get(wrong.id)!!.wallet!!.appliedCents)
         assertNotNull(store.get(manual.id));assertNotNull(store.get(adjusted.id));assertEquals(7000L,store.get(adjusted.id)!!.bill.amountCents)
     }
 
@@ -252,7 +295,7 @@ class CaptureSupplementTest {
         val original=payment()
         store.ingest(capture("付款详情"),bill(),screenshot=second)
         store.ingest(capture("成功退款30"),bill().copy(amountCents=7000,refund=RefundInfo("wechat",10000,3000)),screenshot=third)
-        store.ingest(capture("另一张原付款详情"),bill(),screenshot=byteArrayOf(10,11,12))
+        store.ingest(capture("另一张原付款详情"),bill(),screenshot=syntheticBackupImage(4))
         val decoded=LedgerBackup.decode(ByteArrayInputStream(LedgerBackup.encode(store,ChannelSettings(context)).toByteArray()))
         store.delete(original.id)
         assertEquals(1,LedgerBackup.restore(store,decoded))

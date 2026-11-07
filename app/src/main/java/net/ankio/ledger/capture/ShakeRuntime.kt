@@ -28,7 +28,10 @@ class ShakeRuntime(private val context:Context) {
     fun snapshot():JSONObject {
         val power=context.getSystemService(PowerManager::class.java)
         val activity=context.getSystemService(ActivityManager::class.java)
-        return JSONObject().put("running",CaptureRuntime.running && context.ledger.channels.enabled(ChannelSettings.Channel.OCR))
+        val selected=context.ledger.channels.selectedShakePackages().size
+        return JSONObject().put("running",CaptureRuntime.running && CaptureRuntime.sensorRunning && context.ledger.channels.enabled(ChannelSettings.Channel.OCR))
+            .put("sensorRunning",CaptureRuntime.sensorRunning).put("shakeSelectedCount",selected)
+            .put("shakeSelectionRequired",selected==0)
             .put("accessibilityConnected",ScreenCaptureService.current!=null)
             .put("backgroundRestricted",activity.isBackgroundRestricted)
             .put("batteryExempt",power.isIgnoringBatteryOptimizations(context.packageName)).put("powerSave",power.isPowerSaveMode)

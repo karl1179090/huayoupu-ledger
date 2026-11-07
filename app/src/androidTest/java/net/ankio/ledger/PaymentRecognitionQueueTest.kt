@@ -32,6 +32,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Synthetic pictures, in-process fake model only. Never exercise payment/credentials on a phone. */
 @RunWith(AndroidJUnit4::class)
 class PaymentRecognitionQueueTest {
+    @get:org.junit.Rule val wallet=CaptureWalletFixture()
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private lateinit var app:LedgerApp
     private lateinit var queue:PaymentRecognitionQueue
     private val permission=AtomicBoolean(true)
@@ -129,7 +131,7 @@ class PaymentRecognitionQueueTest {
         val fake=FakeModel()
         val automaticTask=newTask();assertTrue(queue.enqueue(automaticTask,WECHAT,true,fake.factory))
         withTimeout(10_000){fake.entered.await()}
-        val shakeTask=newTask(automatic=false);assertTrue(queue.enqueue(shakeTask,WECHAT,false,fake.factory))
+        val shakeTask=newTask(automatic=false);assertTrue(queue.enqueue(shakeTask,whitelist.packageName,false,fake.factory))
         app.channels.set(ChannelSettings.Channel.OCR,false);queue.cancelShake()
         await { app.tasks.status(shakeTask)=="CANCELLED" }
         assertEquals("RECOGNIZING",app.tasks.status(automaticTask))
@@ -223,7 +225,9 @@ class PaymentRecognitionQueueTest {
     private fun newTask(automatic:Boolean=true):Long {
         val bitmap=Bitmap.createBitmap(80,160,Bitmap.Config.ARGB_8888)
         val image=try { bitmap.eraseColor(Color.WHITE);app.recognizer.prepareScreenshot(bitmap) } finally { bitmap.recycle() }
-        val id=app.tasks.create(Source.OCR,"${if(automatic)"payment_auto" else "shake"}:$WECHAT")
+        val pkg=if(automatic)WECHAT else whitelist.packageName
+        val authorization=if(automatic)null else app.channels.shakeAuthorization(pkg)!!
+        val id=app.tasks.create(Source.OCR,"${if(automatic)"payment_auto" else "shake"}:$pkg",authorization)
         tasks.add(id);assertTrue(app.tasks.queued(id,image));return id
     }
     private fun task(id:Long):JSONObject = app.tasks.snapshot().let { array ->

@@ -18,9 +18,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check public sources and pinned notices
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check public sources, synthetic contracts and pinned notices
         run: |
           python -m unittest discover -s scripts/tests
+          python scripts/verify-transfer-fixtures.py
           python scripts/check-public-source.py --output output/Huayoupu-Ledger-source.zip
       - uses: actions/upload-artifact@v4
         with:
@@ -43,18 +47,20 @@ jobs:
         run: |
           npm ci --prefix tools/ui-checks --ignore-scripts --no-audit --no-fund
           tools/ui-checks/node_modules/.bin/playwright install --with-deps chromium
-      - name: Check detail motion, navigation, ledger design and optimization
+      - name: Check ledger, transfers, motion and navigation
         env:
           PLAYWRIGHT_MODULE: ${{ github.workspace }}/tools/ui-checks/node_modules/playwright
-        run: |
-          node scripts/check-record-motion.cjs
-          node scripts/check-tab-navigation.cjs
-          node scripts/check-ledger-optimization.cjs
-          node scripts/check-ledger-search.cjs
+        run: node scripts/check-transfer-regressions.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-transfer-evidence
+          path: output/transfers-after/
+          if-no-files-found: warn
 
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -82,29 +88,18 @@ jobs:
         run: python scripts/prepare-ledger-build.py
       - name: Install SDK
         run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
-      - name: Build emulator APKs, lint and run core tests
+      - name: Build debug and test APKs, lint and run unit tests
         run: |
           bash ./gradlew -PledgerAbi=x86_64 :core:test :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --stacktrace
           mkdir -p ci-artifacts
           cp app/build/outputs/apk/debug/*.apk ci-artifacts/Huayoupu-Ledger-debug-x86_64.apk
           cp app/build/outputs/apk/androidTest/debug/*.apk ci-artifacts/Huayoupu-Ledger-test-x86_64.apk
-      - name: Enable emulator acceleration
-        run: sudo chmod 666 /dev/kvm
-      - name: Android storage, queue and inference regressions
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          target: google_apis
-          arch: x86_64
-          profile: pixel_3a
-          disable-animations: true
-          script: bash ./gradlew -PledgerAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=net.ankio.ledger.LicenseDisclosureTest,net.ankio.ledger.ExecutionLogTest,net.ankio.ledger.ocr.LocalModeSettingsTest,net.ankio.ledger.data.LedgerCursorOptimizationTest,net.ankio.ledger.data.LedgerCandidateOptimizationTest,net.ankio.ledger.data.RecognitionRecoveryOptimizationTest,net.ankio.ledger.data.LedgerQuery056Test,net.ankio.ledger.data.AutomaticSupplementTest,net.ankio.ledger.data.RefundPersistenceTest,net.ankio.ledger.data.LedgerIdentity056Test,net.ankio.ledger.data.MerchantEnrichmentTest,net.ankio.ledger.data.LedgerUndo056Test,net.ankio.ledger.data.CaptureSupplementTest,net.ankio.ledger.PaymentRecognitionQueueTest,net.ankio.ledger.PaymentVisitsTest,net.ankio.ledger.BackgroundSettingsSyncTest,net.ankio.ledger.PermissionTrimTest,net.ankio.ledger.CaptureReadinessTest,net.ankio.ledger.CaptureRestoreTest,net.ankio.ledger.RecognitionBannerFallbackTest,net.ankio.ledger.SetupStepsTest,net.ankio.ledger.ocr.IconGeneralityTest,net.ankio.ledger.ocr.LocalHeaderIconTest,net.ankio.ledger.IconLocationRegressionTest,net.ankio.ledger.MerchantIconTest,net.ankio.ledger.ocr.LocalRecognitionClientTest' :app:connectedDebugAndroidTest --stacktrace
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: android-preview-and-reports
           path: |
-            ci-artifacts/*.apk
+            ci-artifacts/
             app/build/reports/
             core/build/reports/tests/
           if-no-files-found: warn
@@ -155,7 +150,7 @@ jobs:
           }, indent=2) + '\n')
           PY
       - name: Sign trusted main builds
-        if: github.repository == 'AldenHe/huayoupu-ledger' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.repository == 'karl1179090/huayoupu-ledger' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}

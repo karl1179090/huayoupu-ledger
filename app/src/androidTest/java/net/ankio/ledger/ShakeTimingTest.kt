@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import net.ankio.ledger.capture.ShakeRuntime
 import net.ankio.ledger.capture.ShakeTrigger
+import net.ankio.ledger.capture.screenshotCooldownRemaining
 import net.ankio.ledger.data.RecognitionDiagnostics
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -12,6 +13,17 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ShakeTimingTest {
+    @Test fun legacyScreenshotWaitsPastItsSystemLimitWhileAFirstFrameNeedsNoDelay() {
+        assertEquals(0L,screenshotCooldownRemaining(30,0,1_000))
+        assertEquals(700L,screenshotCooldownRemaining(30,1_000,1_400))
+        assertTrue(screenshotCooldownRemaining(30,1_000,2_000)>0)
+        assertEquals(0L,screenshotCooldownRemaining(30,1_000,2_100))
+        assertEquals(0L,screenshotCooldownRemaining(31,1_000,1_400))
+        assertEquals(0L,screenshotCooldownRemaining(34,1_000,1_400))
+        val trigger=ShakeTrigger(1_200,1_200)
+        assertTrue(trigger.freshAt(1_400+screenshotCooldownRemaining(30,1_000,1_400)))
+        assertFalse(ShakeTrigger(500,500).freshAt(1_400+screenshotCooldownRemaining(30,1_000,1_400)))
+    }
     @Test fun signalMustStillBeFreshWhenCaptureActuallyStarts() {
         val trigger=ShakeTrigger(10_000,10_020)
         assertTrue(trigger.freshAt(10_100))

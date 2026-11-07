@@ -19,6 +19,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class PermissionTrimTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     @Test fun recognitionNeedsNoNotificationsOrOverlayPermission() {
         val instrumentation=InstrumentationRegistry.getInstrumentation()
         val automation=instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)

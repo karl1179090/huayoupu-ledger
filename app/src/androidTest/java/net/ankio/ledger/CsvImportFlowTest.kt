@@ -17,6 +17,7 @@ import net.ankio.ledger.data.*
 import net.ankio.ledger.ui.MainActivity
 import net.ankio.ledger.ui.MintDialog
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
@@ -24,6 +25,7 @@ import java.util.UUID
 /** A document result must show preview before writing, then confirm through the real native sheet. */
 @RunWith(AndroidJUnit4::class)
 class CsvImportFlowTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private fun views(view:View):List<View> = listOf(view)+(if(view is ViewGroup)(0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList())
     @Test fun chosenCsvWaitsForConfirmationAndRepeatedImportShowsDuplicateCount() {
         val app=ApplicationProvider.getApplicationContext<LedgerApp>()
@@ -47,23 +49,30 @@ class CsvImportFlowTest {
                     while(preview==null && SystemClock.elapsedRealtime()<deadline) {
                         androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().runOnMainSync {
                             val activity=androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).filterIsInstance<MainActivity>().singleOrNull()
-                            if(activity!=null)preview=MainActivity::class.java.getDeclaredField("csvPreviewSheet").apply { isAccessible=true }.get(activity) as MintDialog?
+                            if(activity!=null) {
+                                val imports=MainActivity::class.java.getDeclaredMethod("getFileImports").apply { isAccessible=true }.invoke(activity)
+                                preview=(imports.javaClass.getDeclaredField("sheet").apply { isAccessible=true }.get(imports) as MintDialog?)?.takeIf {it.dialog.isShowing}
+                            }
                         }
                         if(preview==null)SystemClock.sleep(30)
                     }
                     return requireNotNull(preview)
                 }
+                val balances=app.store.accounts().associate {it.uid to it.amountCents}
                 val preview=select()
                 assertFalse(app.store.all().any { it.uid==original.uid })
                 scenario.onActivity {
-                    assertTrue(views(preview.content).filterIsInstance<TextView>().any { "可导入 1 笔" in it.text })
-                    views(preview.content).filterIsInstance<Button>().single { it.text.toString()=="确认导入 1 笔" }.performClick()
+                    assertTrue(views(preview.content).filterIsInstance<TextView>().any { it.text.toString()=="共 1 行 · 有效 1 · 重复 0 · 错误 0" })
+                    views(preview.content).filterIsInstance<Button>().single { it.text.toString()=="确认导入以上 1 笔" }.performClick()
                 }
-                web.await("window.__importMessage.startsWith('已导入 1 笔')")
-                assertEquals(9876L,app.store.all().single { it.uid==original.uid }.bill.amountCents)
+                web.await("window.__importMessage === '已入账 1 笔，待确认 0 笔，重复 0，错误 0'")
+                val saved=app.store.all().single { it.uid==original.uid }
+                assertEquals(9876L,saved.bill.amountCents)
+                assertEquals(WalletEligibility.IMPORT_EXCLUDED,saved.wallet!!.eligibility)
+                assertEquals(balances,app.store.accounts().associate {it.uid to it.amountCents})
                 val repeated=select()
                 scenario.onActivity {
-                    assertTrue(views(repeated.content).filterIsInstance<TextView>().any { "重复 1 笔" in it.text })
+                    assertTrue(views(repeated.content).filterIsInstance<TextView>().any { it.text.toString()=="共 1 行 · 有效 0 · 重复 1 · 错误 0" })
                     assertFalse(views(repeated.content).filterIsInstance<Button>().any { it.text.startsWith("确认导入") })
                     repeated.dismiss()
                 }

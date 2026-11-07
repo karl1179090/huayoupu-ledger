@@ -27,6 +27,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class MerchantIconTest {
+    @get:org.junit.Rule val wallet = CaptureWalletFixture()
     @Test fun circleLocationUsesOnePixelRadiusForBothAxesOnTallScreenshots() {
         val circle=JSONObject().put("kind","merchant_logo").put("shape","circle")
             .put("coordinate_space","pixels").put("center",JSONArray(listOf(200,120)))
@@ -98,7 +99,7 @@ class MerchantIconTest {
 
     @Test fun exactDuplicateCanFillMissingSameMerchantIconWithoutChangingBill() {
         val name="icon-duplicate-fill-${UUID.randomUUID()}.db"
-        val store=LedgerStore(app,name)
+        val store=LedgerStore(app,name).prepareSyntheticDefaultWallet()
         val bitmap=fixture()
         try {
             val parsed=SyntheticRecognition.parseRecognition(bill().toString()).bill!!.copy(transactionId="fixed-icon-transaction")
@@ -117,7 +118,7 @@ class MerchantIconTest {
 
     @Test fun duplicateWithDifferentMerchantCannotPoisonEitherSharedIcon() {
         val name="icon-duplicate-name-${UUID.randomUUID()}.db"
-        val store=LedgerStore(app,name);val bitmap=fixture()
+        val store=LedgerStore(app,name).prepareSyntheticDefaultWallet();val bitmap=fixture()
         try {
             val parsed=SyntheticRecognition.parseRecognition(bill().toString()).bill!!.copy(transactionId="fixed-other-name")
             val capture=Capture(Source.OCR,"com.tencent.mm","fixture")
@@ -258,25 +259,27 @@ class MerchantIconTest {
 
     @Test fun versionThreeMigrationPreservesBillsScreenshotsAndAddsEmptyIcons() {
         val name = "merchant-migration-${UUID.randomUUID()}.db"
-        var store = LedgerStore(app, name)
+        var store = LedgerStore(app, name).prepareSyntheticDefaultWallet()
         val bitmap = fixture()
         try {
             val image = jpeg(bitmap)
             val parsed = SyntheticRecognition.parseRecognition(bill().toString()).bill!!
             val saved = (store.ingest(Capture(Source.IMAGE, "image", "migration"), parsed, screenshot = image) as IngestResult.Saved).record
+            store.writableDatabase.execSQL("UPDATE capture_images SET image=? WHERE record_id=?",arrayOf(image,saved.id))
+            ScreenshotStore.get(app).release("ledger:$name:${saved.id}")
             store.writableDatabase.execSQL("DROP TABLE merchant_icons")
             store.writableDatabase.execSQL("DROP TABLE merchant_icon_assets")
-            store.writableDatabase.version = 3
+            store.rebuildPreWalletSchemaForTest(3)
             store.close(); store = LedgerStore(app, name)
-            assertEquals(8, store.readableDatabase.version)
-            assertEquals(saved, store.get(saved.id)); assertArrayEquals(image, store.screenshot(saved.id))
+            assertEquals(10, store.readableDatabase.version)
+            assertEquals(saved.asLegacyExcluded(), store.get(saved.id)); assertArrayEquals(image, store.screenshot(saved.id))
             assertTrue(store.merchantIconIds().isEmpty())
         } finally { store.close(); app.deleteDatabase(name); bitmap.recycle() }
     }
 
     @Test fun previewVersionFourPngsMigrateIntoOneSharedAssetWithoutChangingBills() {
         val name = "merchant-preview-migration-${UUID.randomUUID()}.db"
-        var store = LedgerStore(app, name)
+        var store = LedgerStore(app, name).prepareSyntheticDefaultWallet()
         val bitmap = fixture()
         try {
             val parsed = SyntheticRecognition.parseRecognition(bill().toString()).bill!!
@@ -290,11 +293,11 @@ class MerchantIconTest {
                 execSQL("CREATE TABLE merchant_icons (record_id INTEGER PRIMARY KEY NOT NULL, image BLOB NOT NULL)")
                 execSQL("INSERT INTO merchant_icons VALUES (?, ?)", arrayOf(first.id, png))
                 execSQL("INSERT INTO merchant_icons VALUES (?, ?)", arrayOf(second.id, png))
-                version = 4
             }
+            store.rebuildPreWalletSchemaForTest(4)
             store.close(); store = LedgerStore(app, name)
-            assertEquals(8, store.readableDatabase.version)
-            assertEquals(first, store.get(first.id)); assertEquals(second, store.get(second.id))
+            assertEquals(10, store.readableDatabase.version)
+            assertEquals(first.asLegacyExcluded(), store.get(first.id)); assertEquals(second.asLegacyExcluded(), store.get(second.id))
             assertArrayEquals(store.merchantIcon(first.id), store.merchantIcon(second.id))
             assertNotNull(MerchantIconEncoding.mime(store.merchantIcon(first.id)!!))
             store.readableDatabase.rawQuery("SELECT COUNT(*) FROM merchant_icon_assets", null).use {
@@ -305,7 +308,7 @@ class MerchantIconTest {
 
     @Test fun iconsPersistAcrossEditAndReopenButAreDeletedWithLastBillAndExcludedFromBackup() {
         val name = "merchant-store-${UUID.randomUUID()}.db"
-        var store = LedgerStore(app, name)
+        var store = LedgerStore(app, name).prepareSyntheticDefaultWallet()
         val bitmap = fixture()
         try {
             val image = jpeg(bitmap)
@@ -327,7 +330,7 @@ class MerchantIconTest {
 
     @Test fun normalizedSameNamesShareOneCompressedAssetIncludingBillsWithoutAnIcon() {
         val name = "merchant-share-${UUID.randomUUID()}.db"
-        val store = LedgerStore(app, name)
+        val store = LedgerStore(app, name).prepareSyntheticDefaultWallet()
         val bitmap = fixture()
         try {
             val icon = MerchantIconCropper.crop(jpeg(bitmap), MerchantIconRegion.parse(metadata()))!!
@@ -368,7 +371,7 @@ class MerchantIconTest {
         assertNotEquals(MerchantNames.key("A B"), MerchantNames.key("AB"))
         for (generic in listOf("", " 未填写商户 ", "未知商户", "微信支付", "支付宝")) assertNull(MerchantNames.key(generic))
         val name = "merchant-edit-${UUID.randomUUID()}.db"
-        val store = LedgerStore(app, name)
+        val store = LedgerStore(app, name).prepareSyntheticDefaultWallet()
         val bitmap = fixture()
         try {
             val icon = MerchantIconCropper.crop(jpeg(bitmap), MerchantIconRegion.parse(metadata()))!!
@@ -435,10 +438,15 @@ class MerchantIconTest {
             val processor = CaptureProcessor(app, OcrClient(app, SyntheticRecognitionBackend { _, _, _, _ ->
                 response(bill(merchant).put("merchant_icon", metadata()))
             }))
-            val saved = (processor.process(bitmap, Source.OCR, "com.tencent.mm") { true } as IngestResult.Saved).record
+            val recognized = (processor.process(bitmap, Source.OCR, "com.tencent.mm") { true } as IngestResult.Saved).record
+            id = recognized.id
+            // Stage a real review row so its wallet effect remains zero while displaying the icon.
+            val saved = (app.store.ingest(recognized.capture.copy(text="合成图标待核对"),
+                recognized.bill.copy(reliable=false,reason="合成图标待核对"),screenshot=app.store.screenshot(recognized.id),
+                merchantIcon=app.store.merchantIcon(recognized.id),requireReview=true) as IngestResult.Saved).record
+            app.store.delete(recognized.id)
             id = saved.id
-            // Deliberately stage a review row; valid captures now post immediately.
-            app.store.writableDatabase.execSQL("UPDATE records SET state='REVIEW' WHERE id=?",arrayOf(saved.id))
+            assertEquals(RecordState.REVIEW,saved.state);assertEquals(0L,saved.wallet!!.appliedCents)
             assertNotNull(app.store.merchantIcon(id))
             val sameName = app.store.saveEdited(saved.copy(id = 0, uid = UUID.randomUUID().toString()))
             sharedId = sameName.id

@@ -1,7 +1,7 @@
 package net.ankio.ledger.core
 
 enum class Source { OCR, IMAGE, SMS, NOTIFICATION, MANUAL }
-enum class Direction { EXPENSE, INCOME }
+enum class Direction { EXPENSE, INCOME, TRANSFER }
 enum class RecordState { POSTED, REVIEW }
 
 data class Capture(
@@ -22,6 +22,30 @@ data class ParsedBill(
     val reason: String,
     val timeExplicit: Boolean = false,
     val refund: RefundInfo? = null,
+    val paymentMethod: PaymentMethodEvidence? = null,
+    val standaloneRefund: StandaloneRefundEvidence? = null,
+    val transfer: TransferEvidence? = null,
+)
+
+/** A completed receipt with no original total stays pending until its original payment is verified. */
+data class StandaloneRefundEvidence(
+    val provider: String,
+    val refundedCents: Long,
+    val refundId: String? = null,
+    val originalTransactionId: String? = null,
+)
+
+/** Only evidence beside an explicit payment/arrival account label, never a transaction identity. */
+data class PaymentMethodEvidence(
+    val medium: String,
+    val role: String,
+    val bankCode: String? = null,
+    val cardLast4: String? = null,
+    val platform: String? = null,
+    val rawLabel: String = "",
+    val rawValue: String = "",
+    val ambiguous: Boolean = false,
+    val reason: String? = null,
 )
 
 /** Completed refund evidence; amountCents is always computed locally from these cents. */

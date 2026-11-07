@@ -1,0 +1,187 @@
+{
+  "synthetic": true,
+  "unchangedImageCopies": true,
+  "baselineCommit": "91aad555f01772e9f4c8f8e70e2da70a30f0879b",
+  "afterStage": "S3 accepted implementation 371f7d2; historical stage screenshots, not final S8 capture",
+  "nativeStage": "S5 r2; actual API30 UiAutomation previews, cancelled after capture; no commit implied",
+  "pairs": [
+    {
+      "state": "ledger",
+      "before": "ledger-before.png",
+      "after": "ledger-after.png"
+    },
+    {
+      "state": "manual",
+      "before": "manual-before.png",
+      "after": "manual-after.png"
+    },
+    {
+      "state": "assets",
+      "before": "assets-before.png",
+      "after": "assets-after.png"
+    },
+    {
+      "state": "statistics",
+      "before": "statistics-before.png",
+      "after": "statistics-after.png"
+    },
+    {
+      "state": "bill-file-tools",
+      "before": "bill-file-tools-before.png",
+      "after": "bill-file-tools-after.png"
+    },
+    {
+      "state": "image-import",
+      "before": "image-import-before.png",
+      "after": "image-import-after.png"
+    }
+  ],
+  "images": [
+    {
+      "file": "ledger-before.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "5ca696c412105e723a6dae5a1944ad90877ccb3ff60585a18375234ce32acb3d",
+      "kind": "synthetic-browser-baseline"
+    },
+    {
+      "file": "ledger-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "71154b4d4802c88a91a81b3a035ff7deb3af6b80a075dfdfff41ddb3a2f46edb",
+      "kind": "synthetic-browser-after"
+    },
+    {
+      "file": "manual-before.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "2ec08594d9d3f916819bd98f3d81a7e51639c73162dbbde618c8366ea6cc3ac0",
+      "kind": "synthetic-browser-baseline"
+    },
+    {
+      "file": "manual-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "15ae6eac87d5f97502350408eb072ffc60016a72102158958590cbd6273c66cf",
+      "kind": "synthetic-browser-after"
+    },
+    {
+      "file": "assets-before.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "a914a87e95b2f7bb84a16fd0e12b687ae5fdea3480a4fade1b7638f0ceb2a0e6",
+      "kind": "synthetic-browser-baseline"
+    },
+    {
+      "file": "assets-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "a914a87e95b2f7bb84a16fd0e12b687ae5fdea3480a4fade1b7638f0ceb2a0e6",
+      "kind": "synthetic-browser-after"
+    },
+    {
+      "file": "statistics-before.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "3b06c369825f00b7a03f47299d5c0f6f10a90e301c60bca5452cd55c8dab659f",
+      "kind": "synthetic-browser-baseline"
+    },
+    {
+      "file": "statistics-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "4d3da765535df06079826ede54962dbb988c09ec1e9051b8e58ceafb688f7fe6",
+      "kind": "synthetic-browser-after"
+    },
+    {
+      "file": "bill-file-tools-before.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "510b116005e30625e9eaff28ea5ae2fc1dd6e8882488451c2575bfd813d59575",
+      "kind": "synthetic-browser-baseline"
+    },
+    {
+      "file": "bill-file-tools-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "3e01ef2b0a32426030382a2ad5a1101accd833858e0f86d68810b99fff248360",
+      "kind": "synthetic-browser-after"
+    },
+    {
+      "file": "image-import-before.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "b67eed2657fd7f563a96762ce1725702c252b7659576b03d9bd893b501c487fd",
+      "kind": "synthetic-browser-baseline"
+    },
+    {
+      "file": "image-import-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "6a20771eb04a351478e280700c82437161609100e299a4095cb0fc32c190427a",
+      "kind": "synthetic-browser-after"
+    },
+    {
+      "file": "manual-transfer-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "648930d91df2ef5cca4ccadbe91a42d19bb06c00cd861f074a700a80c5de1811",
+      "kind": "synthetic-browser-extra"
+    },
+    {
+      "file": "transfer-details-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "b71cbd7944e8527663a6e7faf33361d7983c9e0678973572f05fd4c93139600a",
+      "kind": "synthetic-browser-extra"
+    },
+    {
+      "file": "statistics-year-precision-after.png",
+      "width": 390,
+      "height": 844,
+      "sha256": "26756cbf194909d4993f73ef7b1b04478a1726a11c22cb857354a3c3ef702961",
+      "kind": "synthetic-browser-extra"
+    },
+    {
+      "file": "huayoupu-s5-01-bills-default-closed.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "b219c2cfcd4c1b0eb40466930e7242fe5dcf98ab9f05f6b53b716d81a8dc91f7",
+      "kind": "synthetic-android-native-preview"
+    },
+    {
+      "file": "huayoupu-s5-02-bills-remapped-linked-preview.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "42267acc1592f73743a701225c5f408e04cd141e3f74894e0d4e087973c2055f",
+      "kind": "synthetic-android-native-preview"
+    },
+    {
+      "file": "huayoupu-s5-03-wallet-default-retain-500.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "a8c326b53618253191c8c7b20545ad5e844d70ced261889ddeeeb61f24d8b41f",
+      "kind": "synthetic-android-native-preview"
+    },
+    {
+      "file": "huayoupu-s5-04-wallet-explicit-overwrite-300.png",
+      "width": 1080,
+      "height": 2220,
+      "sha256": "571cb0da849e19fad1f27124261595d597364b21914c90cd3f195a61d75e5901",
+      "kind": "synthetic-android-native-preview"
+    }
+  ],
+  "widget": {
+    "status": "PENDING",
+    "reason": "Latest MONTH daily calendar and equal dimensions are still being implemented; no old widget images copied"
+  },
+  "designReference": {
+    "kind": "User-provided image_gen concept; illustrative amounts, not real ledger or Launcher output",
+    "files": {
+      "docs/design/expense-widget-2026-11-06/week.png": "bac34bc1f2f526c8864d320efc858d6fe3d5fbc178a813a28ffb03d391841c0f",
+      "docs/design/expense-widget-2026-11-06/month.png": "8bfdb21b131289277a5a1022954babaa14bc34e9d172feccaca0ea8a56e31e6d",
+      "docs/design/expense-widget-2026-11-06/year.png": "a6d5f0b8b9b7befbf07df4f65d79dd52a0dd0d5455cac422edb542f1136cd273",
+      "docs/design/expense-widget-2026-11-06/prompts.json": "6693111ea5efbfff84596730fdb6e31eff00f31768ec204396aa5478d2252cca"
+    }
+  }
+}

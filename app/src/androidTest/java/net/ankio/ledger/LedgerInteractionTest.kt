@@ -10,12 +10,14 @@ import net.ankio.ledger.core.*
 import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.ui.MainActivity
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class LedgerInteractionTest {
+    @get:Rule val wallet = CaptureWalletFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun failedAttemptsShareTheTimelineInsteadOfBeingPinned() {

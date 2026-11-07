@@ -40,7 +40,7 @@ class LedgerPersistenceTest {
             override fun getSharedPreferences(name: String, mode: Int): SharedPreferences =
                 application.getSharedPreferences(preferenceName, mode)
         }
-        store = LedgerStore(context, databaseName)
+        store = LedgerStore(context, databaseName).prepareSyntheticDefaultWallet()
         channels = ChannelSettings(context)
     }
 
@@ -136,7 +136,7 @@ class LedgerPersistenceTest {
 
         val decoded = decode(LedgerBackup.encode(store.all(), channels))
         // Local numeric IDs and duplicate links are deliberately not portable backup identities.
-        assertEquals(listOf(pending, posted).map { it.copy(id = 0, duplicateId = null) }, decoded.records)
+        assertEquals(listOf(pending, posted).map { it.copy(id = 0, duplicateId = null, wallet = RecordWalletLink(it.uid, WalletEligibility.RESTORE_EXCLUDED,accountReference=it.wallet?.accountUid?.let { id->WalletFileReference(id).json() }),walletEffects=emptyMap()) }, decoded.records)
         assertEquals(mapOf(ChannelSettings.Channel.OCR to true, ChannelSettings.Channel.PAGE to false, ChannelSettings.Channel.SMS to false,
             ChannelSettings.Channel.NOTIFICATION to false), decoded.channels)
 

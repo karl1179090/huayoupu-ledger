@@ -15,6 +15,28 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
     private val directory = File(context.filesDir, namespace).apply { check(isDirectory || mkdirs()) }
     private val preferences = context.getSharedPreferences("${namespace}_policy", Context.MODE_PRIVATE)
 
+    /** Hash assets are immutable: retain a filesystem link while ZIP compression runs without ledger locks. */
+    @Synchronized internal fun stageFile(owner:String,directory:File):File? {
+        val hash=fingerprint(owner) ?: return null
+        require(hash.matches(Regex("[0-9a-f]{64}"))) { "截图指纹无效" }
+        val source=file(hash);if(!source.isFile)return null
+        require(source.length() in 1..(5L*1024*1024)) { "备份截图大小无效" }
+        val target=File(directory,"$hash.bin")
+        if(!target.exists())try {
+            java.nio.file.Files.createLink(target.toPath(),source.toPath())
+        } catch(_:java.io.IOException) { copyStage(source,target) }
+          catch(_:UnsupportedOperationException) { copyStage(source,target) }
+        return target
+    }
+    private fun copyStage(source:File,target:File) {
+        try { source.inputStream().use { input->target.outputStream().use { output->
+            val buffer=ByteArray(8192);var size=0L
+            while(true) { val count=input.read(buffer);if(count<0)break;size+=count
+                require(size<=5L*1024*1024) { "备份截图超过容量限制" };output.write(buffer,0,count) }
+            require(size>0) { "备份截图为空" }
+        } } } catch(error:Throwable) { target.delete();throw error }
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE assets (hash TEXT PRIMARY KEY NOT NULL, bytes INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE refs (owner TEXT PRIMARY KEY NOT NULL, hash TEXT NOT NULL, created_at INTEGER NOT NULL, state TEXT NOT NULL)")

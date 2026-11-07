@@ -24,7 +24,7 @@ class CaptureRuntime private constructor(private val service:ScreenCaptureServic
         val app=service.ledger
         app.captureHealth.suspendForMissingPermission()
         if(!app.channels.captureEnabled() || !app.channels.permitted(ChannelSettings.Channel.OCR)) { stop();return }
-        val listen=app.channels.enabled(ChannelSettings.Channel.OCR)
+        val listen=app.channels.enabled(ChannelSettings.Channel.OCR) && app.channels.selectedShakePackages().isNotEmpty()
         if(!listen)stopSensor()
         else if(!registered) {
             val sensor=sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -36,6 +36,7 @@ class CaptureRuntime private constructor(private val service:ScreenCaptureServic
                 app.channels.status("此设备无法监听摇动，请使用截图导入")
             }
         }
+        app.startInteractiveMaintenance()
         val wasRunning=running
         running=app.channels.captureEnabled()
         if(!running)stop()
@@ -57,7 +58,7 @@ class CaptureRuntime private constructor(private val service:ScreenCaptureServic
         }
     }
     internal fun processShakeTrigger(trigger:ShakeTrigger) {
-        if(!running || !registered || !service.ledger.channels.enabled(ChannelSettings.Channel.OCR) || !trigger.freshAt(SystemClock.elapsedRealtime()))return
+        if(!running || !registered || !service.ledger.channels.enabled(ChannelSettings.Channel.OCR) || service.ledger.channels.selectedShakePackages().isEmpty() || !trigger.freshAt(SystemClock.elapsedRealtime()))return
         service.ledger.executionLog.event("ocr","shake","received",service.ledger.shakeRuntime.snapshot())
         service.captureOnShake(trigger)
     }
@@ -78,6 +79,7 @@ class CaptureRuntime private constructor(private val service:ScreenCaptureServic
     companion object {
         @Volatile var running=false;private set
         @Volatile internal var instance:CaptureRuntime?=null;private set
+        internal val sensorRunning get()=instance?.registered==true
         internal fun attach(service:ScreenCaptureService) {
             instance?.close();instance=CaptureRuntime(service);refreshHealth()
         }

@@ -264,7 +264,7 @@ object LocalIconLocator {
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style=Paint.Style.STROKE; strokeWidth=maxOf(3f,bitmap.width/150f) }
         result.candidates.forEach { candidate ->
-            paint.color = if (candidate === result.selected) Color.rgb(0,170,110) else Color.rgb(230,150,30)
+            paint.color = if (candidate === result.selected) Color.rgb(125,91,226) else Color.rgb(230,150,30)
             canvas.drawRect(candidate.box,paint)
         }
         return output

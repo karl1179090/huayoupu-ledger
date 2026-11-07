@@ -21,6 +21,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class RecognitionTaskTest {
+    @get:org.junit.Rule val wallet = CaptureWalletFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
 
     @Test fun diagnosticExportKeepsStageButExcludesSecretsBillTextAndImages() {
@@ -124,7 +125,7 @@ class RecognitionTaskTest {
             ActivityScenario.launch(MainActivity::class.java).use { scenario -> scenario.onActivity { activity ->
                 val bridge=LedgerWebBridge(activity)
                 val input=JSONObject().put("id",0).put("recognitionTaskId",id).put("merchant","补录-${UUID.randomUUID()}")
-                    .put("category","其他").put("amount","12.34").put("direction","EXPENSE").put("occurredAt",System.currentTimeMillis()).put("note","")
+                    .put("category","其他").put("amount","12.34").put("direction","EXPENSE").put("occurredAt",System.currentTimeMillis()).put("note","").put("submissionToken",UUID.randomUUID().toString())
                 val saved=JSONObject(bridge.save(input.toString()));assertTrue(saved.toString(),saved.getBoolean("ok"));recordId=saved.getLong("id")
                 assertEquals("SUCCEEDED",app.tasks.status(id))
                 assertFalse(JSONObject(bridge.save(input.toString())).getBoolean("ok"))

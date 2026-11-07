@@ -17,6 +17,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class PermissionFlowTest {
+    @get:org.junit.Rule val whitelist=CaptureWhitelistFixture()
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
     private fun texts(view:View):List<TextView> = (if(view is TextView)listOf(view) else emptyList()) + (if(view is ViewGroup)(0 until view.childCount).flatMap { texts(view.getChildAt(it)) } else emptyList())
     private fun page(scenario:ActivityScenario<MainActivity>):View {
