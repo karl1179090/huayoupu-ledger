@@ -20,11 +20,22 @@ import org.junit.runner.RunWith
 class ExpenseWidgetLauncherTest {
     private val app get()=ApplicationProvider.getApplicationContext<LedgerApp>()
     private val automation get()=InstrumentationRegistry.getInstrumentation().uiAutomation
+    private val windowRoot:AccessibilityNodeInfo? get() {
+        // System bars can become the active accessibility window during font/theme changes.
+        val applications=automation.windows.filter {it.type==android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION}
+        return (applications.firstOrNull {it.isFocused} ?: applications.firstOrNull {it.isActive}
+            ?: applications.firstOrNull())?.root ?: automation.rootInActiveWindow
+    }
     private fun nodes(node:AccessibilityNodeInfo?):List<AccessibilityNodeInfo> {
         if(node==null)return emptyList()
         return (if(node.isVisibleToUser)listOf(node) else emptyList())+(0 until node.childCount).flatMap {nodes(node.getChild(it))}
     }
-    private fun waitFor(timeout:Long=12_000,predicate:()->Boolean){val until=SystemClock.elapsedRealtime()+timeout;while(!predicate()){check(SystemClock.elapsedRealtime()<until){"Launcher condition timed out; tree="+nodes(automation.rootInActiveWindow).map {it.text?:it.contentDescription}.joinToString()};SystemClock.sleep(100)}}
+    private fun waitFor(timeout:Long=12_000,predicate:()->Boolean){val until=SystemClock.elapsedRealtime()+timeout;while(!predicate()){check(SystemClock.elapsedRealtime()<until){"Launcher condition timed out; tree="+nodes(windowRoot).map {it.text?:it.contentDescription}.joinToString()};SystemClock.sleep(100)}}
+    private fun clickPeriod(label:String) = waitFor {
+        nodes(windowRoot).firstOrNull {
+            it.contentDescription?.toString()?.startsWith("切换本$label")==true || it.text?.toString()==label
+        }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true
+    }
     private fun shell(command:String){automation.executeShellCommand(command).use {android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes()}}
     private fun capture(name:String) {
         SystemClock.sleep(250)
@@ -39,12 +50,12 @@ class ExpenseWidgetLauncherTest {
             for(i in 0 until node.childCount)write(node.getChild(i))
             xml.endTag(null,"node")
         }
-        write(automation.rootInActiveWindow);xml.endTag(null,"hierarchy");xml.endDocument()
+        write(windowRoot);xml.endTag(null,"hierarchy");xml.endDocument()
         val encoded=android.util.Base64.encodeToString(writer.toString().toByteArray(),android.util.Base64.NO_WRAP)
         shell("echo $encoded | base64 -d > /data/local/tmp/huayoupu-s7-api${android.os.Build.VERSION.SDK_INT}-$name.xml")
     }
     @Test fun realLauncherPinShowsCurrentPeriodAndNativeAmountsAndDirectActivityRoutes() {
-        automation.serviceInfo=automation.serviceInfo.apply {flags=flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS}
+        automation.serviceInfo=automation.serviceInfo.apply {flags=flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS}
         val manager=AppWidgetManager.getInstance(app)
         assertTrue("Isolated system launcher must support pin widgets",manager.isRequestPinAppWidgetSupported)
         val before=ExpenseWidgetProvider.ids(app).toSet()
@@ -86,7 +97,7 @@ class ExpenseWidgetLauncherTest {
             SystemClock.sleep(600)
             instrumentation.runOnMainSync {assertTrue(manager.requestPinAppWidget(ComponentName(app,ExpenseWidgetProvider::class.java),null,null))}
             waitFor {
-                val candidates=nodes(automation.rootInActiveWindow)
+                val candidates=nodes(windowRoot)
                 val button=candidates.firstOrNull {node->node.isClickable && node.text?.toString()?.let {it.contains("ADD AUTOMATICALLY",true)||it=="Add"||it.equals("Add to home screen",true)||it.contains("自动添加")||it=="添加到主屏幕"||it=="添加"}==true}
                 if(button!=null){button.performAction(AccessibilityNodeInfo.ACTION_CLICK);true} else ExpenseWidgetProvider.ids(app).any {it !in before}
             }
@@ -94,48 +105,49 @@ class ExpenseWidgetLauncherTest {
             val id=ExpenseWidgetProvider.ids(app).first {it !in before}
             waitFor {ExpenseWidgetUpdater.measurement(id)!=null}
             shell("input keyevent KEYCODE_HOME")
-            waitFor {nodes(automation.rootInActiveWindow).any {it.viewIdResourceName?.endsWith("/workspace")==true} && nodes(automation.rootInActiveWindow).any {it.text?.toString()=="本周花销"}}
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥${net.ankio.ledger.core.Money.format(weekBaseline+9100)}"}}
-            val launcher=automation.rootInActiveWindow.packageName.toString()
+            waitFor {nodes(windowRoot).any {it.viewIdResourceName?.endsWith("/workspace")==true} && nodes(windowRoot).any {it.text?.toString()=="本周花销"}}
+            waitFor {nodes(windowRoot).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥${net.ankio.ledger.core.Money.format(weekBaseline+9100)}"}}
+            val launcher=requireNotNull(windowRoot).packageName.toString()
             assertFalse(launcher==app.packageName)
             val version=app.packageManager.getPackageInfo(launcher,0).versionName
             capture("launcher-week")
-            val month=nodes(automation.rootInActiveWindow).first {it.text?.toString()=="月"};assertTrue(month.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()=="本月花销"}}
+            clickPeriod("月")
+            waitFor {nodes(windowRoot).any {it.text?.toString()=="本月花销"}}
             capture("launcher-month")
-            val year=nodes(automation.rootInActiveWindow).first {it.text?.toString()=="年"};assertTrue(year.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()=="本年花销"}}
+            clickPeriod("年")
+            waitFor {nodes(windowRoot).any {it.text?.toString()=="本年花销"}}
             assertEquals(net.ankio.ledger.core.ExpensePeriod.YEAR,ExpenseWidgetConfigStore(app).get(id).period)
             val ordinaryTotal=net.ankio.ledger.core.Money.format(baseline+ordinaryExtra+9100)
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$ordinaryTotal"}}
+            waitFor {nodes(windowRoot).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$ordinaryTotal"}}
             capture("launcher-year-normal")
             println("S7_NORMAL options=${manager.getAppWidgetOptions(id).keySet().associateWith {manager.getAppWidgetOptions(id).get(it)}}")
             if(InstrumentationRegistry.getArguments().getString("normalOnly")=="true")return
             addPrecisionRows();app.changed(true)
             waitFor {ExpenseWidgetUpdater.measurement(id)?.revision==app.widgetRevision.get()}
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$expected"}}
-            waitFor {nodes(automation.rootInActiveWindow).any {it.contentDescription?.toString()?.startsWith(java.time.LocalDate.now().withMonth(12).withDayOfMonth(1).toString())==true}}
+            waitFor {nodes(windowRoot).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$expected"}}
+            waitFor {nodes(windowRoot).any {it.contentDescription?.toString()?.startsWith(java.time.LocalDate.now().withMonth(12).withDayOfMonth(1).toString())==true}}
             capture("launcher-year")
             // Observe actual launcher text after a real native CSV confirmation, in addition to publish metrics.
             val lateAt=System.currentTimeMillis()
             val late=net.ankio.ledger.data.LedgerRecord(uid=visibleImportUid,capture=net.ankio.ledger.core.Capture(net.ankio.ledger.core.Source.MANUAL,"csv","合成桌面可见刷新",lateAt),bill=net.ankio.ledger.core.ParsedBill(1,net.ankio.ledger.core.Direction.EXPENSE,"合成桌面可见刷新","购物",lateAt,null,true,"",true),state=net.ankio.ledger.core.RecordState.POSTED)
             val lateFile=java.io.File(app.cacheDir,"synthetic-widget-visible.csv").apply {outputStream().use {net.ankio.ledger.data.LedgerCsvExport.write(listOf(late),net.ankio.ledger.data.LedgerCsvExport.Format.GENERAL,it)}}
             app.startActivity(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
-            waitFor {automation.rootInActiveWindow?.packageName==app.packageName}
+            waitFor {windowRoot?.packageName==app.packageName}
             instrumentation.runOnMainSync {
                 MainActivity::class.java.getDeclaredMethod("onActivityResult",Int::class.javaPrimitiveType,Int::class.javaPrimitiveType,Intent::class.java).apply {isAccessible=true}.invoke(activity,MainActivity.CSV_IMPORT_REQUEST,android.app.Activity.RESULT_OK,Intent().setData(android.net.Uri.fromFile(lateFile)))
             }
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()?.startsWith("确认导入以上 1 笔")==true}}
+            waitFor {nodes(windowRoot).any {it.text?.toString()?.startsWith("确认导入以上 1 笔")==true}}
+            val confirm=nodes(windowRoot).first {it.text?.toString()?.startsWith("确认导入以上 1 笔")==true}
             val clicked=SystemClock.elapsedRealtime()
-            val confirm=nodes(automation.rootInActiveWindow).first {it.text?.toString()?.startsWith("确认导入以上 1 笔")==true}
             assertTrue(confirm.performAction(AccessibilityNodeInfo.ACTION_CLICK))
             waitFor {app.store.readableDatabase.rawQuery("SELECT id FROM records WHERE uid=?",arrayOf(visibleImportUid)).use {it.moveToFirst()}}
             shell("input keyevent KEYCODE_HOME")
             val expectedAfter=net.ankio.ledger.core.Money.format(Math.addExact(Math.addExact(Math.addExact(Math.addExact(baseline,ordinaryExtra),9100),100_000*net.ankio.ledger.core.Money.MAX_CENTS),1))
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$expectedAfter"}}
-            capture("launcher-import-visible")
+            waitFor {nodes(windowRoot).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$expectedAfter"}}
             val visibleMs=SystemClock.elapsedRealtime()-clicked
             println("S7_VISIBLE nativeImportConfirmToLauncherTextMs=$visibleMs")
+            // Evidence collection includes sleeps, screenshots and tree export; exclude it from refresh latency.
+            capture("launcher-import-visible")
             assertTrue("Actual launcher update $visibleMs ms",visibleMs<2000)
             lateFile.delete()
             shell("settings put system font_scale 1.5");shell("cmd uimode night yes")
@@ -143,18 +155,18 @@ class ExpenseWidgetLauncherTest {
             val themeAt=SystemClock.elapsedRealtime()
             ExpenseWidgetUpdater.request(app,intArrayOf(id))
             waitFor {ExpenseWidgetUpdater.measurement(id)?.let {it.dark && it.fontScale==1.5f && it.publishedAt>=themeAt}==true}
-            waitFor {nodes(automation.rootInActiveWindow).any {it.contentDescription?.toString()?.startsWith(java.time.LocalDate.now().withMonth(12).withDayOfMonth(1).toString())==true}}
+            waitFor {nodes(windowRoot).any {it.contentDescription?.toString()?.startsWith(java.time.LocalDate.now().withMonth(12).withDayOfMonth(1).toString())==true}}
             capture("launcher-year-dark-large")
             shell("settings put system font_scale 2.0")
             waitFor {app.resources.configuration.fontScale==2f}
             ExpenseWidgetUpdater.request(app,intArrayOf(id))
             waitFor {ExpenseWidgetUpdater.measurement(id)?.fontScale==2f}
             capture("launcher-year-dark-maxfont")
-            assertTrue(nodes(automation.rootInActiveWindow).first {it.text?.toString()=="月"}.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()=="本月花销"}}
+            clickPeriod("月")
+            waitFor {nodes(windowRoot).any {it.text?.toString()=="本月花销"}}
             capture("launcher-month-extreme-maxfont")
-            assertTrue(nodes(automation.rootInActiveWindow).first {it.text?.toString()=="年"}.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()=="本年花销"}}
+            clickPeriod("年")
+            waitFor {nodes(windowRoot).any {it.text?.toString()=="本年花销"}}
             println("S7_THEME font=${app.resources.configuration.fontScale} night=${app.resources.configuration.uiMode} options=${manager.getAppWidgetOptions(id).keySet().associateWith {manager.getAppWidgetOptions(id).get(it)}}")
             val hold=InstrumentationRegistry.getArguments().getString("holdWidgetMillis")?.toLongOrNull()?.coerceIn(0,60_000)?:0L
             if(hold>0) {println("S7_RESIZE_READY widgetId=$id");SystemClock.sleep(hold)}
@@ -162,12 +174,12 @@ class ExpenseWidgetLauncherTest {
             waitFor {ExpenseWidgetUpdater.measurement(id)?.let {!it.dark && it.fontScale==1f}==true}
             val metric=ExpenseWidgetUpdater.measurement(id)!!
             println("S7_LAUNCHER package=$launcher version=$version options=${manager.getAppWidgetOptions(id).keySet().associateWith {manager.getAppWidgetOptions(id).get(it)}} font=${app.resources.configuration.fontScale} night=${app.resources.configuration.uiMode} metric=$metric")
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()=="本年花销"}}
-            var title:AccessibilityNodeInfo?=nodes(automation.rootInActiveWindow).first {it.text?.toString()=="本年花销"}
+            waitFor {nodes(windowRoot).any {it.text?.toString()=="本年花销"}}
+            var title:AccessibilityNodeInfo?=nodes(windowRoot).first {it.text?.toString()=="本年花销"}
             while(title!=null && !title.isClickable)title=title.parent
             assertTrue(title?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true)
-            waitFor {automation.rootInActiveWindow?.packageName==app.packageName}
-            waitFor {nodes(automation.rootInActiveWindow).any {it.text?.toString()?.contains("本年花销")==true || it.text?.toString()=="本年"}}
+            waitFor {windowRoot?.packageName==app.packageName}
+            waitFor {nodes(windowRoot).any {it.text?.toString()?.contains("本年花销")==true || it.text?.toString()=="本年"}}
             capture("statistics-route")
             shell("input keyevent KEYCODE_HOME")
         } finally {

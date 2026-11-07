@@ -19,7 +19,9 @@ class TransferRecognitionTest {
     private val app = ApplicationProvider.getApplicationContext<LedgerApp>()
     private val name = "transfer-recognition-${UUID.randomUUID()}.db"
     private var store = LedgerStore(app, name)
-    private val now = 1_793_937_600_000L
+    // OCR dates use the device zone; keep capture time aligned on UTC CI and local devices.
+    private val now = java.time.LocalDateTime.of(2026, 11, 6, 12, 0)
+        .atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
     @After fun cleanup() { store.close(); app.deleteDatabase(name) }
     private fun bank(tail: String = "0007", bank: String = "cmb") = store.saveAccount(
         LedgerAccount(name = "合成银行卡$tail", amountCents = 100_000, kind = "bank", bankCode = bank, cardLast4 = tail))
@@ -128,6 +130,7 @@ class TransferRecognitionTest {
     @Test fun O09EqualTransfersWithoutStrongIdentityAreCandidatesInsteadOfSilentlyMerged() {
         val a = bank(); val b = platform("wechat")
         val first = ingest(topup(id = null))
+        assertTrue(first.bill.timeExplicit); assertEquals(now, first.bill.occurredAt)
         val second = ingest(topup(id = null))
         assertNotEquals(first.id, second.id); assertEquals(RecordState.REVIEW, second.state)
         assertEquals(first.id, second.duplicateId); assertTrue(second.walletEffects.isEmpty())

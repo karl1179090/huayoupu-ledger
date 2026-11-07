@@ -114,24 +114,26 @@ class ExpenseWidgetTest {
             net.ankio.ledger.ui.MainActivity::class.java.getDeclaredMethod("onActivityResult",Int::class.javaPrimitiveType,Int::class.javaPrimitiveType,android.content.Intent::class.java).apply {isAccessible=true}
                 .invoke(activity,code,android.app.Activity.RESULT_OK,android.content.Intent().setData(android.net.Uri.fromFile(input)))
         }
-        fun click(text:String) {
+        fun click(text:String):Long {
             var node:android.view.accessibility.AccessibilityNodeInfo?=null
             await {node=instrumentation.uiAutomation.rootInActiveWindow?.findAccessibilityNodeInfosByText(text)?.let {list->list.firstOrNull {it.text?.toString()==text}?:list.firstOrNull()};node!=null}
             while(node!=null && !node!!.isClickable)node=node!!.parent
+            val clicked=SystemClock.elapsedRealtime()
             assertTrue(node?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)==true)
+            return clicked
         }
         try {
             androidx.test.core.app.ActivityScenario.launch(net.ankio.ledger.ui.MainActivity::class.java).use {scenario->
                 ExpenseWidgetUpdater.request(app,intArrayOf(id));await {ExpenseWidgetUpdater.measurement(id)!=null}
                 scenario.onActivity {deliver(it,net.ankio.ledger.ui.MainActivity.CSV_IMPORT_REQUEST,file)}
-                val before=app.widgetRevision.get();val importClicked=SystemClock.elapsedRealtime();click("确认导入以上 1 笔")
+                val before=app.widgetRevision.get();val importClicked=click("确认导入以上 1 笔")
                 await {app.store.all().any {it.uid==record.uid} && app.widgetRevision.get()>before}
                 
                 await {ExpenseWidgetUpdater.measurement(id)?.revision==app.widgetRevision.get()}
                 val importLatency=ExpenseWidgetUpdater.measurement(id)!!.publishedAt-importClicked
                 assertTrue("File import refresh $importLatency ms",importLatency<2000)
                 scenario.onActivity {deliver(it,net.ankio.ledger.ui.MainActivity.RESTORE_REQUEST,backup)}
-                val restoreBefore=app.widgetRevision.get();val restoreClicked=SystemClock.elapsedRealtime();click("恢复")
+                val restoreBefore=app.widgetRevision.get();val restoreClicked=click("恢复")
                 await {app.store.all().any {it.uid==restored.uid} && app.widgetRevision.get()>restoreBefore}
                 
                 await {ExpenseWidgetUpdater.measurement(id)?.revision==app.widgetRevision.get()}
