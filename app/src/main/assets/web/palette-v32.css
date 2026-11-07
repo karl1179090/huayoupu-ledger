@@ -1,0 +1,366 @@
+/* V32 palette: 参考图 pastel 五色带（奶油黄绿 #F7FFCC / 天蓝 #BDE0FB / 长春花紫 #A588F8 / 樱花粉 #F3B0E1 / 嫩绿 #CDFDA5）。
+   柔和底色直接取自参考图；文字与交互色使用同色系加深版本以满足 4.5:1 对比度。
+   本文件只改颜色与质感，不改变任何布局、尺寸与交互结构。 */
+
+:root{
+  --butter:#F7FFCC;--sky:#BDE0FB;--brand:#A588F8;--blossom:#F3B0E1;--leaf:#CDFDA5;
+  --grape:#7D5BE2;--grape-deep:#6644C9;--grape-ink:#5B3AA8;
+  --ink:#37304B;--ink-strong:#2E2745;--muted:#756F8A;--muted-soft:#9B94B5;
+  --green-deep:#3F7D22;--rose-deep:#A93B77;--blue-deep:#3E6FB0;--amber-deep:#8F5A19;--danger:#C4405F;
+  --page:#F6F5FB;--surface:#FFFFFFCC;--line:#CBC7DE66;--tint:#EFE9FC;--track:#F0EDF7;
+  --green:#7D5BE2;
+}
+
+/* ---------- 页面与卡片基底：参考图五色带的极浅渐变 ---------- */
+body{background:var(--page)}
+.native-app #settings.mobile-active,.app.entry-mode,.native-app #manual{background:linear-gradient(130deg,#FDFFF0,#F2F6FE 45%,#F7F1FE 70%,#FDF1F7)}
+.app{background:linear-gradient(125deg,#FDFFF0 0%,#F2F6FE 38%,#F7F1FE 64%,#FDF1F7 86%,#F6FDEC 100%)}
+@media(min-width:650px){body{background:radial-gradient(ellipse at top,#FDFCF6,#F0EFF7)}}
+.card{background:var(--surface)}
+#sheet,#manual-panel,#detailDialog.sms-sheet,#detailDialog.ai-record-sheet,#detailDialog.standard-record-sheet{background:#FBFAFE}
+#record-panel,#detailDialog.model-sheet,.screen-import{background:linear-gradient(135deg,#fff,#FCFBFE)}
+#sheet .sheet-heading{background:#FBFAFE}
+#manual-panel .entry-top{background:#FBFAFE}
+.confirm-card{background:#FBFAFE}
+.compact-record .confirm-card{background:#FBFAFE}
+#detailDialog.system-flow{background:#fff;color:var(--ink)}
+dialog::backdrop,#sheet::backdrop,#detailDialog::backdrop{background:#37304B66}
+#record-shade,#manual-shade{background:#37304B44}
+
+/* ---------- 标题与正文 ---------- */
+h1,.v21-header h1{color:var(--ink-strong)}
+.subtitle,.summary-label,.summary .small,.muted,.small,.trend,.date-line,.record-meta,.setting-description,.engine-sub,.account-desc,.section-label,.category-heading,.account-heading,.empty,.empty-state,.scanning,.subtitle,.sheet-copy,.sheet-row small,.updated,.percentage,.legend-row,.legend-row span:last-child,.category-detail-row small,.capture-caption,.settings-footnote,.about-app{color:var(--muted)}
+.chevron{color:var(--muted-soft)}
+.record-name,.account-name,.setting-title,.engine-title,.summary-amount,.analysis-total,.asset-total,.asset-breakdown b,.analysis-card>.muted{color:var(--ink-strong)}
+.month{color:#453F5E}
+.record-origin b{color:var(--grape-ink)}
+.record-origin small,.ai-caption,.ai-time{color:var(--muted)}
+
+/* ---------- 焦点与选择 ---------- */
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--grape);outline-offset:3px}
+::selection{background:#D9C9FB}
+
+/* ---------- 主按钮 / 圆形加号 / 保存键 ---------- */
+.round-add,.nav-add{background:linear-gradient(135deg,#8A66EE,#6644C9);box-shadow:0 7px 15px #7D5BE240;color:#fff}
+.primary,.actions>.primary,.ai-main,.permission-cta,.model-config .permission-cta,#detailDialog.system-flow .permission-cta{background:linear-gradient(120deg,var(--grape),var(--grape-deep));color:#fff;box-shadow:0 5px 14px #7D5BE233}
+.secondary,.actions>button,.sheet-actions>button,.direction-choices>button,.entry-number button{background:#EFEDF6;color:var(--ink)}
+.entry-save{background:linear-gradient(130deg,#8A66EE,#6644C9);box-shadow:0 5px 12px #7D5BE238}
+.entry-tabs .chosen,.entry-tabs button.active,.segmented .selected,.segmented button.active{background:linear-gradient(135deg,#8A66EE,#6644C9);color:#fff}
+#detailDialog.system-flow .flow-system-steps em{background:linear-gradient(145deg,#9C7BEE,#7D5BE2)}
+#detailDialog.system-flow .expanded .background-toggle>em{background:linear-gradient(130deg,#8A66EE,#6644C9)}
+#detailDialog.system-flow .flow-progress>span.done,#detailDialog.system-flow .flow-progress>span.active{color:var(--grape-deep)}
+#detailDialog.system-flow .flow-progress>span.done b,#detailDialog.system-flow .flow-progress>span.active b{background:linear-gradient(130deg,#8A66EE,#6644C9)}
+#detailDialog.system-flow .flow-back{color:var(--grape-deep)}
+
+/* ---------- 概览卡与迷你柱 ---------- */
+.summary{background:linear-gradient(110deg,#E9F3FE,#F2EBFE 48%,#FCE9F6)}
+.spark-bars i{background:#D3C4FB}
+.spark-bars i:nth-child(3n){background:var(--brand)}
+.change,.growth,.entry-amount.positive{color:var(--green-deep)}
+
+/* ---------- 分类图标：柔和糖纸底 + 同色系深色符号 ---------- */
+.circle,.category-icon{background:linear-gradient(135deg,#E4DAFD,#CDB6FB);color:var(--grape-ink);box-shadow:inset 0 0 7px #FFFFFF55}
+.circle.blue,.category-icon.blue{background:linear-gradient(135deg,#DDF0FE,#BFDEFA);color:var(--blue-deep)}
+.circle.gray,.category-icon.gray{background:linear-gradient(135deg,#ECEBF3,#DDDBE8);color:#5F5A75}
+.circle.orange,.category-icon.orange{background:linear-gradient(135deg,#FFEACB,#FFD89E);color:#96550F}
+.circle.pink,.circle.purple,.category-icon.pink,.category-icon.purple{background:linear-gradient(135deg,#FADCF0,#F4BCDF);color:var(--rose-deep)}
+.circle.mint,.category-icon.mint{background:linear-gradient(135deg,#E4FBD1,#CDF9AC);color:#43791F}
+.category-icon.brown{background:linear-gradient(135deg,#F2E6D6,#E3CDB2);color:#7A5330}
+.wallet{background:linear-gradient(130deg,#9C7BEE,#7D5BE2)}
+.category-tone-0{background:#E7F8D9!important;color:#43791F!important}
+.category-tone-1{background:#E3F0FE!important;color:var(--blue-deep)!important}
+.category-tone-2{background:#FFF0D9!important;color:#96550F!important}
+.category-tone-3{background:#EDE6FD!important;color:var(--grape-ink)!important}
+.category-tone-4{background:#FCE4F1!important;color:var(--rose-deep)!important}
+
+/* ---------- 标签 ---------- */
+.tag,.pending{background:var(--tint);color:var(--grape-deep)}
+.tag.ai{background:#E7F1FE;color:var(--blue-deep)}
+.tag.manual{background:#ECEAF3;color:#6F6A85}
+.wallet-default{background:#E7F8D9;color:#43791F}
+#detailDialog.system-flow .system-chips>span{background:var(--tint);color:var(--grape-deep)}
+#detailDialog.system-flow .system-target{background:var(--tint);color:var(--grape-deep)}
+.ai-status,.ai-pill{background:var(--tint);color:var(--grape-deep)}
+#direction{background:var(--tint);color:var(--grape-deep)}
+
+/* ---------- 底部导航 ---------- */
+.bottom-nav{background:linear-gradient(to bottom,#FFFFFFC2,#FFFFFFF0);box-shadow:0 -8px 25px #EDE9F766;border:0}
+.nav-item{color:#8D87A3}
+.nav-item.active{color:var(--grape)}
+.home-indicator{background:#B9B3CC}
+.filter{background:#EFEDF6}
+.filter button{color:var(--muted)}
+.filter button.active{background:#fff;color:var(--grape)}
+
+/* ---------- 开关 ---------- */
+.switch{background:#D6D2E4}
+.switch[aria-checked=true],.switch:not(.off){background:var(--grape)}
+#settings .payment-app .switch[aria-checked=true]{background:var(--grape)}
+
+/* ---------- 摇一摇与引导卡：蓝→紫→粉糖纸渐变 ---------- */
+.shake,#settings>.shake{background:linear-gradient(125deg,#E9F1FE,#F3EAFA 58%,#FCE9F6)}
+.shake p,#settings .shake>p{color:#7A7490}
+.shake .steps,#settings .shake .steps{background:#FFFFFF80}
+.step{color:#5C5575}
+.step+.step:before,#settings .step+.step:before{background:#DCCFF8}
+.shake .step b{background:linear-gradient(155deg,#9C7BEE,#7D5BE2);box-shadow:inset 0 1px 2px #FFFFFF80}
+.shake-runtime,#settings .shake-runtime{color:#7A7490}
+.shake-runtime .chevron{color:var(--muted-soft)}
+.shake-runtime .permission:before,#settings .shake-runtime .permission:before{color:var(--muted-soft)}
+.permission-shield{background:var(--tint);color:var(--grape)}
+.permission-guide{background:linear-gradient(120deg,#F5F2FC,#EFEBFA)}
+.permission-guide-title b,.permission-step-number{background:var(--grape)}
+.permission-mini{border-color:#DCD4F0;color:var(--grape)}
+.permission-privacy,.auto-privacy,#detailDialog.system-flow .system-note,#detailDialog.system-flow .background-path{background:#F3F2F8}
+.permission-privacy{color:#5C5575}
+.permission-steps p,.permission-intro,.setup-copy,.setup-message,.setup-footer,#detailDialog .shake-setup-copy p{color:var(--muted)}
+#detailDialog .shake-setup-status{color:var(--muted-soft)}
+#detailDialog .shake-setup-status.done,#detailDialog .configured{color:var(--green-deep)}
+
+/* ---------- 系统设置流程页 ---------- */
+#detailDialog.system-flow .sms-sheet-close{background:#EFEDF6;color:var(--muted)}
+#detailDialog.system-flow .system-ready{background:var(--tint)}
+#detailDialog.system-flow .system-ready>i{color:var(--grape)}
+#detailDialog.system-flow .system-ready>button,#detailDialog.system-flow .system-ready small{color:var(--muted)}
+#detailDialog.system-flow .system-hero-icon{background:radial-gradient(circle,#E4DAFD,#EFE9FC);color:var(--grape)}
+#detailDialog.system-flow .system-hero p,#detailDialog.system-flow .background-heading p,#detailDialog.system-flow .flow-tiny{color:var(--muted)}
+#detailDialog.system-flow .flow-system-steps{background:#F1EFFB}
+#detailDialog.system-flow .flow-system-steps small{color:var(--muted)}
+#detailDialog.system-flow .system-help{background:#F5F4F9}
+#detailDialog.system-flow .system-help>i{color:var(--blue-deep)}
+#detailDialog.system-flow .system-help small,#detailDialog.system-flow .flow-sample small{color:var(--muted)}
+#detailDialog.system-flow .system-secondary{background:#EFEDF6;color:#453F5E}
+#detailDialog.system-flow .restriction-steps{background:#F0FBEA}
+#detailDialog.system-flow .restriction-steps em{background:var(--grape)}
+#detailDialog.system-flow .restriction-steps small{color:var(--muted)}
+#detailDialog.system-flow .background-item{background:#F5F4F9}
+#detailDialog.system-flow .background-item.expanded{background:linear-gradient(130deg,#EFE9FC,#F5F1FD)}
+#detailDialog.system-flow .background-toggle>em{background:#C9C4DB}
+#detailDialog.system-flow .background-badge{background:#EFEDF6;color:var(--muted)}
+#detailDialog.system-flow .expanded .background-badge{background:#E4DAFD;color:var(--grape-deep)}
+#detailDialog.system-flow .background-badge.confirmed{background:#E7F8D9;color:#43791F}
+#detailDialog.system-flow .background-badge.skipped{background:#FFF6DE;color:var(--amber-deep)}
+#detailDialog.system-flow .background-symbol{background:var(--tint);color:var(--grape)}
+#detailDialog.system-flow .background-path small{color:var(--muted-soft)}
+#detailDialog.system-flow .background-detail ol,#detailDialog.system-flow .flow-progress>span{color:var(--muted)}
+#detailDialog.system-flow .recent-app i{color:var(--grape)}
+#detailDialog.system-flow .recognition-summary{background:#F5F4F9}
+#detailDialog.system-flow .recognition-summary>div{border-bottom-color:#E5E1EF}
+#detailDialog.system-flow .recognition-summary b{color:var(--grape-deep)}
+#detailDialog.system-flow .flow-sample{background:#F1EFFB}
+#detailDialog.system-flow .flow-sample>i{color:var(--blue-deep)}
+#detailDialog.system-flow .flow-progress b{background:#C9C4DB}
+#detailDialog.system-flow .flow-progress>i{background:#E2DEF0}
+#detailDialog.system-flow .needs-check{color:var(--amber-deep)}
+#detailDialog.system-flow .background-summary:focus-visible{outline:2px solid var(--grape)}
+.setup-device{color:var(--muted)}
+#detailDialog .shake-setup-row{border-bottom-color:#E9E5F2}
+
+/* ---------- 模型配置 ---------- */
+.model-provider{background:#F3F0FB;border-color:#CFC0F2}
+.model-provider>span{color:var(--grape-deep)}
+.model-config input:focus{border-color:var(--brand)}
+.model-config label,.model-config .permission-privacy b{color:#453F5E}
+.model-config .permission-privacy p{color:var(--muted)}
+
+/* ---------- 统计页 ---------- */
+.segmented{background:#EFEDF6}
+.segmented button{color:var(--muted)}
+.donut:after,.donut:before{background:#fff}
+.donut-center b,.donut-center strong{color:var(--ink-strong)}
+.donut-center{color:var(--muted)}
+.progress{background:var(--track)}
+.period-expense-chart{background:#fff}
+.expense-bar i{background:#C9B4FC}
+.expense-bar.current i{background:var(--grape)}
+.expense-bar.future{color:var(--muted-soft)}
+.expense-bar.future i{background:#E2DEF0}
+.trend-table{color:#5C5575}
+.trend-table td,.trend-table th{border-bottom-color:#E5E1EF}
+
+/* ---------- 资产页 ---------- */
+.asset-card{background:linear-gradient(120deg,#E4F3FE,#ECE4FE)}
+.asset-top{color:#5C5575}
+.asset-breakdown>div+div{border-left-color:#DCD4F0}
+.asset-breakdown>div{color:#6F6A85}
+.eco{background-color:#F1EFF9;color:#6F6A85}
+.eco i{color:var(--grape)}
+.eco:after,.asset-card:after{background:linear-gradient(135deg,rgba(165,136,248,.22),rgba(165,136,248,.04))}
+.eco:before,.asset-card:before{background:linear-gradient(135deg,rgba(165,136,248,.16),rgba(165,136,248,.02))}
+.asset-maintenance{color:var(--muted)}
+.account{border:0}
+#account-form label{color:var(--muted)}
+#account-form .month-input:focus{border-color:var(--grape)}
+#account-form [aria-invalid="true"]{border-color:#C4707E;background:#FFFBFC}
+#account-form [aria-invalid="true"]:focus{border-color:var(--danger)}
+#account-form .account-field-error{color:var(--danger)}
+
+/* ---------- 记账键盘页 ---------- */
+.entry-tabs{background:#EFEDF6}
+.entry-tabs button{color:var(--muted)}
+.entry-amount{background:linear-gradient(130deg,#F7F4FD,#F1F2FA)}
+.entry-number input{color:var(--ink);caret-color:var(--brand)}
+.entry-number input::placeholder{color:var(--ink)}
+.entry-note{color:var(--muted-soft)}
+.entry-note input{color:#6F6A85}
+.entry-note input::placeholder{color:var(--muted-soft)}
+.entry-import{background:linear-gradient(110deg,#F1EFFB,#F4F1FC);color:#5C5575}
+.entry-import>div{border-left-color:#DCCFF8}
+.entry-import small{color:var(--muted)}
+.entry-categories button{color:#5C5575}
+.entry-categories button>span{background:linear-gradient(135deg,#F5F3F9,#EFEDF6);color:var(--muted)}
+.entry-categories button.chosen,.category-choice.active{color:var(--grape-deep)}
+.entry-categories button.chosen>span,.category-choice.active>span{background:linear-gradient(135deg,#E4DAFD,#D6C4FB);color:var(--grape-ink);box-shadow:0 4px 12px #A588F826}
+.entry-keyboard{border-top-color:#E9E5F2}
+.entry-keyboard button{background:linear-gradient(120deg,#F6F4FA,#F3F1F8);color:var(--ink)}
+.entry-import>button{color:#5C5575}
+
+/* ---------- 账单列表与识别 ---------- */
+.transaction{border-bottom-color:#CBC7DE55}
+.swipe-row{border-bottom-color:#E9E5F2;background:#fff}
+.swipe-row>.entry{background:#fff}
+.swipe-delete{background:var(--danger)}
+.swipe-delete:disabled{background:#9B94B5}
+.recognition-entry{background:var(--surface)}
+.recognition-entry .category-icon{background:#EFEDF4;color:var(--muted)}
+.recognition-entry.is-recognizing .category-icon{background:var(--tint);color:var(--grape)}
+.recognition-entry .recognition-spinner{border-color:#D3C4FB;border-top-color:var(--grape)}
+.recognition-entry .entry-title{color:#6F6A85}
+.recognition-entry .entry-subtitle,.recognition-entry .recognition-state{color:var(--muted)}
+.recognition-entry .chevron{color:var(--muted-soft)}
+.recognition-state{color:var(--muted)}
+.load-more-records{background:var(--tint);color:var(--grape-deep)}
+.search-scope{color:var(--muted)}
+.bank-compatibility{color:var(--muted)}
+
+/* ---------- 记录编辑面板 ---------- */
+.page-grip{background:#D6D2E4}
+#detailDialog.sms-sheet:before,#detailDialog.system-flow:before{background:#D6D2E4}
+.sms-sheet-close,.sheet-heading>button{background:#EFEDF6;color:var(--muted)}
+.screen-import>.subtitle{color:var(--muted)}
+.scanner{background:linear-gradient(120deg,#F5F1FD,#F7F4FE)}
+.scan-placeholder{color:var(--grape)}
+.scanner.working:after{border-color:#D3C4FB;border-top-color:var(--grape)}
+.recognition-error{color:var(--danger)}
+.card-heading{color:#6F6A85}
+.form-row{border-bottom-color:#E9E5F2;color:var(--muted)}
+.form-row input,.form-row>button{color:var(--ink)}
+.editor-tools{color:var(--muted)}
+.editor-tools #delete-record{color:var(--danger)}
+.editor-tools #raw-text-button{color:var(--muted)}
+.review-reason{background:#FFF6DE;color:var(--amber-deep)}
+.record-form .actions>.delete-action{background:#FDF0F4;color:#B23A55;border-color:#F3D8E0}
+.sheet-actions>.danger{background:var(--danger)}
+.ai-delete{color:var(--danger)}
+.compact-record .scanner.has-preview{background:#F4F2FA}
+.compact-record .scanner:active{background:#EAE6F6}
+.capture-attachment-copy b{color:var(--ink)}
+.capture-attachment-copy small{color:var(--muted)}
+.capture-expand{color:var(--grape)}
+.confirm-card .amount-row:focus-within{background:#F4F2FA}
+.record-chips button{background:var(--tint);color:var(--grape-ink)}
+.record-chips #time-label{background:#EFEDF4;color:#5C5575}
+.confirm-card .note-row{border-top-color:#E9E5F2}
+.refund-summary{color:#43791F}
+.refund-match{background:#E9F8DC;color:#3B7A20}
+.capture-gallery-heading{color:#61707E}
+.history-image{background:#F4F2FA;color:#453F5E}
+.history-image small{color:#87918B}
+.history-image>i{color:#A5A8BC}
+.history-image.missing-image{background:#F4F4F6;color:#82908B}
+.history-image:active{background:#EAE6F6}
+.capture-navigation>button{background:var(--tint);color:var(--grape-deep)}
+.capture-navigation>span{color:var(--muted)}
+.capture-original{color:var(--muted)}
+.ai-preview{background:linear-gradient(120deg,#F5F1FD,#F7F4FE)}
+.receipt-check{background:var(--grape)}
+.ai-source{color:var(--grape-deep)}
+.ai-fields{background:#fff;box-shadow:0 6px 30px #E4DEF21F}
+.ai-fields label{border-bottom-color:#EFEAF4}
+.ai-fields label>span{color:var(--muted)}
+.ai-fields input,.ai-fields select{color:var(--ink)}
+.ai-detail-lines span{color:var(--muted)}
+.ai-detail-lines b{color:#5C5575}
+.ai-attachment{background:#F5F4F9}
+.ai-attachment small{color:var(--muted)}
+.ai-outline{border-color:#C9B4F5;color:var(--grape-deep)}
+.standard-source{background:linear-gradient(120deg,var(--grape),var(--grape-deep))}
+.standard-original{background:linear-gradient(110deg,#EFF9E3,#F4FBEA);color:#43791F}
+.standard-original p{color:#5C5575}
+.standard-record-sheet .ai-delete{color:var(--muted-soft)}
+.form-row .error-field,.record-form .error-field{box-shadow:0 0 0 2px var(--danger)}
+
+/* ---------- 表单与弹层 ---------- */
+dialog label{color:var(--muted)}
+dialog input,dialog select,.month-input{border-color:#E3DFF0;background:#FAF9FD}
+.sheet-row{border-bottom-color:#E9E5F2}
+.direction-choices>.active{background:var(--tint);color:var(--grape-deep)}
+.raw-text{color:#5C5575}
+.toast{background:#3A2B5EEE}
+.delete-undo{background:#4A3A73;box-shadow:0 6px 22px #3A2B5E33}
+.delete-undo button{color:#D9CBFF}
+.search-box input{border-color:#DCD4F0}
+#ledger .search-field{border-color:#DCD4F0}
+#ledger .search-field:focus-within{border-color:var(--grape);box-shadow:0 0 0 2px #7D5BE218}
+#ledger .search-field>i{color:var(--muted)}
+#ledger-search{color:var(--ink);caret-color:var(--grape)}
+#ledger-search::placeholder{color:var(--muted-soft)}
+#search-clear{color:var(--muted)}
+#search-cancel{color:var(--grape)}
+
+/* ---------- 设置页 ---------- */
+#settings .settings-header>button{color:var(--muted)}
+#settings .payment-settings>p,#settings .payment-note,#settings .account-preferences #engine-provider,#settings .about-app{color:var(--muted)}
+#settings .payment-note:before{color:var(--muted-soft)}
+#settings .payment-app{background:#F4F2FA}
+#settings .account-preferences>button{border-bottom-color:#E9E5F2}
+#settings .account-preferences i{color:var(--grape)}
+#settings .account-preferences .chevron{color:var(--muted-soft)}
+.settings-list,.setting-row{border-bottom-color:#CBC7DE55}
+.category-row{border-bottom-color:#CBC7DE55}
+.category-detail-row{border-bottom-color:#E5E1EF}
+.running{color:var(--grape-deep)}
+.running em{color:var(--grape-deep)}
+.settings-utilities button{color:var(--muted)}
+.settings-help h3{color:#453F5E}
+.settings-help p{color:var(--muted)}
+.shake-symbol{background:#E7F1FE;color:var(--blue-deep)}
+.model-symbol{background:#EDE6FD;color:var(--grape-ink)}
+.screen-settings .engine-value{color:var(--grape-deep)}
+.screen-settings .settings-utilities>button>i{color:var(--grape)}
+.screen-settings .settings-utilities .chevron{color:var(--muted-soft)}
+.screen-settings .auto-apps-entry #automatic-app-label{color:var(--grape-deep)}
+.auto-scope,.auto-app-copy small{color:var(--muted)}
+.auto-app-options{background:#fff}
+.auto-app-choice{border-bottom-color:#E9E5F2}
+.auto-app-mark{background:var(--tint);color:var(--grape)}
+.auto-app-choice input{accent-color:var(--grape)}
+.auto-app-choice:focus-within{outline-color:var(--grape)}
+.shake-app-row input{accent-color:var(--grape)}
+.shake-app-row small{color:var(--muted)}
+.shake-app-list:empty::after{color:var(--muted-soft)}
+.storage-summary b{color:var(--grape)}
+.storage-summary span{color:var(--muted)}
+.export-format{background:#F5F4F9}
+.export-format:has(input:checked){background:var(--tint)}
+.export-format input{accent-color:var(--grape)}
+.export-format small,.export-hint{color:var(--muted)}
+.wallet-choice>i{color:var(--grape)}
+.wallet-choice small,.wallet-explanation,.wallet-option small,.movement-row small{color:var(--muted)}
+.wallet-option[aria-pressed=true]{color:var(--grape-deep)}
+.archived-accounts>summary{color:var(--muted)}
+.account-tools button{color:var(--grape)}
+.calibration-confirm{background:#F3F1F9}
+.movement-row{border-bottom-color:#E9E5F2}
+
+/* ---------- 转账表单 ---------- */
+.transfer-form{background:#F1EFF9}
+.transfer-form label{color:var(--muted)}
+.transfer-form select,.transfer-form input{border-color:#DCD4F0;background:#fff;color:var(--ink)}
+.transfer-wallets button{color:var(--grape)}
+.transfer-form .wallet-explanation{color:#5C5575}
+.transfer-review{color:var(--amber-deep)}
+.manual-date{color:var(--muted)}
+
+/* ---------- 桌面媒体查询下的旧规则覆盖 ---------- */
+@media(min-width:650px){.bottom-nav{border:0}}

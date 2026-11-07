@@ -28,8 +28,8 @@ class LedgerStatistics(private val store: LedgerStore) {
             .put("days", JSONArray().apply { days.forEach { put(JSONObject().put("day", it.day).put("date",it.date).put("direction", it.direction.name).put("amount", it.amountCents.toString())) } })
     }
 
-    fun query(period: ExpensePeriod, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault(), includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown): Snapshot = synchronized(store) {
-        val range = ExpensePeriodBuckets.create(period, now, zone)
+    fun query(period: ExpensePeriod, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault(), includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown, offset: Int = 0): Snapshot = synchronized(store) {
+        val range = ExpensePeriodBuckets.create(period, now, zone, offset)
         readSnapshot { aggregate(range.startMillis, range.endMillis, zone, range, includeBreakdown, includeDays) }
     }
 

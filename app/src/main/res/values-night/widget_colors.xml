@@ -1,1 +1,22 @@
-<resources><color name="widget_background">#18251F</color><color name="widget_text">#EDF6EF</color><color name="widget_muted">#B1C5B7</color><color name="widget_accent">#8BD5AF</color><color name="widget_border">#567461</color><color name="widget_selected">#294638</color><color name="widget_pressed">#337FD5A7</color><color name="widget_chart">#368565</color><color name="widget_on_choice">#10261C</color><color name="widget_choice">#8BD5AF</color><color name="widget_guide">#385345</color></resources>
+<resources>
+    <color name="widget_background">#1E192E</color>
+    <color name="widget_border">#352E4D</color>
+    <color name="widget_text">#F2EEFC</color>
+    <color name="widget_weekday_past">#D5CEE8</color>
+    <color name="widget_total">#BFA8FF</color>
+    <color name="widget_muted">#968FB0</color>
+    <color name="widget_accent">#BFA8FF</color>
+    <color name="widget_on_accent">#1E192E</color>
+    <color name="widget_today_pill_bg">#382F57</color>
+    <color name="widget_week_today_bg">#2D2647</color>
+    <color name="widget_year_card_bg">#26203A</color>
+    <color name="widget_year_card_current_bg">#352C54</color>
+    <color name="widget_segment_track_bg">#2B2442</color>
+    <color name="widget_choice">#3E3461</color>
+    <color name="widget_choice_border">#52467C</color>
+    <color name="widget_on_choice">#EDE6FF</color>
+    <color name="widget_selected">#322C4E</color>
+    <color name="widget_pressed">#33BFA8FF</color>
+    <color name="widget_chart">#BFA8FF</color>
+    <color name="widget_guide">#35304A</color>
+</resources>

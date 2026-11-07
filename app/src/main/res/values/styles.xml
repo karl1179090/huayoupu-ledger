@@ -1,13 +1,13 @@
 <resources>
     <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#176B52</item>
+        <item name="android:colorAccent">#7D5BE2</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
-        <item name="android:statusBarColor">#F8FAFC</item>
-        <item name="android:navigationBarColor">#F8FAFC</item>
+        <item name="android:statusBarColor">#F7F6FC</item>
+        <item name="android:navigationBarColor">#F7F6FC</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowBackground">#F8FAFC</item>
+        <item name="android:windowBackground">#F7F6FC</item>
     </style>
     <string name="accessibility_description">仅在你主动选择的应用出现已适配的支付结果页时自动获取截图，或由你主动摇一摇补录，图片发送至你配置的 AI 服务识别后记账。不读取聊天，不代你点击、收款或支付。账本在本机保存，不上传完整账本。后台代扣未出现结果页时可能漏记。可分别暂停自动识别、关闭摇一摇或撤销共用的无障碍授权。模型服务的数据留存以其规则为准。</string>
 </resources>

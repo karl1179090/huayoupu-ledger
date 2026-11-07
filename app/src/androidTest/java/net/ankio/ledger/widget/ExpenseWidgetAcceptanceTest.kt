@@ -431,7 +431,7 @@ class ExpenseWidgetAcceptanceTest {
                             assertTrue(visible.single() is android.widget.Button)
                             visible.single().id
                         }
-                        for(id in listOf(R.id.widget_main_header,R.id.widget_chart_area,R.id.widget_refresh)+periodControls) {
+                        for(id in listOf(R.id.widget_main_header,R.id.widget_chart_area)+periodControls) {
                             val view=root.findViewById<android.view.View>(id);val rect=bounds(root,view)
                             assertTrue("interactive $id outside card at $font",rect.left>=0 && rect.top>=0 && rect.right<=root.width && rect.bottom<=root.height)
                             if(view.isClickable)assertTrue("interactive $id <48dp at $font",view.width+1>=48*density && view.height+1>=48*density)
@@ -456,8 +456,8 @@ class ExpenseWidgetAcceptanceTest {
                                 val amountExpected=calendar.cells[index].expenseCents!!
                                 val label=money.text.toString()
                                 val known=snapshot.days.any {it.direction==Direction.EXPENSE && it.date==day.toString()}
-                                if(day>now.atZone(zone).toLocalDate() && !known)assertEquals("future day without an expense fact","—",label.trim())
-                                if(label.trim() in listOf("—","–","-"))assertEquals("only zero contribution may use an absence mark",0L,amountExpected)
+                                if(day>now.atZone(zone).toLocalDate() && !known)assertTrue("future day without an expense fact",label.trim() in listOf("","—"))
+                                if(label.trim() in listOf("","—","–","-"))assertEquals("only zero contribution may use an absence mark",0L,amountExpected)
                                 else assertEquals(amountExpected,displayedCents(label))
                                 assertTrue(cell.contentDescription.toString().contains(day.toString()))
                             }

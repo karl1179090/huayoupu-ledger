@@ -128,7 +128,7 @@ Manifest 不声明 `READ_SMS` / `RECEIVE_SMS` / `POST_NOTIFICATIONS`，没有注
 
 ## 安装与快速开始
 
-需要 **Android 11 或更新版本的 ARM64 手机**。在 [最新 Release](https://github.com/AldenHe/huayoupu-ledger/releases/latest) 下载安装 APK（改名后文件前缀为 `Huayoupu-Ledger-`，历史版本为 `Huiming-Ledger-`）；同页提供 SHA-256 校验值和对应源码。也可[自行从源码构建](#从源码构建)。
+需要 **Android 11 或更新版本的 ARM64 手机**。在 [最新 Release](https://github.com/karl1179090/huayoupu-ledger/releases/latest) 下载安装 APK（改名后文件前缀为 `Huayoupu-Ledger-`，历史版本为 `Huiming-Ledger-`）；同页提供 SHA-256 校验值和对应源码。也可[自行从源码构建](#从源码构建)。
 
 1. **安装应用**：下载安装 APK；打开花有谱即可手动记录收支。从本地调试版切换时，若系统提示签名不一致，请先导出完整备份，再卸载旧版、安装并恢复备份。
 2. **开启自动记账**：进入「我的」，在「支付自动识别」中开启需要的微信或支付宝开关。

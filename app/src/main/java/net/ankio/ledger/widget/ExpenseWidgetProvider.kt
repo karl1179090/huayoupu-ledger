@@ -14,10 +14,14 @@ import net.ankio.ledger.ui.MainActivity
 class ExpenseWidgetProvider:AppWidgetProvider() {
     override fun onReceive(context:Context,intent:Intent) {
         when(intent.action) {
-            SWITCH,REFRESH->{
+            SWITCH,REFRESH,PREV,NEXT->{
                 val id=intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID,0)
                 if(!validAction(context,intent,id))return
-                if(intent.action==SWITCH)ExpenseWidgetUpdater.select(context,id,ExpensePeriod.valueOf(intent.getStringExtra(PERIOD)!!))
+                when(intent.action) {
+                    SWITCH->ExpenseWidgetUpdater.select(context,id,ExpensePeriod.valueOf(intent.getStringExtra(PERIOD)!!))
+                    PREV->ExpenseWidgetUpdater.step(context,id,-1)
+                    NEXT->ExpenseWidgetUpdater.step(context,id,1)
+                }
                 ExpenseWidgetUpdater.request(context,intArrayOf(id),goAsync());return
             }
             Intent.ACTION_BOOT_COMPLETED,Intent.ACTION_MY_PACKAGE_REPLACED,Intent.ACTION_TIME_CHANGED,Intent.ACTION_TIMEZONE_CHANGED,
@@ -50,13 +54,21 @@ class ExpenseWidgetProvider:AppWidgetProvider() {
     companion object {
         const val SWITCH="net.ankio.ledger.widget.SWITCH"
         const val REFRESH="net.ankio.ledger.widget.REFRESH"
+        const val PREV="net.ankio.ledger.widget.PREV"
+        const val NEXT="net.ankio.ledger.widget.NEXT"
         const val PERIOD="expensePeriod"
         fun ids(context:Context):IntArray=AppWidgetManager.getInstance(context).getAppWidgetIds(ComponentName(context,ExpenseWidgetProvider::class.java))
+        private fun actionSlug(action:String)=when(action){
+            SWITCH->"switch"
+            PREV->"prev"
+            NEXT->"next"
+            else->"refresh"
+        }
         fun actionIntent(context:Context,id:Int,action:String,period:ExpensePeriod):Intent=Intent(context,ExpenseWidgetProvider::class.java)
-            .setAction(action).setData(Uri.parse("ledger-widget://$id/${if(action==SWITCH)"switch" else "refresh"}/${period.name}"))
+            .setAction(action).setData(Uri.parse("ledger-widget://$id/${actionSlug(action)}/${period.name}"))
             .putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID,id).putExtra(PERIOD,period.name)
         fun validAction(context:Context,intent:Intent,id:Int):Boolean {
-            if(id<=0 || id !in ids(context) || intent.action !in setOf(SWITCH,REFRESH))return false
+            if(id<=0 || id !in ids(context) || intent.action !in setOf(SWITCH,REFRESH,PREV,NEXT))return false
             val period=runCatching {ExpensePeriod.valueOf(intent.getStringExtra(PERIOD) ?: "")}.getOrNull() ?: return false
             return intent.data==actionIntent(context,id,intent.action!!,period).data
         }

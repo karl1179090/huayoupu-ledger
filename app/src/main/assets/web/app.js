@@ -391,7 +391,7 @@ let manualTransfer={fromAccountUid:null,toAccountUid:null,fee:'0',feeMode:'EXTRA
 let manualType='expense',manualCategory='餐饮',statsType='expense',rankingType='expense',assetsHidden=false;
 const expenseCategories=[['餐饮','utensils'],['交通','bus'],['购物','bag-shopping'],['娱乐','gamepad'],['居住','house'],['医疗','plus'],['教育','graduation-cap'],['服饰','shirt'],['日用','basket-shopping'],['通讯','phone'],['人情','gift'],['其他','ellipsis']];
 const incomeCategories=[['工资','wallet'],['奖金','award'],['礼物','gift'],['退款','rotate-left'],['其他收入','ellipsis']];
-const chartColors=['#48b99c','#87baff','#a6d0ff','#a8e4d6','#c5b9ff','#d9deeb'];
+const chartColors=['#A588F8','#7FB5F0','#F3B0E1','#CDFDA5','#F7DE8A','#E2DEF0'];
 function categoryOptions(){return [...(manualType==='income'?incomeCategories:expenseCategories),...(customCategories[manualType]||[]).map(name=>[name,'tag'])]}
 function beginManual(reset=true){
  if(manualOpen)return;if(manualClosing)closeManual(false);closeSheet(false);if(recordPanelOpen)closeRecordPanel(false);
@@ -439,7 +439,7 @@ function drawStats(){
  $('stats-label').textContent='总'+name;$('analysis-label').textContent=(periodStats?({WEEK:'本周',MONTH:'本月',YEAR:'本年'})[statsPeriod]:'本月')+name+'总计';$('stats-total').textContent='¥ '+money(total);$('analysis-total').innerHTML='<small>¥</small> '+money(total);$('analysis-total').classList.toggle('long-amount',money(total).length>17);$('stats-total').classList.toggle('long-amount',money(total).length>14);$('stats-count').textContent=`共 ${count} 笔`;
  const previousTotals=ledgerView?.summary?.previous,prior=statsType==='all'?cents(previousTotals?.income)+cents(previousTotals?.expense):previousTotals?.[statsType];$('stats-change').textContent=periodStats?'转账仅手续费计支出 · 退款抵扣原消费日期':prior&&cents(prior)>0n?`较上月${total>=cents(prior)?'增加':'减少'} ${percentDiff(total,prior)}%`:'暂无上月数据可比较';
  const labels=data.length>6?[...data.slice(0,5),{name:'其他分类',amount:sumValues(data.slice(5).map(d=>d.amount))}]:data;let end=0;
- $('donut').style.background=total>0n?'conic-gradient('+labels.map((d,i)=>{const start=end;end+=ratio(d.amount,total)*100;return `${chartColors[i%chartColors.length]} ${start}% ${end}%`}).join(',')+')':'#e6edf2';
+ $('donut').style.background=total>0n?'conic-gradient('+labels.map((d,i)=>{const start=end;end+=ratio(d.amount,total)*100;return `${chartColors[i%chartColors.length]} ${start}% ${end}%`}).join(',')+')':'#EFEDF6';
  $('chart-labels').innerHTML=labels.map((d,i)=>`<div class="legend-row"><i class="dot" style="background:${chartColors[i%chartColors.length]}" aria-hidden="true"></i><span>${escapeText(d.name)}</span><span>${(ratio(d.amount,total)*100).toFixed(0)}%</span></div>`).join('')||'<span class="muted small">暂无分类数据</span>';
  const ranked=statsCategories(rankingType),rankTotal=sumValues(ranked.map(d=>d.amount));
  $('ranking').innerHTML=ranked.map((d,i)=>`<button type="button" data-ranking-category="${escapeText(d.name)}" data-category-key="${escapeText(d.key||d.name)}" class="category-row ranking-row">${categoryBadge(d.name)}<span class="category-middle ranking-info"><span class="category-name">${escapeText(d.name)}</span><span class="progress-row"><span class="progress"><i style="width:${ratio(d.amount,rankTotal)*100}%;background:${chartColors[i%chartColors.length]}"></i></span><span class="percentage">${(ratio(d.amount,rankTotal)*100).toFixed(0)}%</span></span></span><span class="category-amount">¥ ${money(d.amount)}</span><span class="chevron">›</span></button>`).join('')||'<div class="empty-state">本周期暂无这类开销</div>';
@@ -461,7 +461,7 @@ document.querySelectorAll('#stats-type button').forEach(b=>b.onclick=()=>{statsT
 function chooseStatsMonth(){statsPeriod='MONTH';periodStats=null;$('month').click()}
 // The same month selector drives the ledger and statistics from one real data set.
 const monthClick=$('month').onclick;$('month').onclick=()=>{monthClick();const apply=$('month-apply').onclick;$('month-apply').onclick=()=>{apply();drawStats()}};
-const accountStyles={bank:['credit-card','#fa5469','#ffe8eb'],alipay:['alipay','#fff','#2199ff'],wechat:['weixin','#fff','#22cc86'],cash:['wallet','#fa6b32','#ffeadf'],custom:['wallet','#2488ed','#e6f1ff']};
+const accountStyles={bank:['credit-card','#fa5469','#ffe8eb'],alipay:['alipay','#fff','#2199ff'],wechat:['weixin','#fff','#22cc86'],cash:['wallet','#fa6b32','#ffeadf'],custom:['wallet','#7D5BE2','#EFE9FC']};
 function accountBank(kind){return bankOptions.find(bank=>bank.kind===kind)}
 function accountSymbol(kind){
  const bank=accountBank(kind);if(bank)return `<img class="account-bank-logo" src="${escapeText(bank.icon)}" alt="" width="36" height="36"/>`;

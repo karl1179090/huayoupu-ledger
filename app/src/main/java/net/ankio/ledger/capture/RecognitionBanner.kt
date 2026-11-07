@@ -34,7 +34,7 @@ class RecognitionBanner(private val service:Context) {
             fun dp(n:Int)=(n*density).toInt()
             val row=LinearLayout(service).apply {
                 gravity=Gravity.CENTER_VERTICAL;setPadding(dp(18),dp(12),dp(18),dp(12))
-                background=GradientDrawable().apply { setColor(0xff146b55.toInt());cornerRadius=dp(28).toFloat() }
+                background=GradientDrawable().apply { setColor(0xff5B3AA8.toInt());cornerRadius=dp(28).toFloat() }
                 elevation=dp(8).toFloat();importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 accessibilityLiveRegion=View.ACCESSIBILITY_LIVE_REGION_POLITE
             }

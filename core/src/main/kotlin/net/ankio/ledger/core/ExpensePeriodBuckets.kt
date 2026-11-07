@@ -37,17 +37,22 @@ data class ExpenseBucketTotals(val amounts: List<Long>, val totalCents: Long)
 
 /** Calendar boundaries are converted separately, including short/long days around DST. */
 object ExpensePeriodBuckets {
-    operator fun invoke(period: ExpensePeriod, now: Instant, zone: ZoneId): ExpensePeriodRange = create(period, now, zone)
+    operator fun invoke(period: ExpensePeriod, now: Instant, zone: ZoneId): ExpensePeriodRange = create(period, now, zone, 0)
 
     fun create(period: ExpensePeriod, now: Long, zone: ZoneId): ExpensePeriodRange =
-        create(period, Instant.ofEpochMilli(now), zone)
+        create(period, Instant.ofEpochMilli(now), zone, 0)
 
-    fun create(period: ExpensePeriod, now: Instant, zone: ZoneId): ExpensePeriodRange {
+    fun create(period: ExpensePeriod, now: Instant, zone: ZoneId, offset: Int = 0): ExpensePeriodRange {
         val today = now.atZone(zone).toLocalDate()
+        val anchor = when (period) {
+            ExpensePeriod.WEEK -> today.plusWeeks(offset.toLong())
+            ExpensePeriod.MONTH -> today.plusMonths(offset.toLong())
+            ExpensePeriod.YEAR -> today.plusYears(offset.toLong())
+        }
         val start = when (period) {
-            ExpensePeriod.WEEK -> today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-            ExpensePeriod.MONTH -> today.withDayOfMonth(1)
-            ExpensePeriod.YEAR -> today.withDayOfYear(1)
+            ExpensePeriod.WEEK -> anchor.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+            ExpensePeriod.MONTH -> anchor.withDayOfMonth(1)
+            ExpensePeriod.YEAR -> anchor.withDayOfYear(1)
         }
         val end = when (period) {
             ExpensePeriod.WEEK -> start.plusWeeks(1)

@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'AldenHe/huayoupu-ledger'
+    if: github.repository == 'karl1179090/huayoupu-ledger'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -28,7 +28,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      EXPECTED_CERT_SHA256: 31b8d5ed67959c0bcce58772e20650104b8879a648af1c9c5a7007f5294bed80
+      EXPECTED_CERT_SHA256: 62101969d492aa5538794aa6e4f8f1e99ac37a3de42f384468c9b8e2a9b0c014
     steps:
       - name: Validate version tag
         run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]'

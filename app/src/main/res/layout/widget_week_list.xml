@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_0"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_0" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_0" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_0" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_0" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_1"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_1" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_1" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_2"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_2" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_2" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_3"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_3" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_3" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_3" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_3" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_4"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_4" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_4" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_4" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_4" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_5"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_5" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_5" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_5" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_5" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/widget_week_row_6"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="8dp">
+        <TextView android:id="@+id/widget_week_day_6" android:layout_width="24dp" android:layout_height="22dp" android:gravity="center" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="14sp" android:textStyle="bold" android:textColor="@color/widget_text" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_axis_6" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="12dp" android:includeFontPadding="false" android:textSize="12.5sp" android:textColor="@color/widget_weekday_past" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_week_today_tag_6" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="6dp" android:includeFontPadding="false" android:text="今天" android:textSize="11sp" android:textStyle="bold" android:textColor="@color/widget_accent" android:visibility="gone" android:importantForAccessibility="no"/>
+        <TextView android:id="@+id/widget_bucket_6" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:gravity="end|center_vertical" android:includeFontPadding="false" android:fontFeatureSettings="tnum" android:textSize="13sp" android:textColor="@color/widget_muted" android:singleLine="true"/>
+    </LinearLayout>
+
+</LinearLayout>

@@ -61,10 +61,10 @@ class MainActivity : Activity() {
         fileImports.recover()
         savedInstanceState?.getString("permissionSetup")?.let { json -> runCatching { permissionSetup.restoreState(JSONObject(json)) } }
         previewBytes = ledger.importer.previewBytes
-        val outer = FrameLayout(this).apply { setBackgroundColor(Color.rgb(248,250,252)) }
+        val outer = FrameLayout(this).apply { setBackgroundColor(Color.rgb(247,246,252)) }
         pageHost = outer
         webView = WebView(this).apply {
-            setBackgroundColor(Color.rgb(248,250,252))
+            setBackgroundColor(Color.rgb(247,246,252))
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
