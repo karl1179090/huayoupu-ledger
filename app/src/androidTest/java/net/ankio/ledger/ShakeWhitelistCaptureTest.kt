@@ -192,12 +192,16 @@ class ShakeWhitelistCaptureTest {
             assertFalse("Synthetic fixture activity failed: $output",output.contains("Error:"))
         }
         await { foregroundPackage()==fixturePackage }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         automation.waitForIdle(100,3_000)
         // UiAutomation's root and this service's interactive-window publication can
         // arrive separately. Establish actual service metadata before the one trigger.
         var previous:ShakeWindowObservation?=null
         var stableSince=SystemClock.elapsedRealtime()
         await {
+            // The metadata Binder worker can observe the new window before the service's
+            // main looper receives its events. Drain that queue before each readiness sample.
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {}
             val observed=runBlocking { service.observeShakeWindow() }
             fixtureObservation=observed
             val valid=observed.windowId!=null && observed.packageName==fixturePackage
