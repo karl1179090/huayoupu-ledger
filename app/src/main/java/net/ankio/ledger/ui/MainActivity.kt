@@ -49,6 +49,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        net.ankio.ledger.capture.CaptureShortcuts.publish(this)
         ledger.startInteractiveMaintenance()
         pendingStatisticsPeriod=savedInstanceState?.getString("pendingStatisticsPeriod")?.let { runCatching {net.ankio.ledger.core.ExpensePeriod.valueOf(it)}.getOrNull() }
             ?:statisticsPeriod(intent)

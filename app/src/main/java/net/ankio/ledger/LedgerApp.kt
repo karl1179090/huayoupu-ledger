@@ -13,6 +13,7 @@ import net.ankio.ledger.data.*
 class LedgerApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        net.ankio.ledger.capture.CaptureShortcuts.publish(this)
         getSystemService(android.app.NotificationManager::class.java).apply {
             // Remove the previous version's runtime/result channels during upgrade.
             listOf("shake_ledger","capture_repair","capture_feedback").forEach(::deleteNotificationChannel)

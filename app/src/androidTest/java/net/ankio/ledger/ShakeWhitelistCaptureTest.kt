@@ -185,9 +185,11 @@ class ShakeWhitelistCaptureTest {
 
     @Test fun shortcutIsPublishedAndReturnsToTheSelectedBillBeforeCapturing() {
         val shortcut=app.getSystemService(android.content.pm.ShortcutManager::class.java)
-            .manifestShortcuts.single { it.id=="capture_current_bill" }
+            .dynamicShortcuts.single { it.id==CaptureShortcuts.ID }
         assertEquals("识别当前账单",shortcut.shortLabel.toString())
         assertEquals(CaptureShortcutActivity.CAPTURE_CURRENT_BILL,shortcut.intent!!.action)
+        assertEquals(Intent.FLAG_ACTIVITY_NEW_TASK,shortcut.intent!!.flags)
+        assertEquals(Intent.FLAG_ACTIVITY_NEW_TASK,CaptureShortcuts.info(app).intent.flags)
         val legacy=Intent(Intent.ACTION_CREATE_SHORTCUT).setPackage(app.packageName)
         assertTrue(app.packageManager.queryIntentActivities(legacy,0).any {
             it.activityInfo.name==CaptureShortcutActivity::class.java.name
@@ -254,12 +256,10 @@ class ShakeWhitelistCaptureTest {
     }
 
     private fun startShortcut() {
-        val component=ComponentName(app,CaptureShortcutActivity::class.java)
-        // A NoDisplay activity cannot report a drawn window to `am start -W` on API 30.
-        automation.executeShellCommand("am start -n ${component.flattenToString()} -a ${CaptureShortcutActivity.CAPTURE_CURRENT_BILL} -f 0x10000000").use {
-            val output=java.io.FileInputStream(it.fileDescriptor).readBytes().toString(Charsets.UTF_8)
-            assertFalse("Shortcut activity failed: $output",output.contains("Error:"))
-        }
+        // Exercise the same system API as launchers/gesture tools, including its intent flags.
+        automation.adoptShellPermissionIdentity("android.permission.WRITE_SECURE_SETTINGS","android.permission.ACCESS_SHORTCUTS")
+        app.getSystemService(android.content.pm.LauncherApps::class.java)
+            .startShortcut(app.packageName,CaptureShortcuts.ID,null,null,android.os.Process.myUserHandle())
     }
 
     private fun startFixture(mode:String) {
