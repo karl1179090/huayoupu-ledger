@@ -196,10 +196,16 @@ class ShakeWhitelistCaptureTest {
         // UiAutomation's root and this service's interactive-window publication can
         // arrive separately. Establish actual service metadata before the one trigger.
         var previous:ShakeWindowObservation?=null
+        var stableSince=SystemClock.elapsedRealtime()
         await {
             val observed=runBlocking { service.observeShakeWindow() }
             fixtureObservation=observed
-            val ready=observed.windowId!=null && observed.packageName==fixturePackage && observed==previous
+            val valid=observed.windowId!=null && observed.packageName==fixturePackage
+            val now=SystemClock.elapsedRealtime()
+            // Two adjacent Binder reads can precede delayed window events on a busy CI emulator.
+            // Keep the same real owner/window/generation stable before issuing the single trigger.
+            if(!valid || observed!=previous)stableSince=now
+            val ready=valid && observed==previous && now-stableSince>=500
             previous=observed
             ready
         }
