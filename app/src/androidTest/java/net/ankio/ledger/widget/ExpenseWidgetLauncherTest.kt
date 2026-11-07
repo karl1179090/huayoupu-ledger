@@ -144,7 +144,7 @@ class ExpenseWidgetLauncherTest {
             waitFor {app.store.readableDatabase.rawQuery("SELECT id FROM records WHERE uid=?",arrayOf(visibleImportUid)).use {it.moveToFirst()}}
             waitFor {app.widgetRevision.get()>beforeImportRevision && ExpenseWidgetUpdater.measurement(id)?.revision==app.widgetRevision.get()}
             val publishMs=requireNotNull(ExpenseWidgetUpdater.measurement(id)).publishedAt-clicked
-            assertTrue("Widget publication after native import $publishMs ms",publishMs in 0 until 2000)
+            ExpenseWidgetTiming.assertPublication("Widget publication after native import",publishMs)
             shell("input keyevent KEYCODE_HOME")
             val expectedAfter=net.ankio.ledger.core.Money.format(Math.addExact(Math.addExact(Math.addExact(Math.addExact(baseline,ordinaryExtra),9100),100_000*net.ankio.ledger.core.Money.MAX_CENTS),1))
             waitFor {nodes(windowRoot).any {it.text?.toString()?.replace(" ","")?.replace(",","")?.replace("\u200b","")=="¥$expectedAfter"}}

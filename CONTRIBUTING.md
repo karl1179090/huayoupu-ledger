@@ -50,6 +50,8 @@ ANDROID_SERIAL=emulator-5554 python3 scripts/run-android-regressions.py external
 
 Windows 使用 `gradlew.bat`，通过 `$env:PLAYWRIGHT_MODULE` 设置模块路径。新依赖须说明用途、许可和包体影响；原生库或模型更新须同步锁文件、通知、复现步骤与回归结果。
 
+GitHub 共享模拟器使用 `--widget-timing record`：继续执行全部组件功能、精确金额、版本更新和有界等待断言，记录 `S7_TIMING` 的耗时、2 秒目标及是否达标；不使用共享宿主机的绝对耗时判定功能失败，也不将这轮 CI 作为 2 秒性能验收。默认 `--widget-timing strict` 仍强制 2 秒门槛，供稳定设备环境单独验收。每轮 `run.json` 保存所用模式和完整命令。Android 官方建议使用物理设备进行[性能基准测试](https://developer.android.com/codelabs/android-macrobenchmark-inspect)，模拟器结果受宿主机负载影响。
+
 ## 支付自动识别回归检查点
 
 微信 / 支付宝适配、窗口读取、截图队列或去重变更，应按影响范围验证以下行为，并在 PR 中说明实际测试的应用版本、系统、设备及未覆盖项：

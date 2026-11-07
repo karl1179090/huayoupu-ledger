@@ -44,6 +44,8 @@ def main():
     parser.add_argument('--init-script', type=Path)
     parser.add_argument('--app-build-dir', type=Path, default=ROOT / 'app/build')
     parser.add_argument('--archive-dir', type=Path)
+    parser.add_argument('--widget-timing', choices=['strict', 'record'], default='strict',
+                        help='Enforce the 2s widget target (default), or record timings on shared CI emulators.')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
     classes = suites[args.suite]
@@ -82,7 +84,8 @@ def main():
             shutil.copytree(path, archive / f'previous-{stamp}' / kind, dirs_exist_ok=True)
             shutil.rmtree(path)
     command = ['bash', str(ROOT / 'gradlew'), '-PledgerPython=python3', f'-PledgerAbi={args.abi}',
-               '-Pandroid.testInstrumentationRunnerArguments.class=' + ','.join(classes)]
+               '-Pandroid.testInstrumentationRunnerArguments.class=' + ','.join(classes),
+               '-Pandroid.testInstrumentationRunnerArguments.ledgerWidgetTiming=' + args.widget_timing]
     if args.init_script:
         command += ['--init-script', str(args.init_script.resolve())]
     command += [':app:connectedDebugAndroidTest', '--stacktrace', '--console=plain']
@@ -92,7 +95,7 @@ def main():
         if path.exists():
             shutil.copytree(path, archive / kind, dirs_exist_ok=True)
     summary = read_results(archive / 'results', classes)
-    metadata = dict(suite=args.suite, serial=serial, abi=args.abi, command=command,
+    metadata = dict(suite=args.suite, serial=serial, abi=args.abi, command=command, widgetTiming=args.widget_timing,
                     startedAt=stamp, exitCode=result.returncode, **summary)
     (archive / 'run.json').write_text(json.dumps(metadata, indent=2) + '\n')
     print(json.dumps(dict(archive=str(archive), **summary)))

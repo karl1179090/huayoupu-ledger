@@ -131,14 +131,14 @@ class ExpenseWidgetTest {
                 
                 await {ExpenseWidgetUpdater.measurement(id)?.revision==app.widgetRevision.get()}
                 val importLatency=ExpenseWidgetUpdater.measurement(id)!!.publishedAt-importClicked
-                assertTrue("File import refresh $importLatency ms",importLatency<2000)
+                ExpenseWidgetTiming.assertPublication("File import refresh",importLatency)
                 scenario.onActivity {deliver(it,net.ankio.ledger.ui.MainActivity.RESTORE_REQUEST,backup)}
                 val restoreBefore=app.widgetRevision.get();val restoreClicked=click("恢复")
                 await {app.store.all().any {it.uid==restored.uid} && app.widgetRevision.get()>restoreBefore}
                 
                 await {ExpenseWidgetUpdater.measurement(id)?.revision==app.widgetRevision.get()}
                 val restoreLatency=ExpenseWidgetUpdater.measurement(id)!!.publishedAt-restoreClicked
-                assertTrue("Restore refresh $restoreLatency ms",restoreLatency<2000)
+                ExpenseWidgetTiming.assertPublication("Restore refresh",restoreLatency)
                 println("S7_W12 importMs=$importLatency restoreMs=$restoreLatency")
             }
         } finally {source.close();app.deleteDatabase(sourceName);file.delete();backup.delete();app.store.all().filter {it.uid in setOf(record.uid,restored.uid)}.forEach {app.store.delete(it.id)};app.changed(true)}

@@ -105,7 +105,7 @@ jobs:
           profile: pixel_3a
           disable-animations: true
           script: |
-            python3 scripts/run-android-regressions.py api30 --abi x86_64 --archive-dir ci-artifacts/android-api30
+            python3 scripts/run-android-regressions.py api30 --abi x86_64 --widget-timing record --archive-dir ci-artifacts/android-api30
             python3 scripts/build-payment-fixtures.py --install emulator-5554
             python3 scripts/run-android-regressions.py external-payment --abi x86_64 --archive-dir ci-artifacts/android-api30-external-payment
       - name: Android 14 window screenshot and whitelist revocation regressions
@@ -117,7 +117,7 @@ jobs:
           profile: pixel_3a
           disable-animations: true
           script: |
-            python3 scripts/run-android-regressions.py api34 --abi x86_64 --archive-dir ci-artifacts/android-api34
+            python3 scripts/run-android-regressions.py api34 --abi x86_64 --widget-timing record --archive-dir ci-artifacts/android-api34
             python3 scripts/build-payment-fixtures.py --install emulator-5554
             python3 scripts/run-android-regressions.py external-payment --abi x86_64 --archive-dir ci-artifacts/android-api34-external-payment
       - uses: actions/upload-artifact@v4
