@@ -30,15 +30,29 @@ class ChannelSettings(private val context: Context) {
     fun shakeMasterGeneration()=preferences.getLong("shake_master_generation_v1",0)
     fun shakeApplicationGeneration(packageName:String)=preferences.getLong("shake_package_generation_v1:$packageName",0)
     @Synchronized fun shakeAllowed(packageName:String):Boolean {
-        if(!enabled(Channel.OCR) || packageName !in selectedShakePackages())return false
+        return enabled(Channel.OCR) && shortcutAllowed(packageName)
+    }
+    /** Explicit shortcut requests share app selection, but never depend on the motion switch. */
+    @Synchronized fun shortcutAllowed(packageName:String):Boolean {
+        if(packageName !in selectedShakePackages())return false
         val installed=InstalledAppsRepository.get(context)
         return installed.selectable(packageName) && installed.installationFingerprint(packageName)==preferences.getString("shake_installation_v1:$packageName",null)
     }
     @Synchronized fun shakeAuthorization(packageName:String):ShakeAuthorization? = if(shakeAllowed(packageName))
         ShakeAuthorization(packageName,shakeMasterGeneration(),shakeApplicationGeneration(packageName)) else null
     @Synchronized fun shakeAuthorized(authorization:ShakeAuthorization):Boolean =
-        shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration &&
+        (if(authorization.shortcut)shortcutAllowed(authorization.packageName) && shortcutGeneration()==authorization.masterGeneration
+            else shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration) &&
             shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
+    fun shortcutGeneration()=preferences.getLong("shortcut_generation_v1",0)
+    @Synchronized fun shortcutAuthorization(packageName:String):ShakeAuthorization?=if(shortcutAllowed(packageName))
+        ShakeAuthorization(packageName,shortcutGeneration(),shakeApplicationGeneration(packageName),shortcut=true) else null
+    fun invalidateShortcuts() {
+        synchronized(this) {
+            check(preferences.edit().putLong("shortcut_generation_v1",Math.addExact(shortcutGeneration(),1)).commit())
+        }
+        (context.applicationContext as? net.ankio.ledger.LedgerApp)?.captureQueue?.cancelShortcut()
+    }
     /** Commit consent before cancellation; queue locks are never acquired while holding this lock. */
     fun setShakePackage(packageName:String,enabled:Boolean) {
         require(ShakeAuthorization.validPackage(packageName)) { "应用包名无效" }
@@ -62,6 +76,7 @@ class ChannelSettings(private val context: Context) {
             if(!enabled) {
                 ScreenCaptureService.current?.cancelShakeRecognition(packageName)
                 app.captureQueue.cancelShake(packageName)
+                app.captureQueue.cancelShortcut(packageName)
             }
             CaptureRuntime.refreshHealth();app.changed()
         }
@@ -89,6 +104,7 @@ class ChannelSettings(private val context: Context) {
         setAutomaticEnabled(true)
     }
     fun pauseForMissingPermission() {
+        invalidateShortcuts()
         set(Channel.OCR,false)
         setAutomaticEnabled(false)
         selectedAutoPackages().forEach { setAutoPackage(it,false) }

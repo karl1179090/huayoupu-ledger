@@ -152,15 +152,16 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         val page=readPage(match.packageName,match.windowId).value?:return@withLock false
         visits.detect(page)?.let { it.activity==match.activity && it.signature==match.signature && it.eventIdentity==match.eventIdentity }==true
     }
-    suspend fun manualCheck(pkg:String,window:Int):CaptureProbeResult<PaymentPage> = readLock.withLock {
-        if(!service.ledger.channels.shakeAllowed(pkg))return@withLock CaptureProbeResult(null,"application_not_selected")
-        val result=readManualCapturePage { readPage(pkg,window,700,automatic=false) }
+    suspend fun manualCheck(pkg:String,window:Int,shortcut:Boolean=false):CaptureProbeResult<PaymentPage> = readLock.withLock {
+        if(!manualApplicationAllowed(pkg,shortcut))return@withLock CaptureProbeResult(null,"application_not_selected")
+        val result=readManualCapturePage { readPage(pkg,window,700,automatic=false,shortcut=shortcut) }
         val accepted=result.value?.let(CapturePrivacy::manualAllowed)==true
         service.ledger.executionLog.event("ocr","preflight",if(accepted)"accepted" else "blocked",
             JSONObject().put("package",pkg).put("window",window).put("probeOutcome",result.outcome).put("probe",JSONObject(probeDetails.toString())))
         result
     }
-    private suspend fun readPage(expectedPackage:String?=null,expectedWindow:Int?=null,timeout:Long=180,automatic:Boolean=true):CaptureProbeResult<PaymentPage> =
+    private fun manualApplicationAllowed(pkg:String,shortcut:Boolean)=if(shortcut)service.ledger.channels.shortcutAllowed(pkg) else service.ledger.channels.shakeAllowed(pkg)
+    private suspend fun readPage(expectedPackage:String?=null,expectedWindow:Int?=null,timeout:Long=180,automatic:Boolean=true,shortcut:Boolean=false):CaptureProbeResult<PaymentPage> =
         probe.readResult(timeout,onLateResult=::lateProbeReady) {
             val detail=JSONObject().put("stage","windows").put("at",System.currentTimeMillis())
             fun missing(stage:String):PaymentPage? { probeDetails=JSONObject(detail.toString()).put("stage",stage);return null }
@@ -175,7 +176,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
                 detail.put("cachedPackage",pkg).put("cachedActivity",activity)
                 if(expectedWindow!=null && selected.id!=expectedWindow || expectedPackage!=null && pkg!=expectedPackage)return@readResult missing("target_changed")
                 if(automatic && !service.ledger.channels.autoAllowed(pkg))return@readResult missing("application_not_selected")
-                if(!automatic && !service.ledger.channels.shakeAllowed(pkg))return@readResult missing("application_not_selected")
+                if(!automatic && !manualApplicationAllowed(pkg,shortcut))return@readResult missing("application_not_selected")
                 available.firstOrNull { it.id==selected.id }?.let { if(Build.VERSION.SDK_INT>=33)it.getRoot(0) else it.root }
             } finally { available.forEach { it.recycle() } }?:return@readResult missing("root_unavailable")
             val pkg=root.packageName?.toString().orEmpty()
@@ -183,7 +184,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
             if(root.windowId!=detail.optInt("selectedWindow",-1) ||
                 !CapturePrivacy.manualPackageAllowed(pkg) || expectedPackage!=null && pkg!=expectedPackage ||
                 automatic && (!service.ledger.channels.autoAllowed(pkg) || pkg!=detail.optString("cachedPackage")) ||
-                !automatic && !service.ledger.channels.shakeAllowed(pkg)) { root.recycle();return@readResult missing("root_package_mismatch") }
+                !automatic && !manualApplicationAllowed(pkg,shortcut)) { root.recycle();return@readResult missing("root_package_mismatch") }
             val window=root.windowId
             val activity=activities[window].orEmpty()
             if(automatic && (PaymentVisits.isNavigation(pkg,activity) || !PaymentPageDetector.eligibleActivity(pkg,activity))) {

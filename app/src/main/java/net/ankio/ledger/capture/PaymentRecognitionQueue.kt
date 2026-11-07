@@ -12,7 +12,7 @@ import net.ankio.ledger.data.IngestResult
 class PaymentRecognitionQueue(private val app:LedgerApp,
     private val taskRecovery:Deferred<Unit> = app.taskRecovery,
     private val hasCapturePermission:()->Boolean={app.channels.permitted(ChannelSettings.Channel.OCR)}) {
-    private data class Entry(val automatic:Boolean,val pkg:String,val job:Job)
+    private data class Entry(val automatic:Boolean,val pkg:String,val job:Job,val shortcut:Boolean=false)
     private val jobs=linkedMapOf<Long,Entry>()
     private val modelPermit=Semaphore(1)
     @Synchronized fun hasCapacity()=jobs.size<MAX_PENDING
@@ -52,7 +52,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
                 if(allowed())feedback(message,false)
             }
         }
-        jobs[id]=Entry(automatic,pkg,work)
+        jobs[id]=Entry(automatic,pkg,work,shake?.shortcut==true)
         // Cancellation can win before a lazy coroutine enters its body, so a
         // body-level finally cannot be the owner of queue removal.
         work.invokeOnCompletion {
@@ -98,7 +98,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             val automatic=origin.startsWith("payment_auto:")
             val pkg=origin.substringAfter(':',"")
             val allowed=if(automatic)app.channels.autoAllowed(pkg)
-                else origin.startsWith("shake:") && app.tasks.shakeAuthorization(id)?.let { it.packageName==pkg && app.channels.shakeAuthorized(it) }==true
+                else (origin.startsWith("shake:") || origin.startsWith("shortcut:")) && app.tasks.shakeAuthorization(id)?.let { it.packageName==pkg && app.channels.shakeAuthorized(it) }==true
             if(!allowed) { app.tasks.update(id,"CANCELLED","识别授权已关闭，未新增账单");continue }
             if(!hasCapacity())break
             if(feedback==null)enqueue(id,pkg,automatic,factory)
@@ -111,9 +111,13 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             .forEach { app.tasks.update(it.first,"CANCELLED","自动识别已关闭，未新增账单") }
     }
     @Synchronized fun cancelShake(pkg:String?=null) {
-        jobs.values.filter { !it.automatic && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
+        jobs.values.filter { !it.automatic && !it.shortcut && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
         app.tasks.pendingShake(pkg).forEach { app.tasks.update(it,"CANCELLED","摇一摇授权已关闭，未新增账单") }
     }
-    fun cancelAll() { cancelAutomatic();cancelShake() }
+    @Synchronized fun cancelShortcut(pkg:String?=null) {
+        jobs.values.filter { it.shortcut && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
+        app.tasks.pendingShortcut(pkg).forEach { app.tasks.update(it,"CANCELLED","快捷方式识别授权已关闭，未新增账单") }
+    }
+    fun cancelAll() { cancelAutomatic();cancelShake();cancelShortcut() }
     companion object { const val MAX_PENDING=8 }
 }
