@@ -5,10 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
-import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
-import androidx.core.graphics.drawable.IconCompat
-import net.ankio.ledger.R
 import net.ankio.ledger.ledger
 import net.ankio.ledger.ui.MainActivity
 
@@ -17,16 +14,16 @@ class CaptureShortcutActivity:Activity() {
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState)
         if(intent.action==Intent.ACTION_CREATE_SHORTCUT) {
-            val shortcut=ShortcutInfoCompat.Builder(this,"capture_current_bill")
-                .setShortLabel(getString(R.string.capture_shortcut_label))
-                .setIcon(IconCompat.createWithResource(this,R.mipmap.ic_launcher))
-                .setIntent(Intent(this,CaptureShortcutActivity::class.java).setAction(CAPTURE_CURRENT_BILL))
-                .build()
+            val shortcut=CaptureShortcuts.info(this)
             setResult(RESULT_OK,ShortcutManagerCompat.createShortcutResultIntent(this,shortcut))
             finish();return
         }
         finish()
         if(intent.action!=CAPTURE_CURRENT_BILL || savedInstanceState!=null)return
+        if(intent.flags and Intent.FLAG_ACTIVITY_TASK_ON_HOME!=0) {
+            Toast.makeText(this,"此入口已更新，请在手势设置中重新绑定「识别当前账单」",Toast.LENGTH_LONG).show()
+            return
+        }
         if(ledger.channels.selectedShakePackages().isEmpty()) {
             startActivity(Intent(this,MainActivity::class.java).setAction(SELECT_APPLICATIONS)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
