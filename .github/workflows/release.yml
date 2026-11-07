@@ -42,13 +42,14 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: build-tools;35.0.0
-      - name: Require successful Android checks for this exact commit
+      # Only android.yml gates publishing; manual emulator regressions are independent.
+      - name: Require successful automatic Android checks for this exact commit
         run: |
           set -euo pipefail
           commit=$(git rev-parse HEAD)
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$commit"
           run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow android.yml --commit "$commit" --branch main --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          test -n "$run_id" || { echo 'Push this commit to main and run Android checks before publishing.'; exit 1; }
+          test -n "$run_id" || { echo 'Push this commit to main and run automatic Android checks before publishing.'; exit 1; }
           gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 15
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name android-arm64 --dir release
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name checked-source --dir release
@@ -87,7 +88,8 @@ jobs:
           下载下方 **Huayoupu-Ledger-*-arm64-v8a.apk**，在 Android 11 或更高版本的 ARM64 手机上安装。
 
           - APK 由 GitHub Actions 构建，并使用项目固定签名。
-          - 对应提交：$RELEASE_COMMIT；源码、浏览器、单元测试、lint 和 Android 模拟器回归均已通过。
+          - 对应提交：$RELEASE_COMMIT；源码审计、浏览器回归、单元测试、Lint 和 ARM64 构建均已通过。
+          - Android 模拟器回归通过独立工作流手动运行，不作为自动发布门槛。
           - 同时提供 APK SHA-256 校验值、构建信息和对应的完整公开源码 ZIP。
           - 从本地调试版切换时，若提示签名不一致，请先在应用内导出备份，再卸载旧版、安装并恢复备份。
           EOF

@@ -1,0 +1,74 @@
+name: Android Emulator (manual)
+
+# Independent diagnostics: automatic checks and Release do not depend on this workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regressions:
+    name: Android API ${{ matrix.api }} regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: 30
+            suite: api30
+          - api: 34
+            suite: api34
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/web-protection/package-lock.json
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Cache pinned public SDK and model inputs
+        uses: actions/cache@v4
+        with:
+          path: .tools/ocr-ab
+          key: v6-public-inputs-${{ runner.os }}-${{ hashFiles('third_party/ocr-runtime/config/upstream-lock.json', 'third_party/ocr-runtime/config/paddle-sdk.gradle.kts', 'scripts/prepare-paddle-sdk.py') }}
+      - name: Prepare and verify pinned V6 build inputs
+        run: python scripts/prepare-ledger-build.py
+      - name: Install SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Build emulator APKs
+        run: bash ./gradlew -PledgerAbi=x86_64 :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+      - name: Enable emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+      - name: Run Android and external payment regressions
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_3a
+          disable-animations: true
+          script: |
+            python3 scripts/run-android-regressions.py ${{ matrix.suite }} --abi x86_64 --widget-timing record --archive-dir ci-artifacts/android-${{ matrix.suite }}
+            python3 scripts/build-payment-fixtures.py --install emulator-5554
+            python3 scripts/run-android-regressions.py external-payment --abi x86_64 --archive-dir ci-artifacts/android-${{ matrix.suite }}-external-payment
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-emulator-${{ matrix.suite }}-reports
+          path: |
+            ci-artifacts/
+            app/build/reports/
+            core/build/reports/tests/
+          if-no-files-found: warn

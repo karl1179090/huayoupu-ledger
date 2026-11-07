@@ -37,7 +37,9 @@ npx --prefix tools/ui-checks playwright install chromium
 PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-transfer-regressions.cjs
 ```
 
-该入口顺序执行原有五个脚本及转账/独立状态恢复两个脚本。Android 类清单由 `scripts/android-regression-classes.json` 与实际 CI 共用；可先用 `python3 scripts/run-android-regressions.py api30 --list` 检查。 下列 `api30` 示例是通用完整 CI 清单，含小组件，不能作为本次已执行范围；本次按用户要求仅执行非小组件 69／19／4 类及独立外部支付组，精确过滤清单、命令和逐轮实际结果见[验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)。完整 manifest 与 CI 不因本次停止范围而移除小组件。
+该入口顺序执行原有五个脚本及转账/独立状态恢复两个脚本。Android 类清单由 `scripts/android-regression-classes.json` 与远端手动模拟器工作流共用，包含小组件；可先用 `python3 scripts/run-android-regressions.py api30 --list` 检查。历史专项验收的精确过滤清单、命令和逐轮实际结果见[验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)，历史记录不代表当前提交已执行的范围。
+
+开发流程为先在本地完成源码、浏览器、单元测试、Lint、构建及 Android 回归，再推送。以下示例在隔离的 Android 11 模拟器上运行完整 `api30` 清单和外部支付组；切换到隔离的 Android 14 模拟器后，以 `api34` 重复执行，并重新安装合成支付夹具、运行外部支付组。每组使用新的 `--archive-dir`，分别保留报告。
 
 ```sh
 python3 scripts/verify-transfer-fixtures.py
@@ -52,6 +54,14 @@ Windows 使用 `gradlew.bat`，通过 `$env:PLAYWRIGHT_MODULE` 设置模块路�
 
 GitHub 共享模拟器使用 `--widget-timing record`：继续执行全部组件功能、精确金额、版本更新和有界等待断言，记录 `S7_TIMING` 的耗时、2 秒目标及是否达标；不使用共享宿主机的绝对耗时判定功能失败，也不将这轮 CI 作为 2 秒性能验收。默认 `--widget-timing strict` 仍强制 2 秒门槛，供稳定设备环境单独验收。每轮 `run.json` 保存所用模式和完整命令。Android 官方建议使用物理设备进行[性能基准测试](https://developer.android.com/codelabs/android-macrobenchmark-inspect)，模拟器结果受宿主机负载影响。
 
+## 自动检查、手动模拟器与发布
+
+[Android](.github/workflows/android.yml) 在 push 和 PR 时自动运行源码审计、合成夹具校验、浏览器回归、核心及应用单元测试、Lint、调试与测试 APK 构建和 ARM64 Release 构建。`verify` 检查名称保持不变，自动流程不启动模拟器。
+
+[Android Emulator (manual)](.github/workflows/android-emulator.yml) 仅由 `workflow_dispatch` 触发。工作流合并到默认分支后，在 GitHub 的 **Actions → Android Emulator (manual) → Run workflow** 选择待测分支即可运行 Android 11／14 及各自的外部支付回归。两套系统独立执行并上传各自的报告；失败仍会显示为失败，自动检查与 Release 不依赖其结果。
+
+[Release](.github/workflows/release.yml) 仍要求标签对应的同一提交已在 `main` 的自动 Android 工作流中全部通过，并使用该轮构建的 APK 与源码。固定签名、SHA256、版本、ABI、提交来源和非调试包校验继续保留。发布说明只声明自动检查的通过范围，不声称手动模拟器回归已通过。
+
 ## 支付自动识别回归检查点
 
 微信 / 支付宝适配、窗口读取、截图队列或去重变更，应按影响范围验证以下行为，并在 PR 中说明实际测试的应用版本、系统、设备及未覆盖项：
@@ -64,7 +74,7 @@ GitHub 共享模拟器使用 `--widget-timing record`：继续执行全部组件
 
 对应入口：核心规则 [PaymentPageDetectorTest](core/src/test/kotlin/net/ankio/ledger/core/PaymentPageDetectorTest.kt)，Android 集成 [WechatAutoPaymentTest](app/src/androidTest/java/net/ankio/ledger/WechatAutoPaymentTest.kt)（含支付宝场景）、[PaymentVisitsTest](app/src/androidTest/java/net/ankio/ledger/PaymentVisitsTest.kt)、[PaymentRecognitionQueueTest](app/src/androidTest/java/net/ankio/ledger/PaymentRecognitionQueueTest.kt)、[BackgroundSettingsSyncTest](app/src/androidTest/java/net/ankio/ledger/BackgroundSettingsSyncTest.kt) 与 [PermissionTrimTest](app/src/androidTest/java/net/ankio/ledger/PermissionTrimTest.kt)。涉及合成支付应用的集成用例需先准备其测试夹具，不能在装有真实微信或支付宝的个人设备上用同包名夹具覆盖安装。
 
-合成页面与模拟器用例用于验证链路和边界，不代替真实付款应用的兼容性、功耗或性能测试；记录耗时时应区分节点读取、截图、OCR、落库与提示，不把历史单引擎 OCR 耗时当作完整无感记账延迟。当前 CI 的具体必跑范围以 [Android workflow](.github/workflows/android.yml) 为准。
+合成页面与模拟器用例用于验证链路和边界，不代替真实付款应用的兼容性、功耗或性能测试；记录耗时时应区分节点读取、截图、OCR、落库与提示，不把历史单引擎 OCR 耗时当作完整无感记账延迟。自动检查范围以 [Android workflow](.github/workflows/android.yml) 为准，手动模拟器回归范围以 [Android Emulator workflow](.github/workflows/android-emulator.yml) 为准。
 
 ## Issue 与 PR
 
