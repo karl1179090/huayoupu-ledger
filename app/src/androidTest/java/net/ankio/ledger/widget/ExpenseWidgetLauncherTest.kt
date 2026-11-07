@@ -5,10 +5,11 @@ import android.content.ComponentName
 import android.content.Intent
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import net.ankio.ledger.LedgerApp
 import net.ankio.ledger.ui.MainActivity
 import org.junit.Assert.*
@@ -35,6 +36,16 @@ class ExpenseWidgetLauncherTest {
         nodes(windowRoot).firstOrNull {
             it.contentDescription?.toString()?.startsWith("切换本$label")==true || it.text?.toString()==label
         }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true
+    }
+    private fun onResumedActivity(excluding:MainActivity?=null,action:(MainActivity)->Unit) = waitFor {
+        var applied=false
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                .filterIsInstance<MainActivity>().firstOrNull {it!==excluding}?.let {
+                    action(it);applied=true
+                }
+        }
+        applied
     }
     private fun shell(command:String){automation.executeShellCommand(command).use {android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes()}}
     private fun capture(name:String) {
@@ -92,7 +103,7 @@ class ExpenseWidgetLauncherTest {
         app.changed(true)
         val expected=net.ankio.ledger.core.Money.format(Math.addExact(Math.addExact(Math.addExact(baseline,ordinaryExtra),9100),100_000*net.ankio.ledger.core.Money.MAX_CENTS))
         val instrumentation=InstrumentationRegistry.getInstrumentation()
-        val activity=instrumentation.startActivitySync(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
+        instrumentation.startActivitySync(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         try {
             SystemClock.sleep(600)
             instrumentation.runOnMainSync {assertTrue(manager.requestPinAppWidget(ComponentName(app,ExpenseWidgetProvider::class.java),null,null))}
@@ -133,7 +144,10 @@ class ExpenseWidgetLauncherTest {
             val lateFile=java.io.File(app.cacheDir,"synthetic-widget-visible.csv").apply {outputStream().use {net.ankio.ledger.data.LedgerCsvExport.write(listOf(late),net.ankio.ledger.data.LedgerCsvExport.Format.GENERAL,it)}}
             app.startActivity(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
             waitFor {windowRoot?.packageName==app.packageName}
-            instrumentation.runOnMainSync {
+            // Configuration changes may replace the activity while the launcher is foreground.
+            var replaced:MainActivity?=null
+            onResumedActivity {activity->replaced=activity;activity.recreate()}
+            onResumedActivity(excluding=replaced) { activity ->
                 MainActivity::class.java.getDeclaredMethod("onActivityResult",Int::class.javaPrimitiveType,Int::class.javaPrimitiveType,Intent::class.java).apply {isAccessible=true}.invoke(activity,MainActivity.CSV_IMPORT_REQUEST,android.app.Activity.RESULT_OK,Intent().setData(android.net.Uri.fromFile(lateFile)))
             }
             waitFor {nodes(windowRoot).any {it.text?.toString()?.startsWith("确认导入以上 1 笔")==true}}
