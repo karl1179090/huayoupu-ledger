@@ -222,7 +222,9 @@ class ShakeWhitelistCaptureTest {
         }
         await { foregroundPackage()==app.packageName }
     }
-    private fun foregroundPackage():String?=automation.rootInActiveWindow?.let { root -> try { root.packageName?.toString() } finally { root.recycle() } }
+    // UiAutomation's cached active root can still belong to a system bar after an activity switch.
+    // Read the same selected-window ownership that the real screenshot boundary will validate.
+    private fun foregroundPackage():String?=runBlocking { service.observeShakeWindow() }.packageName
     private fun taskIds():Set<Long> = app.tasks.snapshot(500).let { rows -> (0 until rows.length()).map { rows.getJSONObject(it).getLong("id") }.toSet() }
     private fun await(check:()->Boolean) {
         val deadline=SystemClock.elapsedRealtime()+10_000
