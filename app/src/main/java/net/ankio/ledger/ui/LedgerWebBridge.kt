@@ -26,6 +26,7 @@ import net.ankio.ledger.data.CategoryException
 import net.ankio.ledger.data.LedgerCategory
 import net.ankio.ledger.data.LedgerReadView
 import net.ankio.ledger.data.WalletReadModel
+import net.ankio.ledger.data.ReceiptEvidenceCodec
 import net.ankio.ledger.data.WalletException
 import net.ankio.ledger.data.paymentProvider
 import net.ankio.ledger.ledger
@@ -128,6 +129,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("id", record.id)
                 put("uid", record.uid)
                 put("merchant", record.bill.merchant)
+                put("receipt", ReceiptEvidenceCodec.json(record.bill.receipt))
                 put("category", record.bill.category)
                 app.store.categoryFor(record).let { category ->
                     put("categoryId", category?.id ?: JSONObject.NULL); put("categoryIcon", category?.icon ?: "tag")
@@ -228,6 +230,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("refundCandidateCount",if((record.bill.refund!=null||record.bill.standaloneRefund!=null)&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
             .put("categoryId",app.store.categoryFor(record)?.id ?: JSONObject.NULL).put("categoryIcon",app.store.categoryFor(record)?.icon ?: "tag")
+            .put("receipt",ReceiptEvidenceCodec.json(record.bill.receipt))
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
@@ -292,7 +295,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             Direction.TRANSFER.name -> Direction.TRANSFER
             else -> throw InvalidInput("请选择支出、收入或转账")
         }
-        val merchant = string(input, "merchant", 1024).trim().ifBlank { "未填写商户" }
+        val enteredMerchant = string(input, "merchant", 1024).trim()
         val categoryName = string(input, "category", 1024).trim().ifBlank { "其他" }
         val occurredAt = integer(input, "occurredAt", 1, MAX_TIME)
         val note = string(input, "note", 500).trim()
@@ -308,6 +311,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             }
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
+            val merchant = enteredMerchant.ifBlank { if(original?.bill?.receipt!=null) "" else "未填写商户" }
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")
             if(direction==Direction.TRANSFER && (original?.bill?.refund!=null || original?.bill?.standaloneRefund!=null))throw WalletException("TRANSFER_REFUND_CONFLICT","含退款历史的消费不能直接改为转账，请先核对退款记录")

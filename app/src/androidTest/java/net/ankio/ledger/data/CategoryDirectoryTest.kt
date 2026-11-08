@@ -89,7 +89,7 @@ class CategoryDirectoryTest {
         store.saveCategory(dining.id, "合成预设改名", Direction.EXPENSE, "coffee")
         store.reorderCategories(Direction.EXPENSE, store.categoryDirectory(Direction.EXPENSE).map { it.id }.reversed())
         val json = LedgerBackup.encode(store, ChannelSettings(context))
-        assertEquals(6, JSONObject(json).getInt("version"))
+        assertEquals(7, JSONObject(json).getInt("version"))
         val backup = LedgerBackup.decode(json.byteInputStream())
         val targetName = "category-restore-${UUID.randomUUID()}.db"
         try { LedgerStore(context, targetName).use { target ->

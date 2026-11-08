@@ -6,6 +6,106 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocalOcrBillParserTest {
+    @Test fun explicitMerchantLabelsPreserveSingleCharacterAndShortNames() {
+        for (name in listOf("茶", "ABC", "招商银行")) {
+            val result = parse("支付成功", "付款金额：12.00元", "商户名称", name)!!
+            assertEquals(name, result.merchant)
+            assertEquals(name, result.receipt!!.merchant!!.value)
+            assertTrue(result.receipt.merchant.rawText.contains(name))
+        }
+    }
+    @Test fun shortMerchantEvidenceCannotBeHijackedByOtherBusinessFieldsWithTheSamePrefix() {
+        val lines = listOf(LocalOcrLine("支付成功"), LocalOcrLine("付款金额：12.00元"),
+            LocalOcrLine("服务商：合成支付"), LocalOcrLine("商品说明：合成早餐"),
+            LocalOcrLine("凭证来源：合成机构"), LocalOcrLine("商户名称：合成"))
+        for (input in listOf(lines, lines.reversed(), lines.shuffled(kotlin.random.Random(2)))) {
+            val result = LocalOcrBillParser.parse(input, 0, 0, now, origin="image")!!
+            assertEquals("合成", result.merchant)
+            val evidence = result.receipt!!.merchant!!
+            assertEquals("合成", evidence.value)
+            assertEquals("商户名称：合成", evidence.rawText)
+            assertEquals("合成支付", result.receipt.serviceProvider!!.value)
+            assertEquals("合成早餐", result.receipt.productDescription!!.value)
+        }
+    }
+    @Test fun conflictingServiceAttributionsStayMissingInsteadOfChoosingOne() {
+        val result = parse("支付成功", "付款金额：12.00元", "服务商：合成甲", "服务商：合成乙", "服务由合成丙提供")!!
+        assertNull(result.receipt!!.serviceProvider)
+        assertEquals("", result.merchant)
+    }
+    @Test fun orderContentAboveAmountDoesNotBecomeAMissingMerchant() {
+        val result = LocalOcrBillParser.parse(listOf(line("商品说明", 20, 330, 160), line("早餐套餐", 300, 330),
+            line("-12.00", 300, 500, 220, 80), line("支付成功", 200, 650)), 900, 1800, now, origin="image")!!
+        assertEquals("", result.merchant)
+        assertNull(result.receipt!!.merchant)
+        assertEquals("早餐套餐", result.receipt.productDescription!!.value)
+        assertEquals("餐饮美食", result.category)
+    }
+    @Test fun splitBusinessRowsAndServiceAttributionKeepTheirOwnEvidenceInAnyOcrOrder() {
+        val lines = listOf(line("支付成功", 200, 150), line("-12.00", 300, 500, 220, 80),
+            line("商户名称：合成", 100, 650), line("商品说明", 20, 700, 160),
+            line("早餐", 300, 700, 100), line("套餐", 420, 700, 100),
+            line("服务由合成支付提供", 100, 800), line("广告", 20, 900), line("商品说明：火锅优惠券", 100, 950))
+        for (input in listOf(lines, lines.reversed(), lines.shuffled(kotlin.random.Random(3)))) {
+            val result = LocalOcrBillParser.parse(input, 900, 1800, now, origin="image")!!
+            val receipt = result.receipt!!
+            assertEquals("早餐 套餐", receipt.productDescription!!.value)
+            assertEquals("商品说明\n早餐\n套餐", receipt.productDescription.rawText)
+            assertEquals("合成支付", receipt.serviceProvider!!.value)
+            assertEquals("服务由合成支付提供", receipt.serviceProvider.rawText)
+            assertEquals("合成", result.merchant)
+        }
+    }
+
+    @Test fun peripheralPromotionsAndReceiptInstitutionsNeverBecomeOrderContentOrMerchant() {
+        val result = LocalOcrBillParser.parse(listOf(
+            line("凭证来源", 20, 330, 140), line("招商银行", 250, 330),
+            line("服务商", 20, 380, 140), line("合成支付服务", 250, 380),
+            line("-12.00", 300, 500, 220, 80), line("支付成功", 200, 650),
+            line("广告", 20, 900), line("商品说明：火锅代金券", 200, 1000),
+            line("订单备注：地铁优惠", 200, 1100),
+        ), 900, 1800, now, origin="image")!!
+        assertEquals("", result.merchant)
+        assertNull(result.receipt!!.merchant)
+        assertEquals("招商银行", result.receipt.receiptIssuer!!.value)
+        assertEquals("合成支付服务", result.receipt.serviceProvider!!.value)
+        assertNull(result.receipt.productDescription)
+        assertNull(result.receipt.orderRemark)
+        assertEquals("其他", result.category)
+    }
+
+    @Test fun missingReceiptFieldsStayMissingAndShortMerchantIsNotExpanded() {
+        val short = parse("支付成功", "商户名称：合成", "付款金额：12.00元")!!
+        assertEquals("合成", short.merchant)
+        assertEquals("合成", short.receipt!!.merchant!!.value)
+        assertNull(short.receipt.productDescription)
+        assertNull(short.transactionId)
+        val missing = parse("支付成功", "付款金额：12.00元", origin="image")!!
+        assertEquals("", missing.merchant)
+        assertNull(missing.receipt!!.merchant)
+        assertNull(missing.receipt.sourceApp)
+        assertTrue(missing.reliable)
+    }
+    @Test fun singleReceiptKeepsIndependentBusinessFieldsAndTheirEvidence() {
+        val result = parse("支付成功", "付款金额：26.90元", "商户名称：合成咖啡",
+            "商品说明：早餐 套餐", "交易说明：到店消费", "订单备注：少糖",
+            "服务商：合成扣费服务", "凭证来源：合成支付机构", origin="shake:com.tencent.mm")!!
+        val receipt = requireNotNull(result.receipt)
+        assertEquals("合成咖啡", receipt.merchant!!.value)
+        assertEquals("早餐 套餐", receipt.productDescription!!.value)
+        assertEquals("到店消费", receipt.transactionDescription!!.value)
+        assertEquals("少糖", receipt.orderRemark!!.value)
+        assertEquals("合成扣费服务", receipt.serviceProvider!!.value)
+        assertEquals("合成支付机构", receipt.receiptIssuer!!.value)
+        assertEquals("com.tencent.mm", receipt.sourceApp!!.value)
+        assertEquals("商品说明：早餐 套餐", receipt.productDescription.rawText)
+        assertEquals("ocr", receipt.productDescription.source)
+        assertEquals("capture", receipt.sourceApp.source)
+        assertEquals("single", receipt.productDescription.blockId)
+        assertTrue(result.reliable)
+        assertEquals(2690L, result.amountCents)
+    }
+
     @Test fun fullRefundStatusWithCompleteEvidenceRemainsAZeroNetAdjustment() {
         val result = parse("微信支付", "已全额退款", "原付款金额：100.00元", "累计退款：100.00元",
             "原支付时间：2026-10-17 12:00:00", "原交易单号：202610171234567890123456",
@@ -147,7 +247,7 @@ class LocalOcrBillParserTest {
         assertEquals(now,result.occurredAt)
         assertFalse(result.timeExplicit)
         assertTrue(result.reason,result.reliable)
-        assertTrue(result.merchant.isNotBlank())
+        assertEquals("", result.merchant)
         assertNull(parse("订单详情","实付款：26.90元",expenseOnly=true,origin=PaymentApps.TAOBAO))
         assertNull(parse("订单详情","待付款","实付款：26.90元",origin=PaymentApps.TAOBAO))
         val otherTimes=parse("订单详情","实付款：26.90元","创建时间：2026年10月17日 12:00:00","发货时间：2026年10月18日 10:00:00",origin=PaymentApps.TAOBAO)!!
