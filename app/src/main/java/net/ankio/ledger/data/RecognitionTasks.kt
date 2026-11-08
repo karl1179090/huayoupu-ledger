@@ -11,7 +11,18 @@ import org.json.JSONObject
 import java.util.UUID
 
 /** Recognition attempts are durable local data, independently of a valid financial transaction. */
-class RecognitionTasks(context:Context,private val name:String="recognition.db",private val screenshots:ScreenshotStore=ScreenshotStore.get(context)):SQLiteOpenHelper(context,name,null,5) {
+class RecognitionTasks(context:Context,private val name:String="recognition.db",private val screenshots:ScreenshotStore=ScreenshotStore.get(context),
+    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,6) {
+    // Read the immutable ledger migration baseline before SQLiteOpenHelper acquires its own lock.
+    private val migrationBaseline=classificationStore?.classificationMigrationBaseline() ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
+    private var classificationsReconciled=false
+    private fun reconcileClassificationSnapshots(db:SQLiteDatabase) {
+        val snapshots=db.rawQuery("SELECT operation_uid,classification_snapshot,status FROM tasks",null).use { c ->
+            buildList { while(c.moveToNext())add(StoredClassificationSnapshot("recognition:${c.getString(0)}",ClassificationCodec.readSnapshot(c.getString(1)),
+                c.getString(2) in setOf("CAPTURING","QUEUED","RECOGNIZING","FAILED"),name)) }
+        }
+        classificationStore?.reconcileClassificationSnapshots(name,snapshots);classificationsReconciled=true
+    }
     private fun imageOwner(id:Long)="task:$name:$id"
     override fun onOpen(db:SQLiteDatabase) {
         super.onOpen(db)
@@ -34,7 +45,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     override fun onCreate(db:SQLiteDatabase) { db.execSQL("""CREATE TABLE tasks(
         id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, origin TEXT NOT NULL,
         created_at INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL,
-        record_id INTEGER, image BLOB, diagnostic TEXT NOT NULL DEFAULT '{}', shake_authorization TEXT,operation_uid TEXT NOT NULL)""")
+        record_id INTEGER, image BLOB, diagnostic TEXT NOT NULL DEFAULT '{}', shake_authorization TEXT,operation_uid TEXT NOT NULL,classification_snapshot TEXT NOT NULL)""")
         db.execSQL("CREATE UNIQUE INDEX tasks_operation_uid ON tasks(operation_uid)")
     }
     override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int) {
@@ -47,6 +58,14 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             } }
             db.execSQL("CREATE UNIQUE INDEX tasks_operation_uid ON tasks(operation_uid)")
         }
+        if(oldVersion<6) {
+            db.execSQL("ALTER TABLE tasks ADD COLUMN classification_snapshot TEXT")
+            db.execSQL("UPDATE tasks SET classification_snapshot=?",arrayOf(ClassificationCodec.snapshot(migrationBaseline).toString()))
+        }
+    }
+    /** Complete immutable configuration, fixed when this task was created, including legacy baseline. */
+    fun classificationSnapshot(id:Long):net.ankio.ledger.core.ClassificationSnapshot? = readableDatabase.rawQuery("SELECT classification_snapshot FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+        if(!it.moveToFirst())null else ClassificationCodec.readSnapshot(it.getString(0))
     }
     /** Bounded technical outcomes only; never store credentials, response bodies or bill text here. */
     @Synchronized fun diagnose(id:Long,key:String,value:String) {
@@ -60,14 +79,20 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         writableDatabase.update("tasks",ContentValues().apply { put("diagnostic",json.toString()) },"id=?",arrayOf(id.toString()))
     }
     private var firstSessionTaskId:Long?=null
-    @Synchronized fun create(source:Source,origin:String,authorization:ShakeAuthorization?=null):Long {
+    fun create(source:Source,origin:String,authorization:ShakeAuthorization?=null):Long = synchronized(classificationStore ?: this) {
         require(authorization==null || source==Source.OCR && origin==authorization.origin)
-        return writableDatabase.insertOrThrow("tasks",null,ContentValues().apply {
-        put("source",source.name);put("origin",origin);put("created_at",System.currentTimeMillis())
-        put("status","CAPTURING");put("message","正在获取账单截图")
-        put("operation_uid",UUID.randomUUID().toString())
-        if(authorization!=null)put("shake_authorization",authorization.encode())
-    }).also { if(firstSessionTaskId==null)firstSessionTaskId=it }
+        val db=writableDatabase
+        if(!classificationsReconciled)reconcileClassificationSnapshots(db)
+        val operation=UUID.randomUUID().toString();val key="recognition:$operation"
+        val snapshot=classificationStore?.holdClassificationSnapshot(key,taskDatabase=name) ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
+        try {
+            db.insertOrThrow("tasks",null,ContentValues().apply {
+                put("source",source.name);put("origin",origin);put("created_at",System.currentTimeMillis())
+                put("status","CAPTURING");put("message","正在获取账单截图");put("operation_uid",operation)
+                put("classification_snapshot",ClassificationCodec.snapshot(snapshot).toString())
+                if(authorization!=null)put("shake_authorization",authorization.encode())
+            }).also { if(firstSessionTaskId==null)firstSessionTaskId=it }
+        } catch(error:Throwable) { classificationStore?.forgetClassificationSnapshot(key);throw error }
     }
     /** Stable across helper/process recreation, never derived from an OCR payload or reused row ID. */
     fun operationKey(id:Long):String?=readableDatabase.rawQuery("SELECT operation_uid FROM tasks WHERE id=?",arrayOf(id.toString())).use {
@@ -78,17 +103,18 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         if(!it.moveToFirst() || it.getString(0)!=Source.OCR.name)return@use null
         ShakeAuthorization.decode(if(it.isNull(2))null else it.getString(2))?.takeIf { authorization -> it.getString(1)==authorization.origin }
     }
-    @Synchronized fun update(id:Long,status:String,message:String,recordId:Long?=null):Boolean {
+    fun update(id:Long,status:String,message:String,recordId:Long?=null):Boolean = synchronized(classificationStore ?: this) {
         require(status in STATUSES)
         val updated=writableDatabase.update("tasks",ContentValues().apply {
             put("status",status);put("message",message.take(500));if(recordId!=null) put("record_id",recordId)
         },"id=?"+(if(status in setOf("FAILED","CANCELLED")) " AND status IN ('CAPTURING','QUEUED','RECOGNIZING')" else ""),arrayOf(id.toString()))==1
         if(updated) {
+            if(status in setOf("SUCCEEDED","REVIEW","DUPLICATE","NO_BILL","SKIPPED","CANCELLED"))operationKey(id)?.let { classificationStore?.releaseClassificationSnapshot(it) }
             screenshots.state(imageOwner(id),status)
             if(status !in setOf("CAPTURING","QUEUED","RECOGNIZING"))screenshots.cleanup()
         }
         if(updated)app?.executionLog?.event("model","task",status,JSONObject().put("taskId",id).put("recordId",recordId))
-        return updated
+        updated
     }
     @Synchronized fun prepared(id:Long,image:ByteArray) { storeImage(id,image,"RECOGNIZING","正在识别记账中") }
     /** Save first, then expose a resumable queue entry. */
@@ -189,14 +215,19 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             .put("createdAt",c.getLong(2)).put("status",c.getString(3)).put("diagnostic",JSONObject(c.getString(4)))) }
     }
     fun image(id:Long):ByteArray? { readableDatabase;return screenshots.image(imageOwner(id)) }
-    @Synchronized fun delete(id:Long) {
-        writableDatabase.delete("tasks","id=?",arrayOf(id.toString()));screenshots.release(imageOwner(id))
+    fun delete(id:Long) = synchronized(classificationStore ?: this) {
+        val key=operationKey(id)
+        writableDatabase.delete("tasks","id=?",arrayOf(id.toString()))
+        key?.let { classificationStore?.releaseClassificationSnapshot(it) };screenshots.release(imageOwner(id))
     }
-    @Synchronized fun deleteForRecord(id:Long) {
+    fun deleteForRecord(id:Long) = synchronized(classificationStore ?: this) {
         val ids=readableDatabase.rawQuery("SELECT id FROM tasks WHERE record_id=?",arrayOf(id.toString())).use { c -> buildList { while(c.moveToNext())add(c.getLong(0)) } }
-        writableDatabase.delete("tasks","record_id=?",arrayOf(id.toString()));ids.forEach { screenshots.release(imageOwner(it)) }
+        val keys=ids.mapNotNull(::operationKey)
+        writableDatabase.delete("tasks","record_id=?",arrayOf(id.toString()))
+        keys.forEach { classificationStore?.releaseClassificationSnapshot(it) };ids.forEach { screenshots.release(imageOwner(it)) }
     }
-    @Synchronized fun recoverInterrupted(preserveCurrentSession:Boolean=false) {
+    fun recoverInterrupted(preserveCurrentSession:Boolean=false) = synchronized(classificationStore ?: this) {
+        reconcileClassificationSnapshots(writableDatabase)
         // Old queue entries never had app-specific consent. Reject them even while
         // accessibility is disconnected, before resume's permission gate can return.
         (pendingShake()+pendingShortcut()).forEach { id ->

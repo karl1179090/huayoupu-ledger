@@ -45,7 +45,7 @@ class TransferBackupTest {
 
     @Test fun B04_CompleteV5CopiesAbsoluteBalancesEffectsAndOriginalAuditWithoutReplay() {
         val source=store();val a=asset(source,-5000);val b=asset(source,20000);val saved=transfer(source,a,b,mode=FeeMode.DEDUCTED)
-        val json=JSONObject(encoded(source));assertEquals(7,json.getInt("version"));assertEquals(2,json.getJSONObject("wallets").getJSONArray("effects").length())
+        val json=JSONObject(encoded(source));assertEquals(8,json.getInt("version"));assertEquals(2,json.getJSONObject("wallets").getJSONArray("effects").length())
         assertFalse(json.getJSONObject("wallets").getJSONArray("links").getJSONObject(0).has("appliedCents"))
         val target=store();val summary=LedgerBackup.restoreDetailed(target,LedgerBackup.decode(json.toString().byteInputStream()))
         assertEquals(1,summary.imported);assertEquals(balance(source,a),balance(target,a));assertEquals(balance(source,b),balance(target,b))
