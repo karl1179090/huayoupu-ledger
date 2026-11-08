@@ -461,7 +461,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             throw WalletException("STALE_RECORD_REVISION","账单已更新，请重新核对")
     }
 
-    data class CommittedCapture(val recordUid:String,val record:LedgerRecord?)
+    data class CommittedCapture(val recordUid:String,val record:LedgerRecord?,val candidateId:CandidateId=CandidateId.SINGLE)
+
+    fun committedCandidate(operationKey:String,candidateId:CandidateId):CommittedCapture? =
+        committedCapture(candidateOperationKey(operationKey,candidateId))?.copy(candidateId=candidateId)
+
+    fun ingestCandidate(capture:Capture,candidate:TransactionCandidate,operationKey:String,eventKey:String?=null,
+        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null):CandidateSubmission =
+        CandidateSubmission(candidate.id,ingestRecognition(capture,candidate.bill,candidateOperationKey(operationKey,candidate.id),eventKey,screenshot,merchantIcon))
 
     /** This identity lives with the financial commit, independently of recognition.db updates. */
     @Synchronized fun committedCapture(operationKey:String):CommittedCapture? {

@@ -1,0 +1,161 @@
+{
+  "parent": 5,
+  "repo": "karl1179090/huayoupu-ledger",
+  "tickets": [
+    {
+      "plan": 1,
+      "number": 6,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/6",
+      "title": "[01] 兼容扩展单笔识别提交链路",
+      "blocked_by": [],
+      "draft": "01-single-recognition-prefactor.md"
+    },
+    {
+      "plan": 2,
+      "number": 7,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/7",
+      "title": "[02] 统一分类目录并提供基础管理",
+      "blocked_by": [],
+      "draft": "02-category-directory-management.md"
+    },
+    {
+      "plan": 3,
+      "number": 8,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/8",
+      "title": "[03] 保留并展示单笔凭证的结构化信息",
+      "blocked_by": [
+        6
+      ],
+      "draft": "03-structured-single-receipt.md"
+    },
+    {
+      "plan": 4,
+      "number": 9,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/9",
+      "title": "[04] 识别交易日期并固定缺时间回退",
+      "blocked_by": [
+        8
+      ],
+      "draft": "04-transaction-time-fallback.md"
+    },
+    {
+      "plan": 5,
+      "number": 10,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/10",
+      "title": "[05] 银行凭证匹配实际账户并守住入账门槛",
+      "blocked_by": [
+        8
+      ],
+      "draft": "05-bank-wallet-evidence.md"
+    },
+    {
+      "plan": 6,
+      "number": 11,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/11",
+      "title": "[06] 按商家自动分类并固定任务规则快照",
+      "blocked_by": [
+        6,
+        7
+      ],
+      "draft": "06-merchant-rules-and-snapshots.md"
+    },
+    {
+      "plan": 7,
+      "number": 12,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/12",
+      "title": "[07] 支持订单内容组合条件和内置规则管理",
+      "blocked_by": [
+        8,
+        11
+      ],
+      "draft": "07-compound-order-rules.md"
+    },
+    {
+      "plan": 8,
+      "number": 13,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/13",
+      "title": "[08] 删除分类时迁移账单、规则及排队目标",
+      "blocked_by": [
+        11
+      ],
+      "draft": "08-category-delete-replacement.md"
+    },
+    {
+      "plan": 9,
+      "number": 14,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/14",
+      "title": "[09] 测试规则并从账单预填新规则",
+      "blocked_by": [
+        12
+      ],
+      "draft": "09-rule-preview-from-bill.md"
+    },
+    {
+      "plan": 10,
+      "number": 15,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/15",
+      "title": "[10] 多张银行交易卡按日金额入账并恢复",
+      "blocked_by": [
+        9,
+        10
+      ],
+      "draft": "10-multi-bank-day-amount.md"
+    },
+    {
+      "plan": 11,
+      "number": 16,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/16",
+      "title": "[11] 识别混排通知及查看器中的交易凭证",
+      "blocked_by": [
+        9,
+        10
+      ],
+      "draft": "11-mixed-and-nested-receipts.md"
+    },
+    {
+      "plan": 12,
+      "number": 17,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/17",
+      "title": "[12] 已验证单笔版式直接使用无障碍节点",
+      "blocked_by": [
+        9
+      ],
+      "draft": "12-verified-node-fast-path.md"
+    },
+    {
+      "plan": 13,
+      "number": 18,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/18",
+      "title": "[13] 节点识别容忍普通截图失败并复用图标",
+      "blocked_by": [
+        17
+      ],
+      "draft": "13-node-screenshot-icons.md"
+    },
+    {
+      "plan": 14,
+      "number": 19,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/19",
+      "title": "[14] 完整恢复与合并新增分类和识别状态",
+      "blocked_by": [
+        12,
+        13,
+        15,
+        16,
+        18
+      ],
+      "draft": "14-backup-merge-roundtrip.md"
+    },
+    {
+      "plan": 15,
+      "number": 20,
+      "url": "https://github.com/karl1179090/huayoupu-ledger/issues/20",
+      "title": "[15] 完成组合流程回归及真机适配验收",
+      "blocked_by": [
+        14,
+        19
+      ],
+      "draft": "15-combined-acceptance-device.md"
+    }
+  ]
+}
