@@ -489,6 +489,13 @@ class LedgerWebBridge(private val activity: MainActivity) {
     } catch(error:Exception) { structuredFailure(error,"账单操作失败，请重试").toString() }
 
     @JavascriptInterface
+    fun retryRecognitionTask(id:Long):String=try {
+        checkInput(id in 1..MAX_SAFE_INTEGER,"识别记录编号无效")
+        checkInput(app.captureQueue.retryBatch(id),"没有可重试的批次、截图已失效或识别授权已关闭")
+        JSONObject().put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"重试失败，请稍后再试").toString() }
+
+    @JavascriptInterface
     fun deleteTask(id:Long):String=try {
         checkInput(id in 1..MAX_SAFE_INTEGER,"识别记录编号无效")
         checkInput(app.tasks.exists(id),"识别记录已不存在")

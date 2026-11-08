@@ -77,6 +77,7 @@ internal object BackupRestore {
                 }
                 ImportAuditStore.restore(db,snapshot.audits)
             }
+            store.restoreRecognitionBatches(backup.recognitionBatches)
             db.setTransactionSuccessful()
             RestoreSummary(imported,excluded,backup.accounts.count { it.uid in localAccounts },newAccounts.size,identityConflicts,aliasConflicts,skipped.size)
         } finally { db.endTransaction() }

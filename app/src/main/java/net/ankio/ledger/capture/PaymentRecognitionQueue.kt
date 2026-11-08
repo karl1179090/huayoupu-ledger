@@ -46,7 +46,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
                     }
                 }
             } catch(cancelled:CancellationException) {
-                app.tasks.update(id,"CANCELLED","识别已停止，未新增账单")
+                app.tasks.update(id,"CANCELLED",stoppedMessage(id,"识别已停止，未新增账单"))
             } catch(error:Exception) {
                 val message=(error as? RecognitionException)?.userMessage?:"识别失败，请重新补录"
                 app.tasks.update(id,"FAILED",message)
@@ -65,6 +65,27 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         work.start();return true
     }
 
+    /** Resume only durable unfinished children; recognition input and decisions already belong to ledger.db. */
+    @Synchronized fun retryBatch(id:Long):Boolean {
+        val key=app.tasks.operationKey(id) ?: return false
+        val batch=app.store.recognitionBatch(key) ?: return false
+        if(batch.complete || app.tasks.status(id) !in setOf("FAILED","CANCELLED") || !hasCapacity() || app.tasks.image(id)==null)return false
+        val origin=app.tasks.origin(id) ?: return false
+        val imported=app.tasks.isImageImport(id)
+        if(!imported) {
+            if(!hasCapturePermission())return false
+            val pkg=origin.substringAfter(':',"")
+            val authorized=if(origin.startsWith("payment_auto:"))app.channels.autoAllowed(pkg)
+                else (origin.startsWith("shake:") || origin.startsWith("shortcut:")) &&
+                    app.tasks.shakeAuthorization(id)?.let { it.packageName==pkg && app.channels.shakeAuthorized(it) }==true
+            if(!authorized)return false
+        }
+        if(!app.tasks.update(id,"QUEUED","正在重试未完成项"))return false
+        app.changed();resume();return true
+    }
+    private fun stoppedMessage(id:Long,fallback:String):String = app.tasks.operationKey(id)?.let(app.store::recognitionBatch)
+        ?.let { it.message+" · 未完成项已停止" } ?: fallback
+
     /** A model response and an old duplicate message are not proof of a live bill. */
     internal fun completedMessage(id:Long,result:IngestResult):String = when(result) {
         is IngestResult.Saved,IngestResult.DuplicateSkipped -> {
@@ -81,6 +102,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         }
         IngestResult.Ignored -> "未识别到金额，请重试"
         is IngestResult.Skipped -> result.message
+        is IngestResult.Batch -> result.result.message
     }
     private fun deliver(id:Long,message:String,loading:Boolean) {
         val linked=if(!loading && (message.startsWith("已记账 ¥") || message=="退款已更新" || app.tasks.status(id)=="REVIEW"))app.tasks.recordId(id)?.takeIf { app.store.get(it)!=null } else null
@@ -101,7 +123,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             val pkg=if(imported)"image" else origin.substringAfter(':',"")
             val allowed=if(imported)true else if(automatic)app.channels.autoAllowed(pkg)
                 else (origin.startsWith("shake:") || origin.startsWith("shortcut:")) && app.tasks.shakeAuthorization(id)?.let { it.packageName==pkg && app.channels.shakeAuthorized(it) }==true
-            if(!allowed) { app.tasks.update(id,"CANCELLED","识别授权已关闭，未新增账单");continue }
+            if(!allowed) { app.tasks.update(id,"CANCELLED",stoppedMessage(id,"识别授权已关闭，未新增账单"));continue }
             if(!hasCapacity())break
             if(feedback==null)enqueue(id,pkg,automatic,factory)
             else enqueue(id,pkg,automatic,factory) { message,loading->feedback(id,message,loading) }
