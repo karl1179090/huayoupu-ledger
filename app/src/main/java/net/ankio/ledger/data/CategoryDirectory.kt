@@ -105,7 +105,8 @@ internal object CategoryDirectory {
         val next = list(db, type).maxOfOrNull { it.order }?.plus(1) ?: 0
         var id = UUID.nameUUIDFromBytes("category:${type.name}:$name".toByteArray(Charsets.UTF_8)).toString()
         // A previous category can retain this name-derived ID after a rename. Its identity stays with it.
-        while (find(db, id) != null) id = UUID.randomUUID().toString()
+        val deletedIds=if(db.version>=13)CategoryReplacementStorage.entries(db).map { it.categoryId }.toSet() else emptySet()
+        while (find(db, id) != null || id in deletedIds) id = UUID.randomUUID().toString()
         return LedgerCategory(id, name, type, order = next).also { insert(db, it) }
     }
 
@@ -176,7 +177,8 @@ internal object CategoryDirectory {
     fun merge(db: SQLiteDatabase, incoming: List<LedgerCategory>): Map<String, LedgerCategory> {
         validateSnapshot(incoming)
         if (incoming.isEmpty()) return emptyMap()
-        val pristine = db.rawQuery("SELECT COUNT(*) FROM records", null).use { it.moveToFirst(); it.getLong(0) == 0L } &&
+        val replacements=CategoryReplacementStorage.entries(db)
+        val pristine = replacements.isEmpty() && db.rawQuery("SELECT COUNT(*) FROM records", null).use { it.moveToFirst(); it.getLong(0) == 0L } &&
             list(db).map { it.copy(referenceCount = 0) }.toSet() == presets.toSet()
         if (pristine) {
             db.delete("category_directory", null, null)
@@ -184,7 +186,9 @@ internal object CategoryDirectory {
             return incoming.associateBy { it.id }
         }
         return incoming.associate { category ->
-            val existing = find(db, category.id)?.takeIf { it.direction == category.direction }
+            replacements.firstOrNull { it.categoryId==category.id }?.let { require(it.direction==category.direction) { "已删除分类的收支方向冲突" } }
+            val resolvedId=CategoryReplacementStorage.resolve(category.id,replacements)
+            val existing = find(db, resolvedId)?.takeIf { it.direction == category.direction }
                 ?: byName(db, category.direction, category.name)
             val target = existing ?: category.copy(
                 id = if (find(db, category.id) == null) category.id else UUID.nameUUIDFromBytes("category-conflict:${category.direction}:${category.id}:${category.name}".toByteArray(Charsets.UTF_8)).toString(),
