@@ -308,6 +308,34 @@ html,body{height:100%;overscroll-behavior:none}body.native-app{background:var(--
 @media(max-width:360px){.category-icon-picker{grid-template-columns:repeat(4,minmax(0,1fr))}.category-action-btn{min-width:40px;padding:0 6px}}
 .large-text .category-icon-picker{grid-template-columns:repeat(4,minmax(0,1fr))}
 
+/* Category deletion & replacement migration preview */
+.category-delete-preview-view{display:flex;flex-direction:column;gap:10px}
+.category-delete-target-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid #E9E5F2}
+.category-delete-target-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.category-delete-target-info b{font-size:16px;color:var(--ink-strong,#2E2745);overflow-wrap:anywhere}
+.category-impact-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:4px 0}
+.category-impact-stat{background:#F5F3FB;border-radius:14px;padding:10px 8px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:2px}
+.category-impact-stat strong.impact-stat-number{font-size:20px;font-weight:700;color:var(--ink-strong,#2E2745);font-variant-numeric:tabular-nums}
+.category-impact-stat span.impact-stat-label{font-size:11px;color:var(--muted,#756F8A);white-space:nowrap}
+.category-delete-notice{font-size:13px;line-height:1.55;color:var(--muted,#756F8A);margin:4px 0 6px;overflow-wrap:anywhere}
+.category-replacement-card{background:#F5F3FB;border-radius:16px;padding:12px 14px;margin:2px 0 6px}
+.category-replacement-card label{display:block;font-size:13px;color:var(--ink-strong,#2E2745);margin-bottom:6px}
+.category-replacement-card select.month-input{margin:0 0 6px;width:100%;min-height:44px;font-size:14px}
+.replacement-field-hint{font-size:12px;line-height:1.45;color:var(--muted,#756F8A);margin:0}
+.category-zero-ref-card{padding:12px 14px}
+.category-zero-ref-card p{margin:0;font-size:13px;line-height:1.5;color:var(--muted,#756F8A)}
+.category-stale-alert{background:#FFF7E6;border:1px solid #FFE2A8;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:3px;margin:4px 0}
+.category-stale-alert b{font-size:13px;color:#9A6700}
+.category-stale-alert span{font-size:12px;line-height:1.4;color:#B27800}
+
+@media(max-width:360px){
+ .category-impact-summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .category-delete-target-row{gap:8px}
+}
+.large-text .category-impact-summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+.large-text .category-impact-stat strong.impact-stat-number{font-size:18px}
+.large-text .category-impact-stat span.impact-stat-label{white-space:normal}
+
 /* Automatic classification rules & record category decision explanation. */
 .category-explanation{font-size:12px;line-height:1.6;color:var(--muted,#756F8A);margin:-4px 0 10px;padding:0 14px;overflow-wrap:anywhere}
 .compact-record .category-explanation{padding:0}
