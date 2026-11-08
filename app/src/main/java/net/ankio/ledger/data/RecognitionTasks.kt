@@ -12,7 +12,7 @@ import java.util.UUID
 
 /** Recognition attempts are durable local data, independently of a valid financial transaction. */
 class RecognitionTasks(context:Context,private val name:String="recognition.db",private val screenshots:ScreenshotStore=ScreenshotStore.get(context),
-    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,6) {
+    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,7) {
     // Read the immutable ledger migration baseline before SQLiteOpenHelper acquires its own lock.
     private val migrationBaseline=classificationStore?.classificationMigrationBaseline() ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
     private var classificationsReconciled=false
@@ -45,7 +45,8 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     override fun onCreate(db:SQLiteDatabase) { db.execSQL("""CREATE TABLE tasks(
         id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, origin TEXT NOT NULL,
         created_at INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL,
-        record_id INTEGER, image BLOB, diagnostic TEXT NOT NULL DEFAULT '{}', shake_authorization TEXT,operation_uid TEXT NOT NULL,classification_snapshot TEXT NOT NULL)""")
+        record_id INTEGER, image BLOB, diagnostic TEXT NOT NULL DEFAULT '{}', shake_authorization TEXT,operation_uid TEXT NOT NULL,classification_snapshot TEXT NOT NULL,
+        recognition_at INTEGER,recognition_zone TEXT,trusted_original_capture_date TEXT)""")
         db.execSQL("CREATE UNIQUE INDEX tasks_operation_uid ON tasks(operation_uid)")
     }
     override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int) {
@@ -62,6 +63,47 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             db.execSQL("ALTER TABLE tasks ADD COLUMN classification_snapshot TEXT")
             db.execSQL("UPDATE tasks SET classification_snapshot=?",arrayOf(ClassificationCodec.snapshot(migrationBaseline).toString()))
         }
+        if(oldVersion<7) {
+            db.execSQL("ALTER TABLE tasks ADD COLUMN recognition_at INTEGER")
+            db.execSQL("ALTER TABLE tasks ADD COLUMN recognition_zone TEXT")
+            db.execSQL("ALTER TABLE tasks ADD COLUMN trusted_original_capture_date TEXT")
+        }
+    }
+    /** Null until the engine actually begins processing; old records/tasks are never backfilled. */
+    fun recognitionTime(id:Long):net.ankio.ledger.core.RecognitionTimeContext? = readableDatabase.rawQuery(
+        "SELECT recognition_at,recognition_zone,trusted_original_capture_date FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+        if(!it.moveToFirst() || it.isNull(0))null else net.ankio.ledger.core.RecognitionTimeContext(it.getLong(0),it.getString(1),
+            if(it.isNull(2))null else it.getString(2))
+    }
+    /** Native screenshot acquisition only. Import/file/notification clocks are not capture evidence. */
+    @Synchronized fun recordOriginalCaptureDay(id:Long,capturedAt:Long,zoneId:String) {
+        require(capturedAt>0)
+        val day=java.time.Instant.ofEpochMilli(capturedAt).atZone(java.time.ZoneId.of(zoneId)).toLocalDate().toString()
+        val native=readableDatabase.rawQuery("SELECT source,origin FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+            it.moveToFirst() && it.getString(0)==Source.OCR.name &&
+                (it.getString(1).startsWith("payment_auto:") || it.getString(1).startsWith("shake:") || it.getString(1).startsWith("shortcut:"))
+        }
+        require(native) { "原始采集日只能来自现场截图" }
+        writableDatabase.update("tasks",ContentValues().apply { put("trusted_original_capture_date",day) },
+            "id=? AND trusted_original_capture_date IS NULL AND recognition_at IS NULL",arrayOf(id.toString()))
+    }
+    /** Persist before inference, atomically retaining the first context across retries and helpers. */
+    @Synchronized fun beginRecognition(id:Long,clock:()->net.ankio.ledger.core.RecognitionTimeContext):net.ankio.ledger.core.RecognitionTimeContext {
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            recognitionTime(id)?.let { db.setTransactionSuccessful();return it }
+            check(exists(id)) { "识别任务已不存在" }
+            val originalDay=db.rawQuery("SELECT trusted_original_capture_date FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+                if(it.moveToFirst() && !it.isNull(0))it.getString(0) else null
+            }
+            val measured=clock()
+            val time=if(originalDay==null)measured else measured.copy(trustedOriginalCaptureDate=originalDay)
+            check(db.update("tasks",ContentValues().apply {
+                put("recognition_at",time.recognitionAt);put("recognition_zone",time.zoneId)
+                put("trusted_original_capture_date",time.trustedOriginalCaptureDate)
+            },"id=? AND recognition_at IS NULL",arrayOf(id.toString()))==1)
+            db.setTransactionSuccessful();return time
+        } finally { db.endTransaction() }
     }
     /** Complete immutable configuration, fixed when this task was created, including legacy baseline. */
     fun classificationSnapshot(id:Long):net.ankio.ledger.core.ClassificationSnapshot? = readableDatabase.rawQuery("SELECT classification_snapshot FROM tasks WHERE id=?",arrayOf(id.toString())).use {
@@ -139,6 +181,8 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         "SELECT id FROM tasks WHERE status IN ('CAPTURING','QUEUED','RECOGNIZING') AND "+(if(packageName==null)"origin LIKE 'shortcut:%'" else "origin=?"),
         packageName?.let { arrayOf("shortcut:$it") }).use { c -> buildList { while(c.moveToNext())add(c.getLong(0)) } }
     fun exists(id:Long):Boolean=readableDatabase.rawQuery("SELECT 1 FROM tasks WHERE id=?",arrayOf(id.toString())).use { it.moveToFirst() }
+    fun isImageImport(id:Long):Boolean=readableDatabase.rawQuery("SELECT 1 FROM tasks WHERE id=? AND source='IMAGE' AND origin='image'",
+        arrayOf(id.toString())).use { it.moveToFirst() }
     fun automatic(id:Long):Boolean=readableDatabase.rawQuery("SELECT origin FROM tasks WHERE id=?",arrayOf(id.toString())).use {
         it.moveToFirst() && it.getString(0).startsWith("payment_auto:")
     }
@@ -246,7 +290,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             if((origin.startsWith("shake:") || origin.startsWith("shortcut:")) && shakeAuthorization(id)==null) {
                 update(id,"CANCELLED","请重新选择应用后摇一摇，未新增账单");continue
             }
-            val resume=status=="RECOGNIZING" && (origin.startsWith("payment_auto:") || origin.startsWith("shake:") || origin.startsWith("shortcut:")) && screenshots.contains(imageOwner(id))
+            val resume=status=="RECOGNIZING" && (origin.startsWith("payment_auto:") || origin.startsWith("shake:") || origin.startsWith("shortcut:") || isImageImport(id)) && screenshots.contains(imageOwner(id))
             update(id,if(resume)"QUEUED" else "FAILED",if(resume)"已恢复截图，等待识别" else "上次识别被系统中断，请重新摇动或导入截图")
         }
     }

@@ -19,13 +19,15 @@ class LocalRecognitionClient(context: android.content.Context) {
     private val context = context.applicationContext
     suspend fun recognizePrepared(
         submitted: ByteArray,
-        receivedAt: Long = System.currentTimeMillis(),
+        receivedAt: Long? = null,
         onPrepared: (ByteArray) -> Unit = {},
         stillAllowed: () -> Boolean = { true },
         livePaymentAt: Long? = null,
         expenseOnly: Boolean = false,
         origin: String = "",
         policy: RecognitionPolicy = RecognitionPolicy.fromExpenseOnly(expenseOnly),
+        recognitionTime: () -> net.ankio.ledger.core.RecognitionTimeContext = { net.ankio.ledger.core.RecognitionTimeContext(
+            receivedAt ?: System.currentTimeMillis(), java.time.ZoneId.systemDefault().id) },
     ): RecognitionResult = withContext(Dispatchers.IO) {
         val taskContext=currentCoroutineContext()
         fun checkAllowed() {
@@ -42,6 +44,7 @@ class LocalRecognitionClient(context: android.content.Context) {
         // Waiting requests retain compressed bytes only, not decoded full-size bitmaps.
         LocalInferenceGate.shared.run {
             checkAllowed()
+            val time = recognitionTime()
             val bitmap = BitmapFactory.decodeByteArray(submitted, 0, submitted.size)
                 ?: throw RecognitionException("图片无法读取，请重新截图")
             try {
@@ -52,7 +55,7 @@ class LocalRecognitionClient(context: android.content.Context) {
                     val box = line.box
                     LocalOcrLine(line.text, box?.left ?: 0, box?.top ?: 0, box?.right ?: 0, box?.bottom ?: 0)
                 }
-                val bill = LocalOcrBillParser.parse(lines, ocr.width, ocr.height, receivedAt, livePaymentAt, policy, origin)
+                val bill = LocalOcrBillParser.parse(lines, ocr.width, ocr.height, time.recognitionAt, livePaymentAt, policy, origin, time)
                 // Completed refunds, including a zero net amount, continue to storage association.
                 // Only closed, pending or failed transactions stop this pipeline.
                 net.ankio.ledger.core.TransactionRejection.reason(ocr.rawText)?.let { reason ->

@@ -261,7 +261,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val incoming=bill.receipt ?: return result
         val previous=result.bill.receipt
         val receipt=when {
-            previous==null -> incoming
+            previous==null -> incoming.copy(time=incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
             previous.blockId!=incoming.blockId -> previous
             else -> previous.copy(merchant=previous.merchant ?: incoming.merchant,
                 productDescription=previous.productDescription ?: incoming.productDescription,
@@ -269,7 +269,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 orderRemark=previous.orderRemark ?: incoming.orderRemark,
                 serviceProvider=previous.serviceProvider ?: incoming.serviceProvider,
                 receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
-                sourceApp=previous.sourceApp ?: incoming.sourceApp)
+                sourceApp=previous.sourceApp ?: incoming.sourceApp,
+                time=previous.time?.takeIf { it.accountingAt==result.bill.occurredAt }
+                    ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
         }
         if(receipt==previous)return result
         check(db.update("records",ContentValues().apply { put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt)) },
@@ -893,9 +895,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 toSelectionSource=if(toChanged)"MANUAL" else details.toSelectionSource,
                 feeManualLocked=details.feeManualLocked || old==null || details.feeCents!=old.feeCents || details.feeMode!=old.feeMode)
         }
+        val originalTime=previous?.bill?.receipt?.time
+        val timeChanged=previous!=null && previous.bill.occurredAt!=record.bill.occurredAt
+        val receipt=record.bill.receipt?.let { evidence ->
+            if(originalTime==null)evidence else evidence.copy(time=if(timeChanged)originalTime.edited(record.bill.occurredAt) else originalTime)
+        }
         val posted = record.copy(identities=previous?.identities ?: record.identities,
             transfer=if(record.bill.direction==Direction.TRANSFER)manualTransfer else null,
-            bill = record.bill.copy(reliable = true, reason = provenance, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
+            bill = record.bill.copy(reliable = true, reason = provenance, receipt=receipt,
+                timeExplicit=if(timeChanged)true else record.bill.timeExplicit, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
                 if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || record.bill.categoryDecision?.manual==true)
                     CategoryDecision(CategoryDirectory.ensure(db,record.bill.direction,record.bill.category)?.id,CategorySource.MANUAL,true,explanation="人工选择分类")
                 else previous.bill.categoryDecision),
@@ -1116,8 +1124,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     private fun completePaymentIdentity(db:SQLiteDatabase,original:LedgerRecord,bill:ParsedBill):LedgerRecord {
+        val time=bill.receipt?.time?.takeIf { it.accountingAt==bill.occurredAt }
+            ?: original.bill.receipt?.time?.takeIf { it.accountingAt==bill.occurredAt }
+        val receipt=(original.bill.receipt ?: bill.receipt)?.copy(time=time)
         val completed=original.copy(bill=original.bill.copy(transactionId=bill.transactionId,
-            occurredAt=bill.occurredAt,timeExplicit=true,reason=""),reason="")
+            occurredAt=bill.occurredAt,timeExplicit=true,reason="",receipt=receipt),reason="")
         check(db.update("records",values(completed),"id=?",arrayOf(original.id.toString()))==1)
         persistIdentities(db,original.id,(original.identities+TransactionIdentities.from(original.capture,bill)).distinct())
         return requireNotNull(get(completed.id))

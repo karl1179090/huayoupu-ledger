@@ -12,7 +12,7 @@ import net.ankio.ledger.data.IngestResult
 class PaymentRecognitionQueue(private val app:LedgerApp,
     private val taskRecovery:Deferred<Unit> = app.taskRecovery,
     private val hasCapturePermission:()->Boolean={app.channels.permitted(ChannelSettings.Channel.OCR)}) {
-    private data class Entry(val automatic:Boolean,val pkg:String,val job:Job,val shortcut:Boolean=false)
+    private data class Entry(val automatic:Boolean,val pkg:String,val job:Job,val shortcut:Boolean=false,val imageImport:Boolean=false)
     private val jobs=linkedMapOf<Long,Entry>()
     private val modelPermit=Semaphore(1)
     @Synchronized fun hasCapacity()=jobs.size<MAX_PENDING
@@ -22,13 +22,14 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         factory:()->CaptureProcessor={CaptureProcessor(app)},feedback:(String,Boolean)->Unit={message,loading->deliver(id,message,loading)}):Boolean {
         if(jobs.containsKey(id))return true
         if(!hasCapacity())return false
+        val imported=!automatic && pkg=="image" && app.tasks.isImageImport(id)
         val epoch=app.channels.automaticGeneration(pkg)
         val shake=if(automatic)null else app.tasks.shakeAuthorization(id)?.takeIf { it.packageName==pkg }
         val recognitionEpoch=app.recognitionSession.generation
         fun allowed()=app.tasks.exists(id) && app.recognitionSession.generation==recognitionEpoch &&
-            hasCapturePermission() &&
-            if(automatic)app.channels.autoAllowed(pkg) && app.channels.automaticGeneration(pkg)==epoch
-            else shake!=null && app.channels.shakeAuthorized(shake)
+            (if(imported)true else hasCapturePermission() &&
+                if(automatic)app.channels.autoAllowed(pkg) && app.channels.automaticGeneration(pkg)==epoch
+                else shake!=null && app.channels.shakeAuthorized(shake))
         val work=app.scope.launch(start=CoroutineStart.LAZY) {
             try {
                 taskRecovery.await()
@@ -36,10 +37,10 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
                     if(!allowed())throw CancellationException("识别授权已关闭")
                     val image=app.tasks.image(id)?:throw RecognitionException("本次截图已失效，请重新摇一摇补录")
                     feedback("正在识别…",true)
-                    val result=factory().processPrepared(image,Source.OCR,pkg,id,::allowed)
+                    val result=factory().processPrepared(image,if(imported)Source.IMAGE else Source.OCR,pkg,id,::allowed)
                     if(allowed()) {
                         var message=completedMessage(id,result)
-                        if((message.startsWith("已记账 ¥") || message=="退款已更新") && app.tasks.recordId(id)?.let { app.captureHealth.successful(it,pkg) }!=true)
+                        if(!imported && (message.startsWith("已记账 ¥") || message=="退款已更新") && app.tasks.recordId(id)?.let { app.captureHealth.successful(it,pkg) }!=true)
                             message="账单已移除，未新增记账"
                         feedback(message,false)
                     }
@@ -52,7 +53,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
                 if(allowed())feedback(message,false)
             }
         }
-        jobs[id]=Entry(automatic,pkg,work,shake?.shortcut==true)
+        jobs[id]=Entry(automatic,pkg,work,shake?.shortcut==true,imported)
         // Cancellation can win before a lazy coroutine enters its body, so a
         // body-level finally cannot be the owner of queue removal.
         work.invokeOnCompletion {
@@ -92,12 +93,13 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
     /** Called after service connection as well as application start, never while permission is still binding. */
     @Synchronized fun resume(factory:()->CaptureProcessor={CaptureProcessor(app)},feedback:((Long,String,Boolean)->Unit)?=null) {
         if(!taskRecovery.isCompleted || taskRecovery.isCancelled)return
-        if(!hasCapturePermission())return
         for((id,origin) in app.tasks.pendingQueued()) {
             if(jobs.containsKey(id))continue
+            val imported=origin=="image" && app.tasks.isImageImport(id)
+            if(!imported && !hasCapturePermission())continue
             val automatic=origin.startsWith("payment_auto:")
-            val pkg=origin.substringAfter(':',"")
-            val allowed=if(automatic)app.channels.autoAllowed(pkg)
+            val pkg=if(imported)"image" else origin.substringAfter(':',"")
+            val allowed=if(imported)true else if(automatic)app.channels.autoAllowed(pkg)
                 else (origin.startsWith("shake:") || origin.startsWith("shortcut:")) && app.tasks.shakeAuthorization(id)?.let { it.packageName==pkg && app.channels.shakeAuthorized(it) }==true
             if(!allowed) { app.tasks.update(id,"CANCELLED","识别授权已关闭，未新增账单");continue }
             if(!hasCapacity())break
@@ -111,13 +113,18 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             .forEach { app.tasks.update(it.first,"CANCELLED","自动识别已关闭，未新增账单") }
     }
     @Synchronized fun cancelShake(pkg:String?=null) {
-        jobs.values.filter { !it.automatic && !it.shortcut && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
+        jobs.values.filter { !it.automatic && !it.shortcut && !it.imageImport && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
         app.tasks.pendingShake(pkg).forEach { app.tasks.update(it,"CANCELLED","摇一摇授权已关闭，未新增账单") }
     }
     @Synchronized fun cancelShortcut(pkg:String?=null) {
         jobs.values.filter { it.shortcut && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
         app.tasks.pendingShortcut(pkg).forEach { app.tasks.update(it,"CANCELLED","快捷方式识别授权已关闭，未新增账单") }
     }
-    fun cancelAll() { cancelAutomatic();cancelShake();cancelShortcut() }
+    @Synchronized fun cancelAll() {
+        cancelAutomatic();cancelShake();cancelShortcut()
+        jobs.values.filter { it.imageImport }.forEach { it.job.cancel() }
+        app.tasks.pendingQueued().filter { app.tasks.isImageImport(it.first) }
+            .forEach { app.tasks.update(it.first,"CANCELLED","识别已停止，可以重新导入截图") }
+    }
     companion object { const val MAX_PENDING=8 }
 }
