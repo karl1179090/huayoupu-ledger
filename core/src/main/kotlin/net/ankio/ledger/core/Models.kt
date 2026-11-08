@@ -37,7 +37,7 @@ data class StandaloneRefundEvidence(
     val originalTransactionId: String? = null,
 )
 
-/** Only evidence beside an explicit payment/arrival account label, never a transaction identity. */
+/** Explicit payment/arrival or bank account evidence, never a transaction identity. UNKNOWN role preserves missing direction. */
 data class PaymentMethodEvidence(
     val medium: String,
     val role: String,

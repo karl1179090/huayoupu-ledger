@@ -8,9 +8,11 @@ object PaymentMethodParser {
     private val creditLabel = Regex("^(收款方式|收款账户|到账账户|到账方式|入账账户|入账方式)[：:]?")
     private val transferDebitLabel = Regex("^(转出账户|转出银行卡|转出方式|付款方式|支付方式|扣款账户|付款账户|充值方式|提现账户)[：:]?")
     private val transferCreditLabel = Regex("^(转入账户|转入银行卡|到账银行卡|收款银行卡|提现银行卡|到账储蓄卡|到账账户|收款账户|入账账户)[：:]?")
-    private val otherField = Regex("^(?:付款方|收款方|对方账户|对方账号|交易号|交易单号|订单号|订单编号|商户|商品|退款|支付时间|付款时间|交易时间|到账时间|金额|原付|累计|实付|优惠|电话)")
+    private val otherField = Regex("^(?:付款方|收款方|对方账户|对方账号|交易号|交易单号|订单号|订单编号|商户|商品|退款|支付时间|付款时间|交易时间|到账时间|金额|账户余额|可用余额|余额|原付|累计|实付|优惠|电话)")
     private val unsupported = Regex("零钱通|余额宝|花呗|白条|信用卡|信用支付|先用后付|亲属卡|亲情卡")
     private val combined = Regex("组合(?:支付|付款)?|多种(?:方式|渠道)|分笔付款|[+＋]|及|和")
+    private val preference = Regex("优先|首选|默认|支付偏好")
+    private val actualDebit = Regex("^(?:本次)?通过(.+?)扣款[。.]?$")
     private val fourDigits = Regex("(?<![0-9A-Za-z])([0-9]{4})(?![0-9A-Za-z])")
     private val cardHint = Regex("银行卡|储蓄卡|借记卡|卡尾号|尾号|卡号")
 
@@ -41,12 +43,16 @@ object PaymentMethodParser {
             }
         }.distinct()
         val platform = sourcePlatform ?: brands.singleOrNull()
-        val fields = clean.mapIndexedNotNull { index, line ->
+        val statedDebits = if (role == "DEBIT") clean.mapNotNull { line ->
+            val compact = line.text.filterNot(Char::isWhitespace)
+            actualDebit.matchEntire(compact)?.groupValues?.get(1)?.let { decode("实际扣款", it, platform, role) }
+        } else emptyList()
+        val fields = statedDebits + clean.mapIndexedNotNull { index, line ->
             val compact = line.text.filterNot(Char::isWhitespace)
             val match = label.find(compact) ?: return@mapIndexedNotNull null
             val inline = compact.substring(match.range.last + 1).trim(':', '：')
             val value = if (inline.isNotBlank()) inline else associatedValue(clean, index)
-            if (value.isBlank()) return@mapIndexedNotNull null
+            if (value.isBlank() || preference.containsMatchIn(value)) return@mapIndexedNotNull null
             decode(match.groupValues[1], value, platform, role)
         }
         if (fields.isEmpty()) return platform?.let {
@@ -54,9 +60,9 @@ object PaymentMethodParser {
         }
         val distinct = fields.distinctBy { listOf(it.medium, it.bankCode, it.cardLast4, it.platform, it.ambiguous) }
         if (distinct.size > 1 || fields.any { it.ambiguous }) return PaymentMethodEvidence(
-            "UNKNOWN", role, platform = platform,
+            if(fields.any { it.medium=="BANK_CARD" || it.bankCode!=null || it.cardLast4!=null })"BANK_CARD" else "UNKNOWN", role, platform = platform,
             rawLabel = fields.joinToString(" / ") { it.rawLabel }.take(80),
-            rawValue = fields.joinToString(" / ") { it.rawValue }.take(240),
+            rawValue = fields.joinToString(" / ") { it.rawValue }.take(160),
             ambiguous = true, reason = "MULTIPLE_PAYMENT_METHODS",
         )
         return distinct.single()
@@ -101,7 +107,7 @@ object PaymentMethodParser {
         val methodCount = (if (isCard) 1 else 0) + (if (wechat) 1 else 0) + (if (alipay) 1 else 0)
         val ambiguous = banks.size > 1 || tails.size > 1 || methodCount > 1 || combined.containsMatchIn(value)
         val medium = when {
-            ambiguous -> "UNKNOWN"
+            ambiguous -> if(isCard)"BANK_CARD" else "UNKNOWN"
             unsupported.containsMatchIn(value) -> "UNSUPPORTED"
             isCard -> "BANK_CARD"
             wechat && (context == "wechat" || value.contains("微信零钱")) -> "WECHAT_BALANCE"
@@ -114,7 +120,7 @@ object PaymentMethodParser {
             else -> context
         }
         return PaymentMethodEvidence(medium, role, banks.singleOrNull(), tails.singleOrNull(), explicitPlatform,
-            label.take(80), raw.take(240), ambiguous, when {
+            label.take(80), raw.take(160), ambiguous, when {
                 ambiguous -> "MULTIPLE_PAYMENT_METHODS"
                 medium == "UNSUPPORTED" -> "UNSUPPORTED_PAYMENT_METHOD"
                 medium == "UNKNOWN" -> "INSUFFICIENT_PAYMENT_METHOD"

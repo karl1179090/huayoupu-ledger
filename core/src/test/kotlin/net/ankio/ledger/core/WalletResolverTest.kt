@@ -12,23 +12,37 @@ class WalletResolverTest {
                         existing: WalletResolution? = null, defaults: String? = "cash") =
         WalletResolver.resolve(accounts, "payment_auto:${PaymentApps.WECHAT}", e, defaults, existing = existing)
 
-    @Test fun matchingCardPrecedesAppThenDefaultThenReview() {
+    @Test fun matchingCardPrecedesFallbackAndUnmatchedBankEvidenceStaysUnassigned() {
         assertEquals("card", resolve(listOf(wechat, bank, cash)).accountUid)
         assertEquals("PAYMENT_METHOD", resolve(listOf(wechat, bank, cash)).selectionSource)
-        assertEquals("wechat", resolve(listOf(wechat, cash)).accountUid)
-        assertEquals("cash", resolve(listOf(cash)).accountUid)
-        assertEquals("WALLET_REQUIRED", resolve(emptyList()).reviewCode)
+        assertNull(resolve(listOf(wechat, cash)).accountUid)
+        assertNull(resolve(listOf(cash)).accountUid)
+        assertEquals("PAYMENT_METHOD_UNMATCHED", resolve(emptyList()).reviewCode)
     }
 
     @Test fun bankAndTailMustBothMatchAndAmbiguityNeverPicksAnArbitraryCard() {
         val wrong = bank.copy(cardLast4 = "1234")
-        assertEquals("wechat", resolve(listOf(wechat, wrong)).accountUid)
+        assertNull(resolve(listOf(wechat, wrong)).accountUid)
         assertEquals("card", resolve(listOf(bank), evidence.copy(cardLast4 = null)).accountUid)
         assertNull(resolve(listOf(bank, bank.copy(uid = "second")), evidence.copy(cardLast4 = null)).accountUid)
         assertEquals("card", resolve(listOf(bank), evidence.copy(bankCode = null)).accountUid)
-        assertEquals("wechat", resolve(listOf(wechat, bank), evidence.copy(ambiguous = true)).accountUid)
-        assertEquals("wechat", resolve(listOf(wechat, bank.copy(type = "LIABILITY"))).accountUid)
-        assertEquals("wechat", resolve(listOf(wechat, bank.copy(archived = true))).accountUid)
+        assertNull(resolve(listOf(wechat, bank), evidence.copy(ambiguous = true)).accountUid)
+        assertNull(resolve(listOf(wechat, bank.copy(type = "LIABILITY"))).accountUid)
+        assertNull(resolve(listOf(wechat, bank.copy(archived = true))).accountUid)
+    }
+
+    @Test fun incomingUnmatchedBankEvidenceCannotPreserveAnUnconfirmedAppFallback() {
+        val fallback = resolve(listOf(wechat, cash), e = null)
+        val unresolved = WalletResolver.resolve(listOf(wechat, cash, bank.copy(cardLast4="1234")), PaymentApps.WECHAT, evidence, "cash",
+            existing=fallback, requireActualBank=true)
+        assertNull(unresolved.accountUid)
+        assertEquals("PAYMENT_METHOD_UNMATCHED", unresolved.reviewCode)
+    }
+
+    @Test fun ordinaryPaymentSupplementPreservesAnEstablishedWalletWhenNewCardCannotBeVerified() {
+        val fallback = resolve(listOf(wechat, cash), e = null)
+        val preserved = resolve(listOf(wechat, cash, bank.copy(cardLast4="1234")), existing=fallback)
+        assertEquals(fallback, preserved)
     }
 
     @Test fun bindingsAreAppFallbacksUnlessTheyHaveTheRequestedPlatformKind() {
@@ -53,7 +67,7 @@ class WalletResolverTest {
     }
 
     @Test fun fallbackCanUpgradeOnceButSettingsAndConflictingNewCardsDoNotMoveItAgain() {
-        val fallback = resolve(listOf(wechat, cash))
+        val fallback = resolve(listOf(wechat, cash), e = null)
         assertEquals(fallback, resolve(listOf(wechat, bank, cash), null, fallback, "card"))
         val upgraded = resolve(listOf(wechat, bank, cash), existing = fallback)
         assertEquals("card", upgraded.accountUid)

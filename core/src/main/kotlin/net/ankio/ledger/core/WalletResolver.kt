@@ -23,7 +23,7 @@ object WalletResolver {
     fun resolve(candidates: List<WalletCandidate>, sourcePackage: String? = null,
                 evidence: PaymentMethodEvidence? = null, defaultAccountUid: String? = null,
                 appBindings: Map<String, String> = emptyMap(), manualAccountUid: String? = null,
-                existing: WalletResolution? = null): WalletResolution {
+                existing: WalletResolution? = null, requireActualBank: Boolean = false): WalletResolution {
         val usable = candidates.filter { it.type == "ASSET" && !it.archived }
         val fingerprint = evidence?.let(::fingerprint)
         if (manualAccountUid != null) {
@@ -47,20 +47,34 @@ object WalletResolver {
             val bound = targetPackage?.let(appBindings::get)
             return matching.singleOrNull { it.uid == bound } ?: matching.singleOrNull()
         }
-        val strong = if (evidence == null || evidence.ambiguous) null else when (evidence.medium) {
-            "BANK_CARD" -> usable.filter { candidate ->
+        val bankMatches = if(evidence?.medium=="BANK_CARD") usable.filter { candidate ->
                 val bank = BankCodes.normalize(candidate.bankCode) ?: BankCodes.normalize(candidate.kind)
                 val card = candidate.kind == "bank" || candidate.kind.startsWith("bank_") || bank != null
                 card && (evidence.bankCode == null || BankCodes.normalize(evidence.bankCode)?.let { it == bank } == true) &&
                     (evidence.cardLast4 == null || candidate.cardLast4 == evidence.cardLast4) &&
                     (evidence.bankCode != null || evidence.cardLast4 != null)
-            }.singleOrNull()
+            } else emptyList()
+        val strong = if (evidence == null || evidence.ambiguous) null else when (evidence.medium) {
+            "BANK_CARD" -> bankMatches.singleOrNull()
             "WECHAT_BALANCE" -> platformWallet("wechat")
             "ALIPAY_BALANCE" -> platformWallet("alipay")
             else -> null
         }
+        val fallbackReason = when {
+            evidence?.ambiguous == true || bankMatches.size > 1 -> "PAYMENT_METHOD_AMBIGUOUS"
+            evidence?.medium == "UNSUPPORTED" -> "PAYMENT_METHOD_UNSUPPORTED"
+            evidence != null && evidence.medium != "UNKNOWN" -> "PAYMENT_METHOD_UNMATCHED"
+            else -> null
+        }
+        if (requireActualBank && existing?.accountUid != null && existing.selectionSource in setOf("APP", "DEFAULT") && strong == null &&
+            (evidence?.medium == "BANK_CARD" || evidence?.bankCode != null || evidence?.cardLast4 != null))
+            return WalletResolution(null, "PAYMENT_METHOD", fallbackReason ?: "PAYMENT_METHOD_UNMATCHED", fingerprint)
         if (existing?.accountUid != null) {
             if (existing.selectionSource == "PAYMENT_METHOD") {
+                if (requireActualBank && evidence != null && (evidence.medium == "BANK_CARD" || evidence.bankCode != null || evidence.cardLast4 != null) &&
+                    (strong == null || strong.uid != existing.accountUid))
+                    return existing.copy(accountUid=null, evidenceFingerprint=fingerprint, reviewCode=if(strong!=null)"PAYMENT_EVIDENCE_CONFLICT"
+                        else fallbackReason ?: "PAYMENT_METHOD_UNMATCHED")
                 return if (strong != null && strong.uid != existing.accountUid)
                     existing.copy(reviewCode = "PAYMENT_EVIDENCE_CONFLICT")
                 else if (strong != null) existing.copy(evidenceFingerprint = fingerprint) else existing
@@ -69,12 +83,9 @@ object WalletResolver {
             if (strong == null || existing.selectionSource !in setOf("APP", "DEFAULT")) return existing
         }
         if (strong != null) return WalletResolution(strong.uid, "PAYMENT_METHOD", evidenceFingerprint = fingerprint)
-        val fallbackReason = when {
-            evidence?.ambiguous == true -> "PAYMENT_METHOD_AMBIGUOUS"
-            evidence?.medium == "UNSUPPORTED" -> "PAYMENT_METHOD_UNSUPPORTED"
-            evidence != null && evidence.medium != "UNKNOWN" -> "PAYMENT_METHOD_UNMATCHED"
-            else -> null
-        }
+        // Actual bank evidence cannot be replaced by the app hosting the receipt.
+        if (evidence?.medium == "BANK_CARD" || evidence?.bankCode != null || evidence?.cardLast4 != null)
+            return WalletResolution(null, "PAYMENT_METHOD", fallbackReason ?: "PAYMENT_METHOD_UNMATCHED", fingerprint)
         val binding = (packageName ?: platformPackage)?.let(appBindings::get)
         val appWallet = usable.singleOrNull { it.uid == binding } ?: if (platform != null) platformWallet(platform) else null
         if (appWallet != null) return WalletResolution(appWallet.uid, "APP", fallbackReason, fingerprint)
@@ -84,7 +95,7 @@ object WalletResolver {
 
     /** Historical source prefixes are allowed; arbitrary OCR text never becomes a source package. */
     fun sourcePackage(origin: String): String? {
-        val value = origin.trim().removePrefix("shake:").removePrefix("payment_auto:")
+        val value = origin.trim().removePrefix("shake:").removePrefix("payment_auto:").removePrefix("shortcut:")
         return value.takeIf { Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+").matches(it) }
     }
 
