@@ -492,6 +492,104 @@ async function runTests() {
     await page.screenshot({ path: path.join(screenshotDir, 'after-09-320px-large-text.png') });
     console.log('✓ after-09-320px-large-text.png captured');
 
+    // =========================================================================
+    // 12. Cross-timezone DATE boundary test: frozen Shanghai, current New_York
+    // =========================================================================
+    console.log('[t04] Running cross-timezone test in America/New_York context...');
+    const nyPage = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      reducedMotion: 'reduce',
+      timezoneId: 'America/New_York'
+    });
+
+    try {
+      await nyPage.route('https://**', r => r.abort());
+      await nyPage.clock.install({ time: new Date('2026-11-06T12:30:00+08:00') });
+      await installSyntheticBridge(nyPage);
+
+      await nyPage.goto(pathToFileURL(path.resolve('app/src/main/assets/web/index.html')).href);
+      await nyPage.evaluate(() => document.fonts.ready);
+
+      // (1) 显示日: In New York, unedited DATE record 202 must display 2026/11/05, not 11-04
+      const listTimeNy = await nyPage.locator('[data-record="202"] .record-time').textContent();
+      assert.equal(listTimeNy.trim(), '仅日期', 'Record 202 in New York shows 仅日期, not time or 00:00');
+
+      await nyPage.locator('[data-record="202"]').click();
+      await nyPage.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+
+      const nyDateLabel = await nyPage.locator('#time-label').textContent();
+      assert.equal(nyDateLabel.trim(), '2026/11/05', 'Record 202 detail in New York shows 2026/11/05, never 2026/11/04');
+      assert.equal(await nyPage.locator('#time-basis').textContent(), '凭证日期（仅日期）');
+      assert.equal(await nyPage.locator('#time-label').getAttribute('title'), '修改交易日期：2026/11/05');
+      assert.equal(await nyPage.locator('#time-label').getAttribute('aria-label'), '修改交易日期：2026/11/05');
+
+      await nyPage.screenshot({ path: path.join(screenshotDir, 'after-10-newyork-dateonly-detail.png') });
+      console.log('✓ after-10-newyork-dateonly-detail.png captured');
+
+      // (2) 打开取消: Initial picker value must be 2026-11-05T00:00, cancel leaves everything untouched
+      await nyPage.locator('#time-label').click();
+      const pickerValNy = await nyPage.locator('#time-picker').inputValue();
+      assert.equal(pickerValNy, '2026-11-05T00:00', 'Picker initial value in New York uses trusted localDate 2026-11-05T00:00');
+
+      await nyPage.locator('#sheet .sheet-actions button:has-text("取消")').click();
+      assert.equal((await nyPage.locator('#time-label').textContent()).trim(), '2026/11/05');
+      assert.equal((await nyPage.locator('#time-basis').textContent()).trim(), '凭证日期（仅日期）');
+      assert.equal(await nyPage.evaluate(() => draft._timeEdited), false, 'Cancel preserves _timeEdited: false');
+
+      // (3) 原值确认: Open dialog, confirm WITHOUT changing value, timeEdited remains false and exact timestamp preserved
+      await nyPage.locator('#time-label').click();
+      assert.equal(await nyPage.locator('#time-picker').inputValue(), '2026-11-05T00:00');
+      await nyPage.locator('#time-apply').click();
+
+      assert.equal((await nyPage.locator('#time-label').textContent()).trim(), '2026/11/05');
+      assert.equal((await nyPage.locator('#time-basis').textContent()).trim(), '凭证日期（仅日期）');
+
+      await nyPage.locator('#import-form .primary').click();
+      await nyPage.waitForFunction(() => !document.querySelector('#record-panel').classList.contains('active'));
+
+      const lastSavedNyConfirm = await nyPage.evaluate(() => window.savedCalls[window.savedCalls.length - 1]);
+      assert.equal(lastSavedNyConfirm.id, 202);
+      assert.equal(lastSavedNyConfirm.timeEdited, false, 'Unchanged DATE confirm in New York sends timeEdited: false');
+      assert.equal(lastSavedNyConfirm.occurredAt, new Date('2026-11-05T00:00:00.000+08:00').getTime(), 'Exact Shanghai millisecond preserved');
+      const recNy202 = await nyPage.evaluate(() => window.fixtureRecords.find(r => r.id === 202));
+      assert.equal(recNy202.receipt.time.source, 'EXPLICIT', 'Source remains EXPLICIT');
+      assert.equal(recNy202.receipt.time.precision, 'DATE', 'Precision remains DATE');
+
+      // (4) 实际改日: Change date to 2026-11-07T00:00, timeEdited becomes true, source becomes MANUAL
+      await nyPage.locator('[data-record="202"]').click();
+      await nyPage.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+
+      await nyPage.locator('#time-label').click();
+      await nyPage.locator('#time-picker').fill('2026-11-07T00:00');
+      await nyPage.locator('#time-apply').click();
+
+      assert.equal((await nyPage.locator('#time-label').textContent()).trim(), '2026/11/07 00:00');
+      assert.equal((await nyPage.locator('#time-basis').textContent()).trim(), '人工修改记账时间');
+
+      await nyPage.locator('#import-form .primary').click();
+      await nyPage.waitForFunction(() => !document.querySelector('#record-panel').classList.contains('active'));
+
+      const lastSavedNyEdit = await nyPage.evaluate(() => window.savedCalls[window.savedCalls.length - 1]);
+      assert.equal(lastSavedNyEdit.id, 202);
+      assert.equal(lastSavedNyEdit.timeEdited, true, 'Actual date change in New York sends timeEdited: true');
+      const expectedNyTimestamp = await nyPage.evaluate(() => new Date('2026-11-07T00:00:00').getTime());
+      assert.equal(lastSavedNyEdit.occurredAt, expectedNyTimestamp);
+
+      // Reopen in New York and verify MANUAL status
+      await nyPage.locator('[data-record="202"]').click();
+      await nyPage.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+      assert.equal((await nyPage.locator('#time-label').textContent()).trim(), '2026/11/07 00:00');
+      assert.equal((await nyPage.locator('#time-basis').textContent()).trim(), '人工修改记账时间');
+      await nyPage.screenshot({ path: path.join(screenshotDir, 'after-11-newyork-date-edited.png') });
+      console.log('✓ after-11-newyork-date-edited.png captured');
+      await nyPage.evaluate(() => cancelEditor(true));
+
+      console.log('✓ Cross-timezone America/New_York tests passed!');
+    } finally {
+      await nyPage.close();
+    }
+
     console.log('ALL TRANSACTION TIME TESTS PASSED!');
   } finally {
     await browser.close();

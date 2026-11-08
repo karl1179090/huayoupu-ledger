@@ -77,7 +77,19 @@ const signedMoney=(cents,income=false)=>`¥ ${income?'+':'-'}${money(cents)}`;
 function escapeText(value){const e=document.createElement('span');e.textContent=value??'';return e.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function localTime(time){const d=new Date(time),pad=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
 function localMonth(time){const d=new Date(time),value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;return value.length<7?localTime(time).slice(0,7):value.slice(0,7)}
-function monthRecords(){return records.filter(r=>r.state==='POSTED'&&localMonth(r.occurredAt)===month)}
+function recordMonth(r){
+ if(r?.receipt?.time?.precision==='DATE'&&r.receipt.time.localDate){
+  return r.receipt.time.localDate.slice(0,7);
+ }
+ return localMonth(r?.occurredAt);
+}
+function itemDateKey(item){
+ if(item.record?.receipt?.time?.precision==='DATE'&&item.record.receipt.time.localDate){
+  return item.record.receipt.time.localDate;
+ }
+ return localTime(item.time).slice(0,10);
+}
+function monthRecords(){return records.filter(r=>r.state==='POSTED'&&recordMonth(r)===month)}
 function sums(list){return list.reduce((a,r)=>{if(r.direction==='INCOME')a.income+=cents(r.amountCents);else a.expense+=expenseOf(r);return a},{income:0n,expense:0n})}
 function notify(text){const t=document.querySelector('.toast');t.textContent=text;t.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>t.classList.remove('show'),2600)}
 function showUndo(deletion){let bar=$('delete-undo');clearTimeout(undoTimer);if(!deletion||deletion.expiresAt<=Date.now()){bar?.remove();return}if(!bar){bar=document.createElement('div');bar.id='delete-undo';bar.className='delete-undo';bar.setAttribute('role','status');document.body.append(bar)}bar.innerHTML='<span>已删除</span><button type="button">撤销</button>';bar.querySelector('button').onclick=()=>{try{const result=JSON.parse(native.mutateRecord?native.mutateRecord(JSON.stringify({action:'UNDO',id:deletion.id,submissionToken:deletion.undoToken||(deletion.undoToken=submissionToken()),...(deletion.expectedRevision!=null?{expectedRevision:deletion.expectedRevision}:{})})):native.undoDelete(deletion.id));if(!result.ok){notify(result.error||'撤销时间已过');bar.remove();return}bar.remove();viewKey='';refresh();if(page==='stats')drawStats();notify('已恢复账单')}catch(_){notify('恢复失败，请重试')}};undoTimer=setTimeout(()=>bar.remove(),deletion.expiresAt-Date.now())}
@@ -106,22 +118,23 @@ function render(){
  $('home-count').textContent=`共 ${total[selected+'Count']??list.filter(r=>r.direction===direction).length} 笔${selected==='income'?'收入':'消费'}`;
  document.querySelector('.totals').innerHTML=`<div>收入 ¥ ${money(total.income)}</div><div>支出 ¥ ${money(total.expense)}</div>`;
  drawChart(list,new Date(),ledgerView?.summary?.days);
- const previous=localMonth(new Date(Number(y),Number(m)-2,1).getTime()),before=ledgerView?.summary?.previous?.[selected]??sums(records.filter(r=>r.state==='POSTED'&&localMonth(r.occurredAt)===previous))[selected];
+ const previous=localMonth(new Date(Number(y),Number(m)-2,1).getTime()),before=ledgerView?.summary?.previous?.[selected]??sums(records.filter(r=>r.state==='POSTED'&&recordMonth(r)===previous))[selected];
  $('home-change').textContent=cents(before)>0n?`较上月 ${cents(total[selected])>=cents(before)?'↑':'↓'} ${percentDiff(total[selected],before)}%`:'本月每日趋势';
  const search=query.toLowerCase();
- const shown=records.filter(r=>(r.state==='POSTED'||r.state==='REVIEW')&&(query||localMonth(r.occurredAt)===month)
+ const shown=records.filter(r=>(r.state==='POSTED'||r.state==='REVIEW')&&(query||recordMonth(r)===month)
   &&(filter==='all'||r.direction===filterDirection()||filter==='expense'&&!r.direction)
   &&(!query||[r.merchant,transferName(r),resolveRecordCategory(r).name,r.category,r.note,r.transactionId,sourceNames[r.source]].some(v=>String(v||'').toLowerCase().includes(search))));
  const attempts=recognitionTasks.filter(t=>!t.recordId&&!['SKIPPED','DUPLICATE'].includes(t.status)&&localMonth(t.createdAt)===month&&(!query||[captureName(t),taskNames[t.status],t.message].some(v=>String(v||'').toLowerCase().includes(search))));
  const timeline=[...shown.map(record=>({record,time:record.occurredAt,id:record.id})),...attempts.map(task=>({task,time:task.createdAt,id:task.id}))].sort((a,b)=>b.time-a.time||b.id-a.id||Number(!!a.task)-Number(!!b.task));
- const groups=new Map();for(const item of timeline){const key=localTime(item.time).slice(0,10);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)}
+ const groups=new Map();for(const item of timeline){const key=itemDateKey(item);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)}
  const dailyTotals=new Map();if(!query&&ledgerView?.summary?.days)for(const row of ledgerView.summary.days)if(row.direction===direction)dailyTotals.set(row.day,(dailyTotals.get(row.day)||0n)+cents(row.amount));
  const today=localTime(Date.now()).slice(0,10),yesterday=localTime(Date.now()-86400000).slice(0,10);
  const timelineMarkup=[...groups].map(([key,items])=>{
-  const rows=items.filter(item=>item.record).map(item=>item.record),d=new Date(items[0].time);
+  const rows=items.filter(item=>item.record).map(item=>item.record);
+  const [itemYear,itemMonth,itemDay]=key.split('-').map(Number),d=new Date(itemYear,itemMonth-1,itemDay);
   const label=key===today?'今天':key===yesterday?'昨天':['星期日','星期一','星期二','星期三','星期四','星期五','星期六'][d.getDay()];
-  const pending=rows.filter(r=>r.state==='REVIEW').length,dayTotal=filter==='transfer'?sumValues(rows.filter(r=>r.state==='POSTED').map(expenseOf)):!query&&ledgerView?.summary?.days?(dailyTotals.get(d.getDate())||0):sums(rows.filter(r=>r.state==='POSTED'))[selected];
-  return `<div class="date-line day-header"><span>${d.getMonth()+1}月${d.getDate()}日　${label}</span><span>${pending?pending+' 笔待确认':rows.some(r=>r.state==='POSTED')?(filter==='transfer'?'手续费 ¥ ':'¥ ')+money(dayTotal):'识别记录'}</span></div><section class="card transactions">`+items.map(item=>{
+  const pending=rows.filter(r=>r.state==='REVIEW').length,dayTotal=filter==='transfer'?sumValues(rows.filter(r=>r.state==='POSTED').map(expenseOf)):!query&&ledgerView?.summary?.days?(dailyTotals.get(itemDay)||0):sums(rows.filter(r=>r.state==='POSTED'))[selected];
+  return `<div class="date-line day-header"><span>${itemMonth}月${itemDay}日　${label}</span><span>${pending?pending+' 笔待确认':rows.some(r=>r.state==='POSTED')?(filter==='transfer'?'手续费 ¥ ':'¥ ')+money(dayTotal):'识别记录'}</span></div><section class="card transactions">`+items.map(item=>{
    if(item.task)return recognitionRow(item.task);
    const r=item.record,catLabel=resolveRecordCategory(r).name||'其他';
    const pending=r.state==='REVIEW',income=r.direction==='INCOME',source=captureName(r)||'手动',aiSource=['OCR','IMAGE'].includes(r.source);
@@ -213,12 +226,13 @@ function drawSettings(){
 }
 function drawChart(list,now=new Date(),aggregated=null){
  const [year,mo]=month.split('-').map(Number),days=new Date(year,mo,0).getDate(),current=localMonth(now.getTime());
- const eligible=list.filter(r=>r.state==='POSTED'&&localMonth(r.occurredAt)===month&&r.amountCents!=null&&['INCOME','EXPENSE','TRANSFER'].includes(r.direction));
+ const eligible=list.filter(r=>r.state==='POSTED'&&recordMonth(r)===month&&r.amountCents!=null&&['INCOME','EXPENSE','TRANSFER'].includes(r.direction));
+ const recordDay=r=>(r.receipt?.time?.precision==='DATE'&&r.receipt?.time?.localDate)?Number(r.receipt.time.localDate.slice(8,10)):new Date(r.occurredAt).getDate();
  // Current months stop at today, except explicitly dated future records. Past months use the full month.
- const lastDay=month<current?days:Math.max(month===current?now.getDate():1,...(aggregated?aggregated.map(r=>r.day):eligible.map(r=>new Date(r.occurredAt).getDate())));
+ const lastDay=month<current?days:Math.max(month===current?now.getDate():1,...(aggregated?aggregated.map(r=>r.day):eligible.map(recordDay)));
  const mode=filter==='income'?'income':'expense',name=mode==='income'?'累计收入':'累计支出',values=Array(lastDay).fill(0n);
- if(aggregated)aggregated.filter(r=>r.direction===(mode==='income'?'INCOME':'EXPENSE')).forEach(r=>values[r.day-1]+=cents(r.amount));else eligible.filter(r=>mode==='income'?r.direction==='INCOME':r.direction!=='INCOME').forEach(r=>values[new Date(r.occurredAt).getDate()-1]+=mode==='income'?cents(r.amountCents):expenseOf(r));
- let sum=0n;const cumulative=[0n,...values.map(v=>sum+=v)];
+ if(aggregated)aggregated.filter(r=>r.direction===(mode==='income'?'INCOME':'EXPENSE')).forEach(r=>values[r.day-1]+=cents(r.amount));else eligible.filter(r=>mode==='income'?r.direction==='INCOME':r.direction!=='INCOME').forEach(r=>values[recordDay(r)-1]+=mode==='income'?cents(r.amountCents):expenseOf(r));
+ const sum=values.reduce((s,v)=>s+v,0n);const cumulative=[0n,...values.map((v,i)=>values.slice(0,i+1).reduce((s,x)=>s+x,0n))];
  // A simple sparkline: zero at the beginning, cumulative values with a little headroom.
  const max=Math.max(Number(sum),100)*1.08,y=v=>54-Number(v)/max*46,points=cumulative.map((v,i)=>[i*250/lastDay,y(v)]),zero=y(0);
  const path=points.map(([x,y],i)=>`${i?'L':'M'}${x.toFixed(2)} ${y.toFixed(2)}`).join(' '),svg=document.querySelector('.chart svg');
@@ -291,7 +305,7 @@ function readDraft(){
  else{occurredAt=new Date($('occurred-at').value).getTime()}
  return {merchant:$('merchant').value,category,...(direction!=='TRANSFER'&&categoryId?{categoryId}:{}),amount:$('amount').value,direction,occurredAt,timeEdited:!!draft?._timeEdited,note:$('note').value,...(draft?.manualWalletSelected?{walletAccountUid:draft.walletAccountUid,manualWalletSelected:true}:{}),...(direction==='TRANSFER'?{transfer:readTransfer('record')}:{})};
 }
-function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
+function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');const isDateOnly=Boolean(!draft._timeEdited&&draft.receipt?.time?.precision==='DATE');$('occurred-at').value=(isDateOnly&&draft.receipt?.time?.localDate)?`${draft.receipt.time.localDate}T00:00`:localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
  const posted=draft.state==='POSTED';
  const editor=$('import'),automatic=['SMS','NOTIFICATION'].includes(draft.source),aiRecord=['OCR','IMAGE'].includes(draft.source);
  editor.classList.toggle('standard-record',!!draft.id&&(automatic||draft.source==='MANUAL'));editor.classList.toggle('ai-record',aiRecord);editor.classList.toggle('posted-record',posted);
@@ -373,9 +387,10 @@ function viewHistory(sequence){
 function chooseRefundTarget(){if(!native||!draft?.id)return;try{const result=JSON.parse(native.refundCandidates(draft.id));if(!result.ok){notify(result.error||'无法读取原账单');return}showSheet('选择退款对应的原账单',`<p class="sheet-copy">核对商户、原付款金额和时间，确认后将更新原账单，并保留两次识别截图。</p>${result.candidates.map(r=>`<button type="button" class="sheet-row" data-refund-target="${r.id}"><span>${escapeText(r.merchant)}<br><small>${localTime(r.occurredAt).replace('T',' ')} · 原付 ¥${money(r.originalAmountCents)}</small></span><span>选择 ›</span></button>`).join('')||'<p class="sheet-copy">没有找到可关联的原账单。请先记录原付款，或核对支付平台和原付款金额后重新识别。</p>'}`);document.querySelectorAll('[data-refund-target]').forEach(button=>button.onclick=()=>confirmRefundTarget(Number(button.dataset.refundTarget)))}catch(_){notify('读取失败，请稍后重试')}}
 function confirmRefundTarget(targetId){const target=records.find(r=>r.id===targetId);if(!(draft?.refund||draft?.standaloneRefund)||!target)return;const pendingId=draft.id;const refund=draft.refund||{...draft.standaloneRefund,originalAmountCents:target.refund?.originalAmountCents||target.amountCents,mode:'single'};showSheet('确认更新原账单？',`<p class="sheet-copy">${escapeText(target.merchant)} · ${localTime(target.occurredAt).replace('T',' ')}<br>原付 ¥${money(refund.originalAmountCents)}，${refund.mode==='single'?'本次':'累计'}成功退款 ¥${money(refund.refundedCents)}。将按原账单已记录的退款核算实付金额，重复退款不会再次扣减，原分类和备注继续保留。</p><div class="sheet-actions"><button type="button" id="refund-back">返回选择</button><button type="button" id="confirm-refund" class="primary">确认更新原账单</button></div>`);$('refund-back').onclick=chooseRefundTarget;$('confirm-refund').onclick=()=>{try{const result=JSON.parse(native.confirmRefund(pendingId,targetId));if(!result.ok){notify(result.error||'退款更新失败，请重新核对');return}closeSheet();refresh();const updated=records.find(r=>r.id===result.id);if(updated){applyRecord(updated);remember()}notify(result.updated?'退款已更新，原账单截图已保留':'该退款已记录，无需重复扣减')}catch(_){notify('退款更新失败，请重试')}}}
 function updateTimeChip(){
- const val=$('occurred-at').value||'';
  const isDateOnly=Boolean(!draft?._timeEdited&&draft?.receipt?.time?.precision==='DATE');
- const formatted=isDateOnly?val.slice(0,10).replace(/-/g,'/'):val.replace('T',' ').replace(/-/g,'/');
+ const trustedDate=isDateOnly&&draft?.receipt?.time?.localDate?draft.receipt.time.localDate.replace(/-/g,'/'):null;
+ const val=$('occurred-at').value||'';
+ const formatted=trustedDate||(isDateOnly?val.slice(0,10).replace(/-/g,'/'):val.replace('T',' ').replace(/-/g,'/'));
  $('time-label').textContent=formatted;
  $('time-label').title=(isDateOnly?'修改交易日期：':'修改交易时间：')+formatted;
  $('time-label').setAttribute('aria-label',(isDateOnly?'修改交易日期：':'修改交易时间：')+formatted);
@@ -390,7 +405,7 @@ function openRecord(id,keepPreview=false,anchor=null){
  let r=records.find(x=>x.id===id);
  if(!r&&native?.recordDetails){try{const detail=JSON.parse(native.recordDetails(id));if(detail.ok)r={...detail.record,rawText:detail.rawText,history:detail.history,_detailsLoaded:true}}catch(_){}}
  if(!r){notify('账单已不存在');return}
- const targetMonth=localMonth(r.occurredAt),targetFilter=r.direction==='TRANSFER'?'transfer':r.direction==='INCOME'?'income':'expense';
+ const targetMonth=recordMonth(r),targetFilter=r.direction==='TRANSFER'?'transfer':r.direction==='INCOME'?'income':'expense';
  if(month!==targetMonth||filter!==targetFilter){month=targetMonth;filter=targetFilter;viewLimit=200;viewKey='';refresh()}
  if(page!=='ledger'&&page!=='stats')go('ledger');
  recordReturnControl=control||document.activeElement;applyRecord(records.find(x=>x.id===id)||r,keepPreview);showRecordPanel(origin);remember();
@@ -455,12 +470,14 @@ $('category').onclick=()=>{
 };
 $('direction').onclick=()=>{if(draft?.refund||draft?.standaloneRefund){notify('含退款历史的消费不能直接改为转账');return}$('category').click()};
 $('time-label').onclick=()=>{
- showSheet('修改交易时间',`<input id="time-picker" class="month-input" type="datetime-local" value="${$('occurred-at').value}"/><div class="sheet-actions"><button onclick="closeSheet()">取消</button><button class="primary" id="time-apply">确定</button></div>`);
+ const isDateOnly=Boolean(!draft?._timeEdited&&draft?.receipt?.time?.precision==='DATE');
+ const origPickerVal=(draft?.receipt?.time?.precision==='DATE'&&draft?.receipt?.time?.localDate)?`${draft.receipt.time.localDate}T00:00`:(draft?._originalOccurredAt!=null?localTime(draft._originalOccurredAt):'');
+ const currentVal=$('occurred-at').value||origPickerVal;
+ showSheet(isDateOnly?'修改交易日期':'修改交易时间',`<input id="time-picker" class="month-input" type="datetime-local" value="${currentVal}"/><div class="sheet-actions"><button onclick="closeSheet()">取消</button><button class="primary" id="time-apply">确定</button></div>`);
  $('time-apply').onclick=()=>{
   const value=$('time-picker').value;
   if(value){
-   const origLocal=draft?._originalOccurredAt!=null?localTime(draft._originalOccurredAt):'';
-   if(origLocal&&value===origLocal){
+   if(origPickerVal&&value===origPickerVal){
     if(draft){draft._timeEdited=false;draft.occurredAt=draft._originalOccurredAt}
    }else{
     if(draft){draft._timeEdited=true;draft.occurredAt=new Date(value).getTime()}
