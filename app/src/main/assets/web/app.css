@@ -86,6 +86,7 @@ html,body{height:100%;overscroll-behavior:none}body.native-app{background:var(--
 .record-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 14px 12px}.compact-record .record-chips{padding:0 0 12px}
 .record-chips button{display:block;min-width:48px;max-width:100%;min-height:44px;border-radius:13px;padding:10px 12px;font-size:12px;line-height:1.4;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#e7f3ee;color:#286c59}
 .record-chips #time-label{background:#edf0f4;color:#596878;font-size:12px}
+.record-chips .time-basis{display:inline-flex;align-items:center;max-width:100%;min-height:30px;border-radius:11px;padding:5px 10px;font-size:11px;line-height:1.4;background:#f2f5f8;color:#596878;overflow-wrap:anywhere;word-break:break-word;white-space:normal}
 .confirm-card .note-row{border-top:1px solid #e8edf0;min-height:55px}.confirm-card .note-field input{text-align:left;font-size:14px}
 .compact-record .editor-tools,.editor-tools{display:flex;flex-direction:column;gap:6px;margin:12px 0 0}
 .editor-tools #delete-record{display:block;width:100%;min-height:48px;border:1px solid #efdae0;border-radius:16px;background:#fff9fa;color:#b54454;font-size:14px;font-weight:500;padding:12px}
@@ -97,7 +98,7 @@ html,body{height:100%;overscroll-behavior:none}body.native-app{background:var(--
 .category-detail-row>.category-icon{width:36px;height:36px;flex-basis:36px;font-size:18px}.category-detail-row>span:nth-child(2){flex:1;min-width:0}
 .category-detail-row b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.category-detail-row small{display:block;font-size:11px;color:#69788a;margin-top:6px}
 .category-detail-row strong{font-size:14px;font-weight:500;white-space:nowrap;flex:none}
-.large-text .record-chips button{font-size:14px}.large-text .record-identity .merchant-row input{font-size:22px!important}
+.large-text .record-chips button{font-size:14px}.large-text .record-chips .time-basis{font-size:12px}.large-text .record-identity .merchant-row input{font-size:22px!important}
 .no-flex-gap .record-chips>*{margin:0 6px 6px 0}.no-flex-gap .record-identity>*+*,.no-flex-gap .category-detail-row>*+*{margin-left:12px}
 @media(max-width:360px){.compact-record.screen-import{padding-left:14px;padding-right:14px}.confirm-card .amount-field input{font-size:32px!important}.category-detail-row{gap:8px}}
 @media(prefers-reduced-motion:reduce){.swipe-row>.entry{transition:none}}

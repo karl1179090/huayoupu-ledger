@@ -252,7 +252,7 @@ class LocalRecognitionClientTest {
         assertTrue("${bill.reason}; ${result.rawText}",bill.reliable)
         assertEquals(2690L,bill.amountCents)
         assertEquals("知余咖啡店",bill.merchant)
-        assertEquals(LocalDateTime.of(2026,10,17,13,11,55).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),bill.occurredAt)
+        assertEquals(result.rawText,LocalDateTime.of(2026,10,17,13,11,55).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli(),bill.occurredAt)
     }
     @Test fun defaultLocalPipelinePostsWithoutConfiguredKeyOrAnyTransportCall() = runBlocking {
         val app = ApplicationProvider.getApplicationContext<LedgerApp>()

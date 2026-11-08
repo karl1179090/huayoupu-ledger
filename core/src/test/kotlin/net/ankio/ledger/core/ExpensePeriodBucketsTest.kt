@@ -147,4 +147,21 @@ class ExpensePeriodBucketsTest {
         try { ExpensePeriodBuckets.sum(range, crossBucket); fail("Expected total overflow") }
         catch (error: IllegalArgumentException) { assertEquals("STATISTICS_OVERFLOW", error.message) }
     }
+    @Test fun midnightRollbackKeepsBothPartsOfTheRepeatedDateInItsCalendarBucket() {
+        for(case in listOf(
+            listOf("Antarctica/Casey","2010-03-05T04:00:00Z","2010-03-04T14:30:00Z","2010-03-04T15:30:00Z","4","3"),
+            listOf("America/St_Johns","2009-11-01T12:00:00Z","2009-11-01T02:30:30Z","2009-11-01T03:00:00Z","6","5")
+        )) {
+            val range=ExpensePeriodBuckets.create(ExpensePeriod.WEEK,Instant.parse(case[1]),ZoneId.of(case[0]))
+            val first=Instant.parse(case[2]).toEpochMilli();val second=Instant.parse(case[3]).toEpochMilli()
+            val firstIndex=case[4].toInt();val secondIndex=case[5].toInt()
+            assertEquals(firstIndex,range.bucketIndex(first));assertEquals(secondIndex,range.bucketIndex(second))
+            assertEquals(firstIndex,range.buckets.indexOfFirst { it.contains(first) })
+            assertEquals(secondIndex,range.buckets.indexOfFirst { it.contains(second) })
+            val total=ExpensePeriodBuckets.sum(range,listOf(ExpenseContribution(first,100),ExpenseContribution(second,200)))
+            assertEquals(100L,total.amounts[firstIndex]);assertEquals(200L,total.amounts[secondIndex])
+            assertEquals(300L,total.totalCents)
+        }
+    }
+
 }
