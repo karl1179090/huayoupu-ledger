@@ -73,7 +73,7 @@ object WalletResolver {
             if (existing.selectionSource == "PAYMENT_METHOD") {
                 if (requireActualBank && evidence != null && (evidence.medium == "BANK_CARD" || evidence.bankCode != null || evidence.cardLast4 != null) &&
                     (strong == null || strong.uid != existing.accountUid))
-                    return existing.copy(accountUid=null, reviewCode=if(strong!=null)"PAYMENT_EVIDENCE_CONFLICT"
+                    return existing.copy(accountUid=null, evidenceFingerprint=fingerprint, reviewCode=if(strong!=null)"PAYMENT_EVIDENCE_CONFLICT"
                         else fallbackReason ?: "PAYMENT_METHOD_UNMATCHED")
                 return if (strong != null && strong.uid != existing.accountUid)
                     existing.copy(reviewCode = "PAYMENT_EVIDENCE_CONFLICT")

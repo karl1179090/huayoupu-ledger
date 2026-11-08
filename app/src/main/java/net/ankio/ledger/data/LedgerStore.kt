@@ -395,7 +395,12 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val settings=WalletAccounting.settings(db)
             if(manualSelected && manualAccountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
             val bank=record.bill.receipt?.bank
-            val accountEvidence=if(bank==null)incomingEvidence else
+            val actualBankConflict=bank!=null && incomingEvidence?.medium in setOf("WECHAT_BALANCE","ALIPAY_BALANCE","UNSUPPORTED") &&
+                !manualSelected && previous?.manualLocked!=true
+            val accountEvidence=if(actualBankConflict)PaymentMethodEvidence("BANK_CARD",incomingEvidence!!.role,
+                bank?.bankCode,bank?.cardLast4,rawLabel=(record.bill.paymentMethod?.rawLabel.orEmpty()+" / "+incomingEvidence.rawLabel).take(80),
+                rawValue=(record.bill.paymentMethod?.rawValue.orEmpty()+" / "+incomingEvidence.rawValue).take(160),ambiguous=true)
+            else if(bank==null)incomingEvidence else
                 incomingEvidence?.takeIf { it.medium=="BANK_CARD" } ?: record.bill.paymentMethod?.takeIf { it.medium=="BANK_CARD" }
                 ?: PaymentMethodEvidence("BANK_CARD",when(bank.direction) { Direction.EXPENSE->"DEBIT";Direction.INCOME->"CREDIT";else->"UNKNOWN" },
                     bank.bankCode,bank.cardLast4,ambiguous=bank.ambiguous)

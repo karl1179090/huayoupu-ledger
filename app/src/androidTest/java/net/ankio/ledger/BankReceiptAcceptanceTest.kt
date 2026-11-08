@@ -232,6 +232,7 @@ class BankReceiptAcceptanceTest {
         pending("PAYMENT_METHOD_AMBIGUOUS","交易卡号：建设银行尾号0007")
         account("bank","0007")
         pending("PAYMENT_METHOD_AMBIGUOUS","交易卡号：尾号0007",issuer="合成银行")
+        pending("PAYMENT_METHOD_AMBIGUOUS","交易卡号：尾号0007","通过零钱扣款")
     }
 
     @Test fun bankAndTailMatchAcrossShakeShortcutAndImageWithoutChangingOtherWallets() = runBlocking {
@@ -240,7 +241,7 @@ class BankReceiptAcceptanceTest {
         app.store.setDefaultWallet(cash.uid)
         val before=balances()
         listOf("shake:com.tencent.mm","shortcut:com.tencent.mm","image").forEachIndexed { index,origin ->
-            val saved=(recognize("交易类型：网上快捷支付","交易卡号：尾号0007","付款方式：优先使用零钱",origin=origin) as IngestResult.Saved).record
+            val saved=(recognize("交易类型：网上快捷支付","交易卡号：尾号0007","付款方式：优先使用零钱","收款账户：工商银行(1234)",origin=origin) as IngestResult.Saved).record
             assertEquals(RecordState.POSTED,saved.state)
             assertEquals(card.uid,saved.wallet!!.accountUid)
             assertEquals(mapOf(card.uid to -1200L),saved.walletEffects)
@@ -345,12 +346,30 @@ class BankReceiptAcceptanceTest {
         } } finally { app.deleteDatabase(name) }
     }
 
+    @Test fun actualBalanceSupplementConflictingWithBankEvidenceRequiresReviewButRespectsManualLock() = runBlocking {
+        app.taskRecovery.await()
+        val card=account("bank","0007");val balance=account("wechat");val cash=account("cash");app.store.setDefaultWallet(cash.uid)
+        val before=balances();val id="SYNTHETIC-ACTUAL-ACCOUNT-CONFLICT-${UUID.randomUUID()}"
+        val original=(recognize("交易类型：网上快捷支付","交易卡号：尾号0007",id=id) as IngestResult.Saved).record
+        assertEquals(mapOf(card.uid to -1200L),original.walletEffects)
+        recognize("付款方式：微信零钱",id=id,bankReceipt=false)
+        val pending=app.store.get(original.id)!!
+        assertEquals(RecordState.REVIEW,pending.state)
+        assertNull(pending.wallet!!.accountUid)
+        assertTrue(pending.walletEffects.isEmpty())
+        assertEquals(before,balances())
+        val confirmed=app.store.saveEdited(pending,balance.uid,true)
+        recognize("交易类型：网上快捷支付","交易卡号：尾号0007",id=id)
+        assertEquals(confirmed.walletEffects,app.store.get(original.id)!!.walletEffects)
+        assertEquals(before+(balance.uid to 8800L),balances())
+    }
+
     @Test fun explicitTailMismatchKeepsEveryBalanceUntouchedUntilOneManualConfirmation() = runBlocking {
         app.taskRecovery.await()
         val card = account("bank", "1234"); account("wechat"); val cash = account("cash")
         app.store.setDefaultWallet(cash.uid)
         val before = balances()
-        val saved = (recognize("交易类型：网上快捷支付", "交易卡号：尾号0007", "账户余额：988.00元") as IngestResult.Saved).record
+        val saved = (recognize("交易类型：网上快捷支付", "付款方式：招商银行(0007)", "支付方式：优先使用工商银行(1234)", "账户余额：988.00元") as IngestResult.Saved).record
         assertEquals(RecordState.REVIEW, saved.state)
         assertEquals("PAYMENT_METHOD_UNMATCHED", saved.wallet!!.reviewCode)
         assertNull(saved.wallet!!.accountUid)

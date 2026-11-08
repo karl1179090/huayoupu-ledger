@@ -8,7 +8,7 @@ object PaymentMethodParser {
     private val creditLabel = Regex("^(收款方式|收款账户|到账账户|到账方式|入账账户|入账方式)[：:]?")
     private val transferDebitLabel = Regex("^(转出账户|转出银行卡|转出方式|付款方式|支付方式|扣款账户|付款账户|充值方式|提现账户)[：:]?")
     private val transferCreditLabel = Regex("^(转入账户|转入银行卡|到账银行卡|收款银行卡|提现银行卡|到账储蓄卡|到账账户|收款账户|入账账户)[：:]?")
-    private val otherField = Regex("^(?:付款方|收款方|对方账户|对方账号|交易号|交易单号|订单号|订单编号|商户|商品|退款|支付时间|付款时间|交易时间|到账时间|金额|原付|累计|实付|优惠|电话)")
+    private val otherField = Regex("^(?:付款方|收款方|对方账户|对方账号|交易号|交易单号|订单号|订单编号|商户|商品|退款|支付时间|付款时间|交易时间|到账时间|金额|账户余额|可用余额|余额|原付|累计|实付|优惠|电话)")
     private val unsupported = Regex("零钱通|余额宝|花呗|白条|信用卡|信用支付|先用后付|亲属卡|亲情卡")
     private val combined = Regex("组合(?:支付|付款)?|多种(?:方式|渠道)|分笔付款|[+＋]|及|和")
     private val preference = Regex("优先|首选|默认|支付偏好")

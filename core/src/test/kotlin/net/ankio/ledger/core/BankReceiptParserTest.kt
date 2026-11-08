@@ -10,6 +10,28 @@ class BankReceiptParserTest {
         LocalOcrBillParser.parse((listOf("招商银行", "交易成功提醒") + fields).map(::LocalOcrLine),
             0, 0, now, policy=policy, origin="shake:com.tencent.mm")
 
+    @Test fun actualAccountFieldsDoNotDowngradeTailsOrMixPreferencesAndCounterparties() {
+        val explicit=parse("交易类型：网上快捷支付","交易金额：12.00元","付款方式：招商银行(9999)",
+            "支付方式：优先使用工商银行(1234)")!!
+        assertEquals("cmb",explicit.paymentMethod!!.bankCode)
+        assertEquals("9999",explicit.paymentMethod!!.cardLast4)
+        assertFalse(explicit.paymentMethod!!.ambiguous)
+        val noTail=parse("交易类型：网上快捷支付","交易金额：12.00元","付款方式","招商银行","账户余额：1234.56元")!!
+        assertNull(noTail.paymentMethod!!.cardLast4)
+        assertFalse(noTail.paymentMethod!!.ambiguous)
+        val counterparty=parse("交易类型：网上快捷支付","交易金额：12.00元","交易卡号：尾号0007",
+            "收款账户：工商银行(1234)")!!
+        assertEquals("cmb",counterparty.paymentMethod!!.bankCode)
+        assertEquals("0007",counterparty.paymentMethod!!.cardLast4)
+        assertFalse(counterparty.paymentMethod!!.ambiguous)
+        val acquirer=parse("交易类型：网上快捷支付","交易金额：12.00元","交易卡号：尾号0007","收单机构：工商银行")!!
+        assertEquals("cmb",acquirer.paymentMethod!!.bankCode)
+        assertFalse(acquirer.paymentMethod!!.ambiguous)
+        val conflicting=parse("交易类型：网上快捷支付","交易金额：12.00元","交易卡号：尾号0007","通过零钱扣款")!!
+        assertTrue(conflicting.paymentMethod!!.ambiguous)
+        assertFalse(conflicting.reliable)
+    }
+
     @Test fun unreadableCompetingTransactionAmountCannotBeDiscardedToPostTheOtherValue() {
         val bill=parse("交易类型：网上快捷支付","交易金额：12.00元","交易金额：无法读取","交易卡号：尾号0007")!!
         assertNull(bill.amountCents)
