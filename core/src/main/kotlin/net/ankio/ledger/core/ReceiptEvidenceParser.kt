@@ -2,6 +2,7 @@ package net.ankio.ledger.core
 
 /** Explicit business labels only. It never treats the whole page as order content. */
 internal object ReceiptEvidenceParser {
+    val merchantLabel = Regex("^(?:商[户戶](?:全称|名称|金称|各称)|商家名称|店铺名称|收款方(?:全称|名称)?(?!备注|服务)|付款方(?:全称|名称)?(?!备注|服务)|交易对方|对方账户|对方账号)[：:]?")
     private val product = Regex("^(?:商品说明|商品名称|商品)(?:[：:]\\s*|\\s+|$)")
     private val description = Regex("^(?:交易说明|交易用途)[：:]?")
     private val remark = Regex("^订单备注[：:]?")
@@ -49,7 +50,22 @@ internal object ReceiptEvidenceParser {
             return fields
         }
         fun field(label: Regex): ReceiptField? = fields(label).singleOrNull()
-        val merchantLine = scoped.firstOrNull { normalize(it.text).contains(merchant) && merchant.isNotBlank() }
+        fun merchantText(value: String) = normalize(value).trim().trim('|', '丨').filterNot(Char::isWhitespace)
+        val namedMerchant = merchantText(merchant)
+        val merchantSources = merchantLines(scoped).filter { it.text.length <= 2048 }
+        val directMerchant = merchantSources.firstOrNull {
+            merchantText(it.text).trimEnd('>', '〉') == namedMerchant && namedMerchant.isNotBlank()
+        }?.let { ReceiptField(merchant, it.text) }
+        val labeledMerchant = fields(merchantLabel).firstOrNull { merchantText(it.value) == namedMerchant }
+            ?.copy(value=merchant)
+        // The remaining supported names are explicitly named scan recipients or store prefixes.
+        // Never use arbitrary substring containment: another role may share a short merchant prefix.
+        val derivedMerchant = merchantSources.firstOrNull { line ->
+            val text = merchantText(line.text)
+            val recipient = text.replace(Regex("^(?:扫二维码付款|二维码付款|扫码付款)[-—:：]?给?|^转账给"), "")
+            namedMerchant.isNotBlank() && (recipient != text && recipient.startsWith(namedMerchant) ||
+                Regex("(?:旗舰店|专卖店|专营店|官方店)$").containsMatchIn(namedMerchant) && text.startsWith(namedMerchant))
+        }?.let { ReceiptField(merchant, it.text) }
         val sourcePackage = origin.substringAfterLast(':').takeIf {
             Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+").matches(it) && it.length <= 512
         }
@@ -60,7 +76,7 @@ internal object ReceiptEvidenceParser {
         }
         val services = (fields(service) + attributedServices).distinctBy { it.value }
         return ReceiptEvidence(
-            merchant = merchantLine?.takeIf { it.text.length <= 2048 }?.let { ReceiptField(merchant, it.text) },
+            merchant = directMerchant ?: labeledMerchant ?: derivedMerchant,
             productDescription = field(product), transactionDescription = field(description), orderRemark = field(remark),
             serviceProvider = services.singleOrNull(), receiptIssuer = field(issuer),
             sourceApp = sourcePackage?.takeIf { origin.length <= 2048 }?.let { ReceiptField(it, origin, "capture") },

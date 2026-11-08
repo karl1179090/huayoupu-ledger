@@ -6,6 +6,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocalOcrBillParserTest {
+    @Test fun shortMerchantEvidenceCannotBeHijackedByOtherBusinessFieldsWithTheSamePrefix() {
+        val lines = listOf(LocalOcrLine("支付成功"), LocalOcrLine("付款金额：12.00元"),
+            LocalOcrLine("服务商：合成支付"), LocalOcrLine("商品说明：合成早餐"),
+            LocalOcrLine("凭证来源：合成机构"), LocalOcrLine("商户名称：合成"))
+        for (input in listOf(lines, lines.reversed(), lines.shuffled(kotlin.random.Random(2)))) {
+            val result = LocalOcrBillParser.parse(input, 0, 0, now, origin="image")!!
+            assertEquals("合成", result.merchant)
+            val evidence = result.receipt!!.merchant!!
+            assertEquals("合成", evidence.value)
+            assertEquals("商户名称：合成", evidence.rawText)
+            assertEquals("合成支付", result.receipt.serviceProvider!!.value)
+            assertEquals("合成早餐", result.receipt.productDescription!!.value)
+        }
+    }
     @Test fun conflictingServiceAttributionsStayMissingInsteadOfChoosingOne() {
         val result = parse("支付成功", "付款金额：12.00元", "服务商：合成甲", "服务商：合成乙", "服务由合成丙提供")!!
         assertNull(result.receipt!!.serviceProvider)

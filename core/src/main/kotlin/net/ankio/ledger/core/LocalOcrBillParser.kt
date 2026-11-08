@@ -26,7 +26,7 @@ object LocalOcrBillParser {
     private val refundLabel = Regex("^(?:累计(?:成功)?退款(?:$amountWord)?|退款总额|已(?:成功)?退款(?:$amountWord)?|已退$amountWord|已退)[：:]?")
     private val singleRefundLabel = Regex("^(?:本次退款(?:$amountWord)?|退款$amountWord)[：:]?")
     private val refundIntent = Regex("累计(?:成功)?退款|退款总额|已(?:成功|部分|全部|全额)?退款|全额退款成功|已退金额|退款(?:成功|完成|已到账|到账成功|处理中|申请中|审核中|失败|金额|单号)|本次退款")
-    private val merchantLabel = Regex("^(?:商[户戶](?:全称|名称|金称|各称)|商家名称|店铺名称|收款方(?:全称|名称)?(?!备注|服务)|付款方(?:全称|名称)?(?!备注|服务)|交易对方|对方账户|对方账号)[：:]?")
+    private val merchantLabel = ReceiptEvidenceParser.merchantLabel
     private val paymentTimeLabel = Regex("^(?:原(?:支付|付款|交易|转账)时间|支付时间|付款时间|交易时间|转账时间)[：:]?")
     private val idLabel = Regex("^(?:(?:原)?(?:微信|支付宝)?(?:支付|付款|交易|转账|充值|提现|订单))(?:编号|单号|号)[：:]?")
     private val datePattern = Regex("(20[0-9]{2})[年/.-]([0-9]{1,2})[月/.-]([0-9]{1,2})日?\\s*([0-9]{1,2})[:：]([0-9]{2})(?:[:：]([0-9]{2}))?")
