@@ -56,4 +56,23 @@ class ClassificationManagementBridgeTest {
             }
         } }
     }
+    @Test fun symbolsAndFormattingWhitespaceAreValidKeywordsWithoutChangingTheirRawValue() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario -> scenario.onActivity { activity ->
+            val bridge=LedgerWebBridge(activity);val suffix=UUID.randomUUID().toString().take(8);val ids=mutableListOf<String>()
+            try {
+                for((index,keyword) in listOf("＋","🧋","合成$suffix\tＡ＋Ｂ").withIndex()) {
+                    val name="合成字面关键词$suffix-$index"
+                    val payload=ClassificationCodec.rule(ClassificationRule("",name,true,Direction.EXPENSE,"cat:expense:dining",0,
+                        listOf(ClassificationCondition(operator=ClassificationOperator.EQUALS,value=keyword))))
+                    val result=JSONObject(bridge.saveClassificationRule(payload.toString()))
+                    assertTrue(result.toString(),result.getBoolean("ok"))
+                    val saved=app.store.classificationRules().customRules.single { it.name==name };ids+=saved.id
+                    assertEquals(keyword,saved.conditions.single().value)
+                    val bill=ParsedBill(100,Direction.EXPENSE,if(index==2)"合成$suffix a+b" else keyword,"其他",1_798_776_000_000,null,true,"",true)
+                    assertEquals(saved.id,app.store.classify(bill,app.store.classificationRules()).categoryDecision!!.ruleId)
+                }
+            } finally { ids.forEach { app.store.deleteClassificationRule(it) } }
+        } }
+    }
+
 }
