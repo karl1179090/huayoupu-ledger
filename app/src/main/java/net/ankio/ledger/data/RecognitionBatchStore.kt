@@ -69,16 +69,25 @@ internal object RecognitionBatchStore {
             val batch=requireNotNull(read(store,key));val item=batch.items.single { it.candidate.id==id }
             if(item.status !in setOf("PENDING","FAILED")) { db.setTransactionSuccessful();return requireNotNull(result(store,key)) }
             val capture=batch.capture.copy(text=item.candidate.rawText ?: batch.capture.text)
+            val previous=store.matchingIdentity(capture,item.candidate.bill)
             val outcome=store.ingestRecognition(capture,item.candidate.bill,item.operationKey,screenshot=screenshot,independentCandidate=batch.items.size>1)
             val record=when(outcome) {
                 is IngestResult.Saved->outcome.record
                 IngestResult.DuplicateSkipped->store.committedCapture(item.operationKey)?.record ?: store.matchingIdentity(capture,item.candidate.bill)
                 else->null
             }
-            val status=when { outcome is IngestResult.Saved->if(record?.state==RecordState.REVIEW)"REVIEW" else "ADDED"
-                outcome==IngestResult.Ignored->"FAILED";else->"SKIPPED" }
+            val status=when {
+                outcome is IngestResult.Saved && record?.state==RecordState.REVIEW->"REVIEW"
+                outcome is IngestResult.Saved && previous?.state==RecordState.POSTED->"SKIPPED"
+                outcome is IngestResult.Saved && outcome.updated->"ADDED"
+                outcome is IngestResult.Saved && outcome.supplemented->"SKIPPED"
+                outcome is IngestResult.Saved->"ADDED"
+                outcome==IngestResult.Ignored->"FAILED"
+                else->"SKIPPED"
+            }
             val reason=when { status=="REVIEW"->record?.reason.orEmpty();outcome is IngestResult.Skipped->outcome.message
-                status=="ADDED"->"已记账";status=="SKIPPED"->"交易已处理";else->"未识别到账单" }
+                status=="ADDED"->"已记账";status=="SKIPPED" && outcome is IngestResult.Saved && outcome.supplemented->"已补充已有账单"
+                status=="SKIPPED"->"交易已处理";else->"未识别到账单" }
             write(db,batch.copy(items=batch.items.map { if(it.candidate.id==id)it.copy(status=status,reason=reason,recordUID=record?.uid) else it }))
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }

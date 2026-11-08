@@ -139,7 +139,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
         } catch(error:CancellationException) {
             taskId?.let { id ->
                 val batch=app.tasks.operationKey(id)?.let(app.store::recognitionBatch)
-                app.tasks.update(id,"CANCELLED",batch?.let { it.message+" · 未完成项已停止" } ?: "识别已停止，未新增账单");app.changed()
+                app.tasks.update(id,"CANCELLED",batch?.stoppedMessage("识别已停止，未新增账单") ?: "识别已停止，未新增账单");app.changed()
             };throw error
         } catch(error:Exception) {
             app.executionLog.event("model","local","failed",org.json.JSONObject().put("errorType",error.javaClass.simpleName)
