@@ -4,7 +4,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.content.ContentValues
 import net.ankio.ledger.core.ReceiptTimeEvidence
 import net.ankio.ledger.core.ParsedBill
-import java.time.Instant
+import net.ankio.ledger.core.CalendarDayIntervals
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -41,13 +41,24 @@ internal object AccountingDates {
         val args get()=ordinary.args+dates.args
     }
     fun all()=Range(Filter("r.accounting_date IS NULL",emptyList()),Filter("r.accounting_date IS NOT NULL",emptyList()))
-    fun within(start:Long,end:Long,zone:ZoneId):Range {
-        // DATE represents a local calendar start, including a 23/25-hour DST day. No fixed-day arithmetic.
-        fun ceiling(at:Long):LocalDate {
-            val day=Instant.ofEpochMilli(at).atZone(zone).toLocalDate()
-            return if(day.atStartOfDay(zone).toInstant().toEpochMilli()<at)day.plusDays(1) else day
-        }
-        return Range(Filter("r.accounting_date IS NULL AND r.occurred_at>=? AND r.occurred_at<?",listOf(start.toString(),end.toString())),
-            Filter("r.accounting_date>=? AND r.accounting_date<?",listOf(ceiling(start).toString(),ceiling(end).toString())))
+    fun calendar(start:LocalDate,end:LocalDate,zone:ZoneId):Range {
+        val times=instants(CalendarDayIntervals.between(start,end,zone))
+        return Range(Filter("r.accounting_date IS NULL AND (${times.sql})",times.args),
+            Filter("r.accounting_date>=? AND r.accounting_date<?",listOf(start.toString(),end.toString())))
+    }
+    fun instants(intervals:List<CalendarDayIntervals.Interval>):Filter {
+        if(intervals.isEmpty())return Filter("0",emptyList())
+        val parts=intervals.map { "(r.occurred_at>=? AND r.occurred_at<?)" }
+        val args=intervals.flatMap { listOf(it.startMillis.toString(),it.endMillis.toString()) }
+        if(intervals.size==1)return Filter(parts.single(),args)
+        // The outer bounds retain an ordinary timestamp index seek when a date has a gap.
+        return Filter("r.occurred_at>=? AND r.occurred_at<? AND (${parts.joinToString(" OR ")})",
+            listOf(intervals.first().startMillis.toString(),intervals.last().endMillis.toString())+args)
+    }
+    fun within(start:Long,end:Long):Range {
+        // Explicit instant bounds apply to the saved final timestamp for every precision.
+        val values=listOf(start.toString(),end.toString())
+        return Range(Filter("r.accounting_date IS NULL AND r.occurred_at>=? AND r.occurred_at<?",values),
+            Filter("r.accounting_date IS NOT NULL AND r.occurred_at>=? AND r.occurred_at<?",values))
     }
 }

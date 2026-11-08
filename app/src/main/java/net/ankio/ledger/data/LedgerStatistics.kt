@@ -39,8 +39,9 @@ class LedgerStatistics(private val store: LedgerStore) {
     fun month(month: String, zone: ZoneId = ZoneId.systemDefault()): JSONObject = synchronized(store) {
         val w = LedgerReadView(store).window(month,zone)
         readSnapshot {
-            val current = aggregate(w.start, w.end, zone)
-            current.json().put("month", month).put("previous", aggregate(w.previous, w.start, zone).totals.json())
+            val date=java.time.YearMonth.parse(month).atDay(1)
+            val current = aggregate(w.start, w.end, zone,calendarStart=date,calendarEnd=date.plusMonths(1))
+            current.json().put("month", month).put("previous", aggregate(w.previous, w.start, zone,calendarStart=date.minusMonths(1),calendarEnd=date).totals.json())
                 .put("postedCount", store.readableDatabase.rawQuery("SELECT COUNT(*) FROM records r WHERE r.state='POSTED' AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)", null).use { it.moveToFirst(); it.getLong(0) })
         }
     }
@@ -51,13 +52,13 @@ class LedgerStatistics(private val store: LedgerStore) {
         try { val result = action(); db.setTransactionSuccessful(); return result } finally { db.endTransaction() }
     }
 
-    private fun aggregate(start: Long, end: Long, zone: ZoneId, range: ExpensePeriodRange? = null, includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown): Snapshot {
+    private fun aggregate(start: Long, end: Long, zone: ZoneId, range: ExpensePeriodRange? = null, includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown,calendarStart:java.time.LocalDate?=range?.startDate,calendarEnd:java.time.LocalDate?=range?.endDate): Snapshot {
         var expense = 0L; var income = 0L; var expenses = 0L; var incomes = 0L; var transfers = 0L; var count = 0L
         val amounts = LongArray(range?.buckets?.size ?: 0)
         val categories = linkedMapOf<Pair<Direction, String>, Pair<Long, Long>>()
         val days = linkedMapOf<Pair<java.time.LocalDate, Direction>, Long>()
         val directory = if (includeBreakdown) store.categoryDirectory().associateBy { it.direction to it.name } else emptyMap()
-        val dates=AccountingDates.within(start,end,zone)
+        val dates=if(calendarStart!=null)AccountingDates.calendar(calendarStart,requireNotNull(calendarEnd),zone) else AccountingDates.within(start,end)
         store.readableDatabase.rawQuery("""SELECT r.direction,r.amount,r.category,r.occurred_at,t.fee_cents,r.accounting_date FROM records r
             LEFT JOIN record_transfer_details t ON t.record_uid=r.uid WHERE r.state='POSTED' AND ${dates.sql}
             AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)""", dates.args.toTypedArray()).use { c ->

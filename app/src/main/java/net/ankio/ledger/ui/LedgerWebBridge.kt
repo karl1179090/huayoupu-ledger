@@ -78,7 +78,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         synchronized(app.store) { snapshotViewData(month,search,limit,direction,known).toString() }
 
     private fun readRevision(month:String,search:String,direction:String,zone:java.time.ZoneId):String =
-        "calendar-v2|$READ_SESSION|${app.revision.value}|${zone.id}|${month.length}:$month|${search.length}:$search|${direction.length}:$direction"
+        "calendar-v3|$READ_SESSION|${app.revision.value}|${zone.id}|${month.length}:$month|${search.length}:$search|${direction.length}:$direction"
 
     private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String,zone:java.time.ZoneId=java.time.ZoneId.systemDefault()):JSONObject = try {
         val read=LedgerReadView(app.store,zone)
@@ -284,7 +284,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     @JavascriptInterface fun contributionRecords(period:String,category:String,direction:String,offset:Int):String=try {
         val range=net.ankio.ledger.core.ExpensePeriodBuckets.create(ExpensePeriod.valueOf(period),java.time.Instant.now(),java.time.ZoneId.systemDefault())
         LedgerReadView(app.store).records(java.time.YearMonth.now().toString(),offset=offset,direction=direction.also { checkInput(it in setOf("EXPENSE","INCOME"),"统计类型无效") },category=category,
-            contribution=true,rangeStart=range.startMillis,rangeEnd=range.endMillis).put("ok",true).toString()
+            contribution=true,calendarStart=range.startDate,calendarEnd=range.endDate).put("ok",true).toString()
     } catch(error:Exception) { structuredFailure(error,"开销明细读取失败").toString() }
 
     @JavascriptInterface

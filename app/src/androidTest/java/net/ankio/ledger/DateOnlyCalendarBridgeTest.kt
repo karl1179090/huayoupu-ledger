@@ -92,9 +92,8 @@ class DateOnlyCalendarBridgeTest {
             assertEquals(20545L,range.totals.expense);assertEquals(600L,range.totals.income)
             assertEquals(20200L,range.bucketAmounts[0]);assertEquals(345L,range.bucketAmounts[1])
             val read=LedgerReadView(app.store)
-            val window=read.window("2026-11",ZoneId.of("America/New_York"))
             val filtered=read.records("2026-11",limit=200,direction="EXPENSE",category="category:其他",contribution=true,
-                rangeStart=window.start,rangeEnd=window.end)
+                calendarStart=java.time.LocalDate.parse("2026-11-01"),calendarEnd=java.time.LocalDate.parse("2026-12-01"))
             assertTrue(filtered.getBoolean("hasMore"));assertEquals(200,rows(filtered).size)
             assertEquals(movements,app.store.walletSnapshot().movements)
             assertEquals(Instant.parse("2026-11-04T16:00:00Z").toEpochMilli(),app.store.get(fifth.id)!!.bill.occurredAt)
@@ -277,6 +276,182 @@ class DateOnlyCalendarBridgeTest {
             app.store.all().filter { it.uid.startsWith(prefix) }.forEach { app.store.delete(it.id) }
             TimeZone.setDefault(previousZone)
         }
+    }
+
+    @Test fun midnightRollbackPagesOffsetsAndCalendarBucketsKeepEveryOriginalInstant()=runBlocking {
+        app.taskRecovery.await()
+        val previous=TimeZone.getDefault();val prefix="synthetic-rollback-${UUID.randomUUID()}"
+        val highDay=Instant.parse("2010-03-04T14:30:00Z").toEpochMilli()
+        val lowDay=Instant.parse("2010-03-04T15:30:00Z").toEpochMilli()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Antarctica/Casey"))
+            val zone=ZoneId.systemDefault()
+            assertEquals("2010-03-05",Instant.ofEpochMilli(highDay).atZone(zone).toLocalDate().toString())
+            assertEquals("2010-03-04",Instant.ofEpochMilli(lowDay).atZone(zone).toLocalDate().toString())
+            app.store.merge((1..203).map { n ->
+                val at=if(n<=2)highDay else lowDay
+                LedgerRecord(uid="$prefix-$n",capture=Capture(Source.MANUAL,"manual","合成跨午夜",at),
+                    bill=ParsedBill(100,Direction.EXPENSE,prefix,"其他",at,null,true,"",true),state=RecordState.POSTED)
+            })
+            val saved=app.store.all().filter { it.uid.startsWith(prefix) }
+            val expected=saved.sortedWith(compareByDescending<LedgerRecord> { Instant.ofEpochMilli(it.bill.occurredAt).atZone(zone).toLocalDate() }
+                .thenByDescending { it.bill.occurredAt }.thenByDescending { it.id }).map { it.id }
+            ActivityScenario.launch(MainActivity::class.java).use { scenario -> scenario.onActivity { activity ->
+                val bridge=LedgerWebBridge(activity);var page=JSONObject(bridge.snapshotFirst("2010-03",prefix,"EXPENSE",""))
+                val actual=mutableListOf<Long>()
+                while(true) {
+                    actual+=rows(page).map { it.getLong("id") }
+                    val view=page.getJSONObject("ledgerView");if(!view.getBoolean("hasMore"))break
+                    val cursor=view.getJSONObject("nextCursor")
+                    page=JSONObject(bridge.recordPage("2010-03",prefix,"EXPENSE",cursor.getLong("occurredAt"),cursor.getLong("id"),page.getString("dataRevision")))
+                    assertFalse(page.optBoolean("reset"))
+                }
+                assertEquals(expected,actual)
+                assertEquals(expected,rows(JSONObject(bridge.snapshotView("2010-03",prefix,400,"EXPENSE",""))).map { it.getLong("id") })
+            } }
+            val read=LedgerReadView(app.store)
+            for(offset in listOf(1,199,200,203,400))assertEquals(expected.drop(offset).take(200),
+                rows(read.records("2010-03",prefix,offset=offset)).map { it.getLong("id") })
+            val period=LedgerStatistics(app.store).query(ExpensePeriod.WEEK,Instant.parse("2010-03-05T04:00:00Z"),zone)
+            assertEquals(20100L,period.bucketAmounts[3]);assertEquals(200L,period.bucketAmounts[4])
+            val calendarDay=read.records("2010-03",calendarStart=java.time.LocalDate.parse("2010-03-04"),calendarEnd=java.time.LocalDate.parse("2010-03-05"))
+            val lowDayIds=saved.filter { it.bill.occurredAt==lowDay }.map { it.id }.sortedDescending()
+            assertEquals(lowDayIds.take(200),rows(calendarDay).map { it.getLong("id") });assertTrue(calendarDay.getBoolean("hasMore"))
+            assertEquals(lowDayIds.drop(200),rows(read.records("2010-03",offset=200,calendarStart=java.time.LocalDate.parse("2010-03-04"),calendarEnd=java.time.LocalDate.parse("2010-03-05"))).map { it.getLong("id") })
+            val instantOnly=read.records("2010-03",rangeStart=Instant.parse("2010-03-04T15:00:00Z").toEpochMilli(),rangeEnd=Instant.parse("2010-03-04T16:00:00Z").toEpochMilli())
+            assertEquals(200,rows(instantOnly).count { it.getLong("id") in expected });assertTrue(instantOnly.getBoolean("hasMore"))
+            assertTrue(saved.all { app.store.get(it.id)!!.bill.occurredAt==it.bill.occurredAt })
+        } finally { app.store.all().filter { it.uid.startsWith(prefix) }.forEach { app.store.delete(it.id) };TimeZone.setDefault(previous) }
+    }
+
+    @Test fun monthBoundaryRollbackUsesCalendarMonthsAndWeekDaysWhileExplicitInstantRangesStayInstantRanges()=runBlocking {
+        app.taskRecovery.await()
+        val previous=TimeZone.getDefault();val prefix="synthetic-month-rollback-${UUID.randomUUID()}"
+        val november=Instant.parse("2009-11-01T02:30:30Z").toEpochMilli()
+        val october=Instant.parse("2009-11-01T03:00:00Z").toEpochMilli()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("America/St_Johns"));val zone=ZoneId.systemDefault()
+            assertEquals("2009-11-01",Instant.ofEpochMilli(november).atZone(zone).toLocalDate().toString())
+            assertEquals("2009-10-31",Instant.ofEpochMilli(october).atZone(zone).toLocalDate().toString())
+            app.store.merge(listOf(november,october).mapIndexed { n,at -> LedgerRecord(uid="$prefix-$n",capture=Capture(Source.MANUAL,"manual","合成月界",at),
+                bill=ParsedBill(if(n==0)100 else 200,Direction.EXPENSE,prefix,"其他",at,null,true,"",true),state=RecordState.POSTED) })
+            val saved=app.store.all().filter { it.uid.startsWith(prefix) };val nov=saved.single { it.bill.occurredAt==november };val oct=saved.single { it.bill.occurredAt==october }
+            ActivityScenario.launch(MainActivity::class.java).use { scenario -> scenario.onActivity { activity ->
+                val bridge=LedgerWebBridge(activity)
+                for((month,record,amount) in listOf(Triple("2009-10",oct,"200"),Triple("2009-11",nov,"100"))) {
+                    val page=JSONObject(bridge.snapshotFirst(month,"","EXPENSE",""))
+                    assertEquals(setOf(record.id),rows(page).map { it.getLong("id") }.filter { id -> saved.any { it.id==id } }.toSet())
+                    assertEquals(amount,page.getJSONObject("ledgerView").getJSONObject("summary").getString("totalExpenseCents"))
+                }
+            } }
+            val period=LedgerStatistics(app.store).query(ExpensePeriod.WEEK,Instant.parse("2009-11-01T12:00:00Z"),zone)
+            assertEquals(200L,period.bucketAmounts[5]);assertEquals(100L,period.bucketAmounts[6])
+            val read=LedgerReadView(app.store)
+            val raw=rows(read.records("2009-10",rangeStart=november,rangeEnd=october+1))
+            assertEquals(setOf(nov.id,oct.id),raw.map { it.getLong("id") }.toSet())
+            assertEquals(listOf(november,october),listOf(nov.id,oct.id).map { app.store.get(it)!!.bill.occurredAt })
+        } finally { app.store.all().filter { it.uid.startsWith(prefix) }.forEach { app.store.delete(it.id) };TimeZone.setDefault(previous) }
+    }
+
+    @Test fun mixedFrozenDatesAndOrdinaryRecordsKeepAll617RowsAcrossConventionalZonesAndLargeOffsets() {
+        val previous=TimeZone.getDefault();val name="synthetic-calendar-zones-${UUID.randomUUID()}.db"
+        try { LedgerStore(app,name).use { store ->
+            val entries=(1..617).map { n ->
+                val (capture,bill)=if(n<=430) {
+                    val at=Instant.parse("2026-11-01T00:00:00Z").toEpochMilli()+(n%17)*2_400_000L
+                    Capture(Source.MANUAL,"manual","合成普通记录",at) to ParsedBill(100,Direction.EXPENSE,"合成多时区分页","其他",at,null,true,"",true)
+                } else parsed("SYNTHETIC-CALENDAR-ZONES-$n","1.00","2026-11-0${1+n%4}")
+                LedgerRecord(uid="synthetic-zone-$n",capture=capture,bill=bill.copy(merchant="合成多时区分页"),state=RecordState.POSTED)
+            }
+            assertEquals(617,store.merge(entries));val saved=store.all()
+            for(zoneName in listOf("America/New_York","Asia/Shanghai","Europe/Berlin","Pacific/Apia","Pacific/Kiritimati")) {
+                TimeZone.setDefault(TimeZone.getTimeZone(zoneName));val zone=ZoneId.systemDefault();val read=LedgerReadView(store)
+                val expected=saved.sortedWith(compareByDescending<LedgerRecord> {
+                    it.bill.receipt?.time?.takeIf { time -> time.precision=="DATE" }?.localDate?.let(java.time.LocalDate::parse)
+                        ?: Instant.ofEpochMilli(it.bill.occurredAt).atZone(zone).toLocalDate()
+                }.thenByDescending { it.bill.occurredAt }.thenByDescending { it.id }).map { it.id }
+                var page=read.records("2026-11","合成多时区分页");val actual=mutableListOf<Long>()
+                while(true) {
+                    actual+=rows(page).map { it.getLong("id") };if(!page.getBoolean("hasMore"))break
+                    val cursor=page.getJSONObject("nextCursor")
+                    page=read.records("2026-11","合成多时区分页",beforeAt=cursor.getLong("occurredAt"),beforeId=cursor.getLong("id"))
+                }
+                assertEquals(zoneName,expected,actual)
+                for(offset in listOf(1,199,200,400,617,700))assertEquals("$zoneName offset$offset",expected.drop(offset).take(200),
+                    rows(read.records("2026-11","合成多时区分页",offset=offset)).map { it.getLong("id") })
+            }
+            assertEquals(entries.associate { it.uid to it.bill.occurredAt },store.all().associate { it.uid to it.bill.occurredAt })
+        } } finally { TimeZone.setDefault(previous);app.deleteDatabase(name) }
+    }
+
+    @Test fun deletedCategoryReplacementAndLateHistoryRestoreKeepDateProjectionFrozenRuleAndOneWalletDebit() {
+        val previous=TimeZone.getDefault();val sourceName="synthetic-date-replacement-${UUID.randomUUID()}.db";val targetName="synthetic-date-replacement-target-${UUID.randomUUID()}.db"
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"))
+            LedgerStore(app,sourceName).use { source -> LedgerStore(app,targetName).use { target ->
+                val originalCategory=source.saveCategory(name="合成日期旧用途",direction=Direction.EXPENSE)
+                val replacement=source.saveCategory(name="合成日期替代用途",direction=Direction.EXPENSE)
+                val rule=source.saveClassificationRule(ClassificationRule("","合成日期用途规则",true,Direction.EXPENSE,originalCategory.id,0,listOf(ClassificationCondition(value="合成"))))
+                val frozen=source.holdClassificationSnapshot("synthetic-date-replacement")
+                val wallet=source.saveAccount(LedgerAccount(name="合成日期替代钱包",amountCents=10_000,kind="cash"))
+                source.setDefaultWallet(wallet.uid);source.setAppWallet(PaymentApps.WECHAT,wallet.uid)
+                val (capture,bill)=parsed("SYNTHETIC-DATE-REPLACEMENT","7.00","2026-11-01")
+                val original=(source.ingest(capture,source.classify(bill,frozen,capture)) as IngestResult.Saved).record
+                assertEquals(originalCategory.id,original.bill.categoryDecision!!.categoryId)
+                assertEquals(9300L,source.getAccount(wallet.id)!!.amountCents)
+                val movements=source.walletSnapshot().movements
+                source.confirmCategoryDeletion(originalCategory.id,replacement.id,source.previewCategoryDeletion(originalCategory.id).previewToken)
+                // A late old snapshot reaches values() with its deleted ID and unchanged time evidence.
+                val (lateCapture,lateParsed)=parsed("SYNTHETIC-DATE-REPLACEMENT-LATE","8.00","2026-11-01")
+                val late=LedgerRecord(capture=lateCapture,bill=lateParsed.copy(category=original.bill.category,categoryDecision=original.bill.categoryDecision),state=RecordState.POSTED)
+                assertEquals(1,source.merge(listOf(late)))
+                assertEquals(movements,source.walletSnapshot().movements)
+                assertEquals(9300L,source.getAccount(wallet.id)!!.amountCents)
+                val backup=LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream())
+                assertEquals(2,LedgerBackup.restore(target,backup))
+                for(store in listOf(source,target)) {
+                    assertEquals(2,store.all().size)
+                    for(record in store.all()) {
+                        assertEquals(replacement.id,record.bill.categoryDecision!!.categoryId)
+                        assertEquals(rule,record.bill.categoryDecision!!.rule)
+                        assertEquals(original.bill.receipt!!.time,record.bill.receipt!!.time)
+                        assertEquals(original.bill.occurredAt,record.bill.occurredAt)
+                    }
+                    val read=LedgerReadView(store)
+                    assertEquals(2,rows(read.records("2026-11",category="category:"+replacement.name,contribution=true,direction="EXPENSE")).size)
+                    assertEquals("1500",read.summary("2026-11").getString("totalExpenseCents"))
+                    assertTrue(rows(read.records("2026-10")).isEmpty())
+                    assertEquals(9300L,store.getAccountByUid(wallet.uid)!!.amountCents)
+                    val restoredMovements=store.walletSnapshot().movements
+                    assertEquals(movements,restoredMovements.filter { it.kind!="RESTORE_SNAPSHOT" })
+                    assertEquals(1,restoredMovements.count { it.kind=="POST" && it.deltaCents== -700L })
+                    val audits=restoredMovements.filter { it.kind=="RESTORE_SNAPSHOT" }
+                    assertEquals(if(store===source)0 else 1,audits.size)
+                    assertTrue(audits.all { it.deltaCents==0L && it.balanceBefore==9300L && it.balanceAfter==9300L })
+                }
+            } }
+        } finally { TimeZone.setDefault(previous);app.deleteDatabase(sourceName);app.deleteDatabase(targetName) }
+    }
+
+    @Test fun explicitInstantWindowsUseSavedMillisecondsForDateEvidenceWithoutChangingCalendarViews() {
+        val previous=TimeZone.getDefault();val name="synthetic-instant-window-${UUID.randomUUID()}.db"
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"))
+            LedgerStore(app,name).use { store ->
+                val (capture,bill)=parsed("SYNTHETIC-INSTANT-DATE","1.00","2026-11-01")
+                assertEquals(1,store.merge(listOf(LedgerRecord(capture=capture,bill=bill,state=RecordState.POSTED))))
+                val record=store.all().single();val at=record.bill.occurredAt;val read=LedgerReadView(store)
+                assertEquals(listOf(record.id),rows(read.records("2026-11")).map { it.getLong("id") })
+                assertTrue(rows(read.records("2026-10")).isEmpty())
+                assertEquals(listOf(record.id),rows(read.records("2026-10",rangeStart=at,rangeEnd=at+1)).map { it.getLong("id") })
+                val start=java.time.LocalDate.parse("2026-11-01").atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                val end=java.time.LocalDate.parse("2026-11-02").atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                assertTrue(rows(read.records("2026-11",rangeStart=start,rangeEnd=end)).isEmpty())
+                assertEquals(listOf(record.id),rows(read.records("2026-10",calendarStart=java.time.LocalDate.parse("2026-11-01"),calendarEnd=java.time.LocalDate.parse("2026-11-02"))).map { it.getLong("id") })
+                assertEquals(at,store.get(record.id)!!.bill.occurredAt);assertEquals("DATE",store.get(record.id)!!.bill.receipt!!.time!!.precision)
+                assertTrue(store.walletSnapshot().movements.isEmpty())
+            }
+        } finally { TimeZone.setDefault(previous);app.deleteDatabase(name) }
     }
 
 }

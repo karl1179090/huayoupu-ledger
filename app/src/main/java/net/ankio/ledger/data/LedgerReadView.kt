@@ -14,7 +14,7 @@ class LedgerReadView(private val store:LedgerStore,private val queryZone:ZoneId?
         fun at(value:java.time.LocalDate)=value.atStartOfDay(zone).toInstant().toEpochMilli()
         return Window(at(date),at(date.plusMonths(1)),at(date.minusMonths(1)))
     }
-    fun records(month:String,search:String="",offset:Int=0,limit:Int=200,direction:String="",category:String="",beforeAt:Long?=null,beforeId:Long?=null,contribution:Boolean=false,rangeStart:Long?=null,rangeEnd:Long?=null):JSONObject = synchronized(store) {
+    fun records(month:String,search:String="",offset:Int=0,limit:Int=200,direction:String="",category:String="",beforeAt:Long?=null,beforeId:Long?=null,contribution:Boolean=false,rangeStart:Long?=null,rangeEnd:Long?=null,calendarStart:java.time.LocalDate?=null,calendarEnd:java.time.LocalDate?=null):JSONObject = synchronized(store) {
         val zone=queryZone ?: ZoneId.systemDefault()
         val w=window(month,zone);require(search.length<=200 && offset in 0..1_000_000 && limit in 1..200)
         require((beforeAt==null)==(beforeId==null))
@@ -22,7 +22,13 @@ class LedgerReadView(private val store:LedgerStore,private val queryZone:ZoneId?
         require(direction.isEmpty()||direction in Direction.entries.map { it.name })
         val where=StringBuilder("NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)")
         val args=mutableListOf<String>()
-        val dates=if(search.isBlank())AccountingDates.within(rangeStart ?: w.start,rangeEnd ?: w.end,zone) else AccountingDates.all()
+        require((calendarStart==null)==(calendarEnd==null))
+        val dates=when {
+            search.isNotBlank()->AccountingDates.all()
+            calendarStart!=null->AccountingDates.calendar(calendarStart,requireNotNull(calendarEnd),zone)
+            rangeStart!=null || rangeEnd!=null->AccountingDates.within(rangeStart ?: w.start,rangeEnd ?: w.end)
+            else->java.time.YearMonth.parse(month).atDay(1).let { AccountingDates.calendar(it,it.plusMonths(1),zone) }
+        }
         if(search.isNotBlank()) { where.append(" AND (r.merchant LIKE ? ESCAPE '\\' OR r.category LIKE ? ESCAPE '\\' OR r.note LIKE ? ESCAPE '\\' OR r.transaction_id LIKE ? ESCAPE '\\' OR CASE r.source WHEN 'OCR' THEN '摇一摇' WHEN 'IMAGE' THEN '图片导入' WHEN 'MANUAL' THEN '手动' WHEN 'SMS' THEN '自动 · 短信' WHEN 'NOTIFICATION' THEN '自动 · 通知' END LIKE ? ESCAPE '\\' OR fa.name LIKE ? ESCAPE '\\' OR ta.name LIKE ? ESCAPE '\\' OR t.from_reference LIKE ? ESCAPE '\\' OR t.to_reference LIKE ? ESCAPE '\\' OR w.account_reference LIKE ? ESCAPE '\\')")
             val term="%"+search.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";repeat(10){args+=term} }
         if(contribution && direction=="EXPENSE")where.append(" AND (r.direction='EXPENSE' OR (r.direction='TRANSFER' AND t.fee_cents>0))")
