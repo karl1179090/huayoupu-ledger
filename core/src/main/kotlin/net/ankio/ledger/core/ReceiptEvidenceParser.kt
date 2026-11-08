@@ -31,7 +31,12 @@ internal object ReceiptEvidenceParser {
                 else -> emptyList()
             }
         }.toSet()
-        return scoped.filter { it !in excluded && BankCodes.normalize(it.text) == null }
+        val namedMerchantValues = scoped.flatMapIndexed { index, line ->
+            val match = merchantLabel.find(line.text.trim())
+            if (match != null && line.text.trim().substring(match.range.last + 1).isBlank()) associated(scoped, index)
+            else emptyList()
+        }.toSet()
+        return scoped.filter { it !in excluded && (BankCodes.normalize(it.text) == null || it in namedMerchantValues) }
     }
 
     fun parse(lines: List<LocalOcrLine>, merchant: String, origin: String): ReceiptEvidence {

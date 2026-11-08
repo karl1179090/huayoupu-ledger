@@ -6,6 +6,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LocalOcrBillParserTest {
+    @Test fun explicitMerchantLabelsPreserveSingleCharacterAndShortNames() {
+        for (name in listOf("茶", "ABC", "招商银行")) {
+            val result = parse("支付成功", "付款金额：12.00元", "商户名称", name)!!
+            assertEquals(name, result.merchant)
+            assertEquals(name, result.receipt!!.merchant!!.value)
+            assertTrue(result.receipt.merchant.rawText.contains(name))
+        }
+    }
     @Test fun shortMerchantEvidenceCannotBeHijackedByOtherBusinessFieldsWithTheSamePrefix() {
         val lines = listOf(LocalOcrLine("支付成功"), LocalOcrLine("付款金额：12.00元"),
             LocalOcrLine("服务商：合成支付"), LocalOcrLine("商品说明：合成早餐"),
