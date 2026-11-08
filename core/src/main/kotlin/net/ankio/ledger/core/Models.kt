@@ -48,6 +48,8 @@ data class PaymentMethodEvidence(
     val rawValue: String = "",
     val ambiguous: Boolean = false,
     val reason: String? = null,
+    /** An actual debit statement, independent of the app hosting the receipt. */
+    val executed: Boolean = false,
 )
 
 /** Completed refund evidence; amountCents is always computed locally from these cents. */

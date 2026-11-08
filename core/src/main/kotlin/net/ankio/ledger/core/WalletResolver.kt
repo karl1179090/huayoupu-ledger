@@ -33,6 +33,8 @@ object WalletResolver {
         }
         if (existing?.manualLocked == true || existing?.selectionSource == "MANUAL")
             return if (evidence != null && evidence.medium != "UNKNOWN") existing.copy(evidenceFingerprint = fingerprint) else existing
+        if(evidence?.reason=="ACTUAL_ACCOUNT_REQUIRED" && !(existing?.selectionSource=="IMPORT" && existing.accountUid!=null))
+            return WalletResolution(null,"PAYMENT_METHOD","ACTUAL_ACCOUNT_REQUIRED",fingerprint)
         val packageName = sourcePackage?.let(::sourcePackage)
         val actualPlatform = when (packageName) {
             PaymentApps.WECHAT -> "wechat"
@@ -66,6 +68,9 @@ object WalletResolver {
             evidence != null && evidence.medium != "UNKNOWN" -> "PAYMENT_METHOD_UNMATCHED"
             else -> null
         }
+        if(evidence?.executed==true && evidence.medium!="BANK_CARD" && strong==null &&
+            !(existing?.selectionSource=="IMPORT" && existing.accountUid!=null))
+            return WalletResolution(null,"PAYMENT_METHOD","ACTUAL_ACCOUNT_REQUIRED",fingerprint)
         if (requireActualBank && existing?.accountUid != null && existing.selectionSource in setOf("APP", "DEFAULT") && strong == null &&
             (evidence?.medium == "BANK_CARD" || evidence?.bankCode != null || evidence?.cardLast4 != null))
             return WalletResolution(null, "PAYMENT_METHOD", fallbackReason ?: "PAYMENT_METHOD_UNMATCHED", fingerprint)
@@ -100,8 +105,9 @@ object WalletResolver {
     }
 
     fun fingerprint(evidence: PaymentMethodEvidence): String {
-        val stable = listOf(evidence.medium, evidence.role, BankCodes.normalize(evidence.bankCode).orEmpty(),
+        val legacy = listOf(evidence.medium, evidence.role, BankCodes.normalize(evidence.bankCode).orEmpty(),
             evidence.cardLast4.orEmpty(), evidence.platform.orEmpty(), evidence.ambiguous.toString()).joinToString("|")
+        val stable=if(evidence.executed)"$legacy|executed" else legacy
         return MessageDigest.getInstance("SHA-256").digest(stable.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it.toInt() and 255) }
     }
