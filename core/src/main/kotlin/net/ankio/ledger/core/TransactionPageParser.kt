@@ -1,7 +1,7 @@
 package net.ankio.ledger.core
 
 /** Geometry/hierarchy adapters supply isolated blocks; only this parser creates the candidates. */
-data class TransactionBlock(val id:CandidateId,val lines:List<LocalOcrLine>)
+data class TransactionBlock(val id:CandidateId,val lines:List<LocalOcrLine>,val origin:ReceiptBlockOrigin?=null)
 
 object TransactionPageParser {
     private val heading=Regex("^(?:.*银行[：: ]*)?(?:交易成功提醒|交易提醒|动账通知|消费提醒|账户变动通知)$")
@@ -27,7 +27,27 @@ object TransactionPageParser {
     fun parseBlocks(blocks:List<TransactionBlock>,width:Int,height:Int,time:RecognitionTimeContext,
         livePaymentAt:Long?=null,policy:RecognitionPolicy=RecognitionPolicy.USER_INITIATED,origin:String=""):List<TransactionCandidate> {
         require(blocks.map { it.id }.distinct().size==blocks.size)
-        return blocks.mapNotNull { block -> LocalOcrBillParser.parse(block.lines,width,height,time.recognitionAt,livePaymentAt,policy,origin,time)
-            ?.let { bill -> TransactionCandidate(block.id,bill,block.lines.joinToString("\n") { it.text }) } }
+        return blocks.mapNotNull { block ->
+            val bill=if(block.origin?.kind=="NESTED_BANK") {
+                if(policy==RecognitionPolicy.AUTOMATIC_PAYMENT)null else BankReceiptParser.parse(block.lines,time.recognitionAt,origin,time)
+            } else LocalOcrBillParser.parse(block.lines,width,height,time.recognitionAt,livePaymentAt,policy,origin,time)
+            bill?.let { parsed ->
+                val local=if(block.origin?.kind=="MIXED_DEBIT" && (parsed.paymentMethod==null || parsed.paymentMethod.medium=="UNKNOWN"))
+                    parsed.copy(reliable=false,reason=listOf(parsed.reason,"请确认实际付款账户").filter(String::isNotBlank).joinToString("；"),
+                        paymentMethod=(parsed.paymentMethod ?: PaymentMethodEvidence("UNKNOWN","DEBIT")).copy(
+                            ambiguous=true,reason="ACTUAL_ACCOUNT_REQUIRED")) else parsed
+                TransactionCandidate(block.id,local.copy(receipt=local.receipt?.inBlock(block)),block.lines.joinToString("\n") { line -> line.text })
+            }
+        }
+    }
+
+    private fun ReceiptEvidence.inBlock(block:TransactionBlock):ReceiptEvidence {
+        val id=block.id.value.let { value -> if(value.length<=80)value else "block_"+java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) } }
+        fun ReceiptField?.local()=this?.copy(blockId=id)
+        return copy(blockId=id,merchant=merchant.local(),productDescription=productDescription.local(),
+            transactionDescription=transactionDescription.local(),orderRemark=orderRemark.local(),
+            serviceProvider=serviceProvider.local(),receiptIssuer=receiptIssuer.local(),sourceApp=sourceApp.local(),
+            bank=bank?.copy(transactionType=bank.transactionType.local()),blockOrigin=block.origin)
     }
 }
