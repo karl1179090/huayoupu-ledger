@@ -2,12 +2,13 @@ package net.ankio.ledger.core
 
 /** Null leaves unsupported layouts on the existing parser; empty means a service-only page. */
 object MixedReceiptPartitioner {
-    private val service=Regex("^(?:自动扣费|先享后付)?服务(?:开通(?:通知|成功)|通知)$|^(?:付款|支付)偏好(?:通知|设置)$|^免密支付开通成功$")
+    private val service=Regex("^(?:(?:自动扣费|先享后付)?服务(?:开通(?:通知|成功)|通知)|[「『]?先享后付[」』]?服务使用通知)$|^(?:付款|支付)偏好(?:通知|设置)$|^免密支付开通成功$")
     private val debit=Regex("^(?:扣款|付款|支付|扣费)成功$")
+    private val actualBalanceDebit=Regex("^(?:本次)?通过(?:微信)?零钱扣款[。.]?$")
     private val bankHeading=Regex("^(?:.*银行[：: ]*)?(?:交易成功提醒|交易提醒|动账通知|消费提醒|账户变动通知)$")
     private val peripheral=Regex("^(?:广告|为你推荐|猜你喜欢|相关推荐|积分推荐)(?:[：:>〉\\s]|$)")
     private val viewer=Regex("^(?:图片查看器|图片详情|查看原图|保存图片|账单记录(?:时间)?[：:].*)$")
-    private val ignored=Regex("^(?:账户余额|可用余额|余额|积分|状态栏|通知时间|账单记录时间|记录时间|查看时间|保存图片|查看原图|返回)(?:[：:>〉\\s]|$)")
+    private val ignored=Regex("^(?:账户余额|可用余额|余额|积分|状态栏|通知时间|账单记录时间|记录时间|查看时间|保存图片|查看原图|查看订单详情|返回)(?:[：:>〉\\s]|$)")
     private val amount=Regex("^(?:交易金额|消费金额|支出金额|收入金额|发生金额|金额)[：:]?")
 
     fun partition(lines:List<LocalOcrLine>,width:Int,height:Int):List<TransactionBlock>? {
@@ -36,6 +37,19 @@ object MixedReceiptPartitioner {
                     (if(previous!=null && BankCodes.normalize(normalize(previous.text).filterNot(Char::isWhitespace))!=null)index-1 else index) to true
                 }
                 debit.matches(text(index)) -> index to true
+                actualBalanceDebit.matches(text(index)) -> {
+                    val boundary=(0 until index).lastOrNull { service.matches(text(it)) || debit.matches(text(it)) || bankHeading.matches(text(it)) }
+                    // An executed-account line inside an already headed card stays in that card.
+                    if(boundary!=null && (debit.matches(text(boundary)) || bankHeading.matches(text(boundary))))null
+                    else {
+                        val previous=ordered.getOrNull(index-1);val beforePrevious=ordered.getOrNull(index-2)
+                        val header=previous!=null && beforePrevious!=null && index-1>(boundary ?: -1) &&
+                            previous.bottom>previous.top && previous.right>previous.left &&
+                            previous.bottom<=ordered[index].top && ordered[index].top-previous.bottom<=maxOf(previous.bottom-previous.top,ordered[index].bottom-ordered[index].top)*2 &&
+                            previous.top-beforePrevious.bottom>maxOf(previous.bottom-previous.top,beforePrevious.bottom-beforePrevious.top)*1.5
+                        (if(header)index-1 else index) to true
+                    }
+                }
                 service.matches(text(index)) || peripheral.containsMatchIn(ordered[index].text.trim()) -> index to false
                 else -> null
             }

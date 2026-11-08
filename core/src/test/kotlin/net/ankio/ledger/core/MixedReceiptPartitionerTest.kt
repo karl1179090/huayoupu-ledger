@@ -102,4 +102,31 @@ class MixedReceiptPartitionerTest {
         assertEquals("WECHAT_BALANCE",candidate.bill.paymentMethod!!.medium)
         assertFalse(candidate.rawText!!.contains("先享后付"))
     }
+
+    @Test fun serviceUseNoticeAndTitlelessActualBalanceCardKeepOnlyTheLowerCardsBusinessFields() {
+        val upper=lines("「先享后付」服务使用通知","商户名称：合成上卡商家","服务商：合成上卡服务","优先从零钱支付",
+            "交易金额：888.00元","交易时间：2020-01-01 08:00","银行作者：招商银行")
+        val lower=listOf(LocalOcrLine("合成下卡咖啡",350,650,730,695),LocalOcrLine("通过零钱扣款",360,730,720,770),
+            LocalOcrLine("￥",350,820,410,890),LocalOcrLine("12.34",420,820,730,890),
+            LocalOcrLine("扣费服务",100,980,300,1015),LocalOcrLine("合成地铁服务方",360,980,880,1015),
+            LocalOcrLine("扣费内容",100,1040,300,1075),LocalOcrLine("午餐套餐",360,1040,880,1075),
+            LocalOcrLine("查看订单详情",100,1120,600,1155))
+        for(origin in listOf("shake:com.tencent.mm","image")) {
+            val candidate=TransactionPageParser.parse((upper+lower).reversed(),1080,1800,time,origin=origin).single()
+            val bill=candidate.bill;val receipt=bill.receipt!!
+            assertEquals(origin,1234L,bill.amountCents);assertEquals("合成下卡咖啡",bill.merchant)
+            assertEquals("合成地铁服务方",receipt.serviceProvider!!.value)
+            assertEquals("午餐套餐",receipt.transactionDescription!!.value)
+            assertEquals("扣费服务\n合成地铁服务方",receipt.serviceProvider!!.rawText)
+            assertNull(receipt.receiptIssuer);assertNull(receipt.bank)
+            assertEquals("WECHAT_BALANCE",bill.paymentMethod!!.medium);assertTrue(bill.reliable)
+            assertEquals(time.recognitionAt,bill.occurredAt)
+            assertEquals(650,receipt.blockOrigin!!.top)
+            if(origin=="image")assertNull(receipt.sourceApp) else assertEquals("com.tencent.mm",receipt.sourceApp!!.value)
+            assertFalse(candidate.rawText!!.contains("上卡"));assertFalse(candidate.rawText!!.contains("查看订单详情"))
+            val resolved=WalletResolver.resolve(listOf(WalletCandidate("wechat",kind="wechat"),WalletCandidate("cash",kind="cash")),
+                sourcePackage=origin.takeUnless { it=="image" },evidence=bill.paymentMethod,defaultAccountUid="cash")
+            assertEquals("wechat",resolved.accountUid)
+        }
+    }
 }
