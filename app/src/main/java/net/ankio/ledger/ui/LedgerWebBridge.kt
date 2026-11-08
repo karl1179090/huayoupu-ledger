@@ -286,6 +286,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
     fun save(json: String): String = try {
         checkInput(json.length <= MAX_INPUT_LENGTH, "账单数据过大")
         val input = JSONObject(json)
+        checkInput(!input.has("categoryDecision"),"分类信息无效，请重新打开账单")
+        val categoryEdited=if(input.has("categoryEdited"))input.get("categoryEdited") as? Boolean
+            ?: throw InvalidInput("分类选择状态无效，请重新选择") else false
         checkInput(!input.has("eligibility") && !input.has("walletEffects") && !input.has("appliedCents"),"不能指定余额联动事实")
         val id = integer(input, "id", 0, MAX_SAFE_INTEGER)
         val taskId=if(input.has("recognitionTaskId")) integer(input,"recognitionTaskId",0,MAX_SAFE_INTEGER) else 0L
@@ -363,9 +366,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 val saved = app.store.saveEdited(base.copy(transfer=transfer,
                     bill = base.bill.copy(amountCents = cents, direction = direction,
                         merchant = merchant, category = category, occurredAt = occurredAt,
-                        categoryDecision=net.ankio.ledger.core.CategoryDecision(app.store.categoryDirectory(direction).firstOrNull { it.name==category }?.id,net.ankio.ledger.core.CategorySource.MANUAL,true,explanation="人工选择分类"),
                         reliable = true, reason = "", transfer=null, timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
                     note = note),
+                    manualCategorySelected=categoryEdited,
                     walletAccountUid=if(input.has("walletAccountUid")&&!input.isNull("walletAccountUid"))string(input,"walletAccountUid",64) else null,
                     manualWalletSelected=if(input.has("manualWalletSelected"))input.get("manualWalletSelected") as? Boolean ?: throw InvalidInput("钱包选择参数无效") else false,
                     expectedRevision=if(original!=null)integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else null,

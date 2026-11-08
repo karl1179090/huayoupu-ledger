@@ -240,4 +240,20 @@ class MerchantClassificationTest {
         } finally { app.deleteDatabase(name) }
     }
 
+    @Test fun editingAnImportedNoteKeepsItsExplicitImportCategoryProvenance() {
+        val name="rule-import-note-${UUID.randomUUID()}.db"
+        try { LedgerStore(app,name).use { store ->
+            val csv="时间,分类,二级分类,类型,金额,账户1,账户2,备注,账单标记,手续费,优惠券,标签,账单图片\n2026-11-01 10:00:00,合成导入用途,,支出,1.00,,,合成原备注,,0,0,,\n"
+            val document=LedgerCsvImport.read(csv.byteInputStream())
+            assertTrue(document.errors.toString(),document.errors.isEmpty())
+            assertEquals(1,LedgerCsvImport.apply(store,document).imported)
+            val original=store.all().single()
+            assertEquals(CategorySource.IMPORT,original.bill.categoryDecision!!.source)
+            val edited=store.saveEdited(original.copy(note="仅修改导入备注"))
+            assertEquals(original.bill.categoryDecision,edited.bill.categoryDecision)
+            assertEquals("合成导入用途",edited.bill.category)
+            assertTrue(store.accounts().isEmpty())
+        } } finally { app.deleteDatabase(name) }
+    }
+
 }

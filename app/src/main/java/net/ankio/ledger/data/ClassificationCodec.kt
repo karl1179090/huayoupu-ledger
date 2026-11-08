@@ -47,7 +47,7 @@ object ClassificationCodec {
         if(rule.name.isBlank() || rule.name.length>80 || rule.name.any(Char::isISOControl) ||
             rule.id.length>160 || requireId && rule.id.isBlank() || rule.order !in 0..1_000_000 ||
             rule.categoryId.isBlank() || rule.categoryId.length>160 || rule.direction !in listOf(Direction.EXPENSE,Direction.INCOME) ||
-            rule.conditions.size!=1 || rule.conditions.any { it.value.length>200 || ClassificationEngine.normalized(it.value).isBlank() || it.value.any(Char::isISOControl) })
+            rule.conditions.size!=1 || rule.conditions.any { it.value.length>200 || ClassificationEngine.normalized(it.value).isBlank() || it.value.any { char -> char.isISOControl() && !char.isWhitespace() } })
             throw ClassificationException("RULE_INVALID", "请填写规则名称、有效关键词、收支方向及目标分类")
     }
 

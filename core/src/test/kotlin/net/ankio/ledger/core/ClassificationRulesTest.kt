@@ -36,4 +36,15 @@ class ClassificationRulesTest {
         val manual = CategoryDecision("personal", CategorySource.MANUAL, manual=true, explanation="人工选择分类")
         assertEquals(manual, ClassificationEngine.classify(snapshot, ClassificationInput(Direction.EXPENSE, "咖啡馆"), manual))
     }
+    @Test fun punctuationAndSymbolsRemainSignificantAfterFormatNormalization() {
+        val rule=ClassificationRule("literal","合成字面关键词",true,Direction.EXPENSE,"cat:expense:dining",0,
+            listOf(ClassificationCondition(operator=ClassificationOperator.EQUALS,value="Ａ＋Ｂ")))
+        val snapshot=ClassificationSnapshot("literal-v1",listOf(rule),emptyList())
+        assertEquals(CategorySource.CUSTOM_RULE,ClassificationEngine.classify(snapshot,ClassificationInput(Direction.EXPENSE,"a + b")).source)
+        assertEquals(CategorySource.FALLBACK,ClassificationEngine.classify(snapshot,ClassificationInput(Direction.EXPENSE,"A-B")).source)
+        val emoji=snapshot.copy(customRules=listOf(rule.copy(conditions=listOf(ClassificationCondition(value="🧋")))))
+        assertEquals(CategorySource.CUSTOM_RULE,ClassificationEngine.classify(emoji,ClassificationInput(Direction.EXPENSE,"合成🧋茶饮")).source)
+        assertEquals(CategorySource.FALLBACK,ClassificationEngine.classify(emoji,ClassificationInput(Direction.EXPENSE,"合成☕饮品")).source)
+    }
+
 }

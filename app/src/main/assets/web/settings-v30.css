@@ -37,13 +37,13 @@
 #settings .account-preferences>button:last-child,#settings .category-preferences>button:last-child{border:0}
 #settings .account-preferences i,#settings .category-preferences i{color:#21a38a;width:23px;font-size:21px;text-align:center;flex:none}
 #settings .account-preferences b,#settings .category-preferences b{font-weight:500;white-space:nowrap}
-#settings .account-preferences #engine-provider,#settings .category-preferences #category-summary-count{margin-left:auto;font-size:12px;color:#718096;max-width:44%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#settings .account-preferences #engine-provider,#settings .category-preferences #category-summary-count,#settings .category-preferences #classification-rules-summary{margin-left:auto;font-size:12px;color:#718096;max-width:44%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #settings .account-preferences .chevron,#settings .category-preferences .chevron{color:#8297a8;margin-left:auto;font-size:20px}
-#settings .account-preferences #engine-provider+.chevron,#settings .category-preferences #category-summary-count+.chevron{margin-left:0}
+#settings .account-preferences #engine-provider+.chevron,#settings .category-preferences #category-summary-count+.chevron,#settings .category-preferences #classification-rules-summary+.chevron{margin-left:0}
 #settings .about-app{flex:none;margin:-5px 0 -7px;min-height:36px;font-size:11px;color:#718096;padding:7px;align-self:center}
 @media(max-height:780px){.native-app #settings.mobile-active{gap:10px;padding:16px 14px 88px}#settings .payment-settings{padding:13px}#settings .payment-app{padding:9px 7px}#settings>.shake{flex-basis:230px;min-height:230px;padding:16px 10px 9px}#settings .shake h2{font-size:20px;margin-bottom:7px}#settings .shake>p{margin-bottom:10px;font-size:11px}#settings .shake .steps{padding:8px 2px}#settings .step{font-size:11px}#settings .step b{width:26px;height:26px;margin-bottom:4px;font-size:16px}#settings .shake-runtime{margin-top:3px;min-height:32px}#settings .account-preferences{flex-basis:150px}#settings .account-preferences>button,#settings .category-preferences>button{padding:9px 0;min-height:50px}}
 @media(max-width:360px){#settings .payment-app{gap:5px;font-size:12px;padding-left:6px;padding-right:6px}#settings .payment-logo{width:27px;height:27px;flex-basis:27px}#settings .payment-logo.wechat svg{width:25px;height:25px}#settings .payment-logo.payment-alipay{font-size:18px}#settings .payment-app .switch{width:38px;height:24px}#settings .payment-app .switch:after{width:18px;height:18px}#settings .payment-app .switch[aria-checked=true]:after{transform:translateX(14px)}#settings .shake-illustration{width:99px;height:94px}#settings .shake h2{font-size:19px;gap:8px}}
-.large-text #settings .payment-apps{flex-direction:column}.large-text #settings>.shake{flex-basis:auto;min-height:265px}.large-text #settings .shake-illustration{opacity:.45}.large-text #settings .shake>p{max-width:80%}.large-text #settings .account-preferences #engine-provider,.large-text #settings .category-preferences #category-summary-count{max-width:40%}
+.large-text #settings .payment-apps{flex-direction:column}.large-text #settings>.shake{flex-basis:auto;min-height:265px}.large-text #settings .shake-illustration{opacity:.45}.large-text #settings .shake>p{max-width:80%}.large-text #settings .account-preferences #engine-provider,.large-text #settings .category-preferences #category-summary-count,.large-text #settings .category-preferences #classification-rules-summary{max-width:40%}
 @media(orientation:landscape){.native-app #settings.mobile-active{max-width:650px}#settings>.shake{flex-grow:0}#settings .account-preferences,#settings .category-preferences{flex-grow:0}}
 @media(prefers-reduced-motion:reduce){#settings .switch:after{transition:none}}
 /* Fit the full page above navigation on regular phones; keep scrolling on smaller displays. */
@@ -67,7 +67,7 @@
 #settings .payment-app+.payment-app{margin-left:8px}
 #settings .payment-logo{margin-right:7px}
 #settings .account-preferences>button>i,#settings .category-preferences>button>i{margin-right:14px}
-#settings .account-preferences #engine-provider+.chevron,#settings .category-preferences #category-summary-count+.chevron{margin-left:14px}
+#settings .account-preferences #engine-provider+.chevron,#settings .category-preferences #category-summary-count+.chevron,#settings .category-preferences #classification-rules-summary+.chevron{margin-left:14px}
 #settings .about-app{margin-top:5px}
 @media(max-height:780px){#settings>.payment-settings,#settings>.shake,#settings>.category-preferences,#settings>.account-preferences{margin-top:8px}#settings .about-app{margin-top:5px}}
 .large-text #settings .payment-app+.payment-app{margin-left:0;margin-top:8px}

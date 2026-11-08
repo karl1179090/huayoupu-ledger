@@ -862,7 +862,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized
     fun saveEdited(record: LedgerRecord, walletAccountUid:String?=null,manualWalletSelected:Boolean=false,
         expectedRevision:Long?=record.wallet?.revision,submissionToken:String?=null,
-        transferDetails:RecordTransferDetails?=record.transfer): LedgerRecord {
+        transferDetails:RecordTransferDetails?=record.transfer,manualCategorySelected:Boolean=false): LedgerRecord {
         val db=writableDatabase;db.beginTransaction()
         try {
         val token=submissionToken ?: if(record.id==0L)record.uid else null
@@ -904,7 +904,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             transfer=if(record.bill.direction==Direction.TRANSFER)manualTransfer else null,
             bill = record.bill.copy(reliable = true, reason = provenance, receipt=receipt,
                 timeExplicit=if(timeChanged)true else record.bill.timeExplicit, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
-                if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || record.bill.categoryDecision?.manual==true)
+                if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || manualCategorySelected)
                     CategoryDecision(CategoryDirectory.ensure(db,record.bill.direction,record.bill.category)?.id,CategorySource.MANUAL,true,explanation="人工选择分类")
                 else previous.bill.categoryDecision),
             state = RecordState.POSTED, reason = provenance, duplicateId = null)
