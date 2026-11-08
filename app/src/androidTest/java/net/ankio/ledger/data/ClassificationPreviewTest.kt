@@ -4,6 +4,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import net.ankio.ledger.LedgerApp
 import net.ankio.ledger.core.*
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -12,6 +14,106 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class ClassificationPreviewTest {
     private val app=ApplicationProvider.getApplicationContext<LedgerApp>()
+
+    private fun utf8(text:String)=text.toByteArray(Charsets.UTF_8).size
+    private fun capacityWire(snapshot:ClassificationSnapshot,replacements:List<CategoryReplacement>)=ClassificationCodec.snapshot(snapshot)
+        .put("categoryReplacements",JSONArray().apply { replacements.forEach { put(JSONObject().put("categoryId",it.categoryId)
+            .put("categoryName",it.categoryName).put("direction",it.direction.name).put("replacementId",it.replacementId)) } }).toString()
+
+    /** Exact independent wire-size fixture; long Chinese names keep byte/character counts distinct. */
+    private fun capacityReplacements(snapshot:ClassificationSnapshot,bytes:Int):List<CategoryReplacement> {
+        fun entry(index:Int,name:String)=CategoryReplacement("synthetic:preview-capacity:$index",name,Direction.EXPENSE,"cat:expense:other")
+        fun json(entry:CategoryReplacement)=JSONObject().put("categoryId",entry.categoryId).put("categoryName",entry.categoryName)
+            .put("direction",entry.direction.name).put("replacementId",entry.replacementId).toString()
+        fun text(count:Int)="合".repeat(count/3)+(if(count%3==2)"é" else "x".repeat(count%3))
+        val entries=mutableListOf<CategoryReplacement>()
+        var size=utf8(capacityWire(snapshot,emptyList()))
+        while(true) {
+            val candidate=entry(entries.size,"合".repeat(1024))
+            val added=utf8(json(candidate))+(if(entries.isEmpty())0 else 1)
+            if(size+added>bytes)break
+            entries+=candidate;size+=added
+        }
+        size-=utf8(json(entries.removeAt(entries.lastIndex)))+1
+        val first=entry(entries.size,"");val second=entry(entries.size+1,"")
+        val budget=bytes-size-utf8(json(first))-utf8(json(second))-2
+        val firstBytes=minOf(3072,budget-1)
+        entries+=first.copy(categoryName=text(firstBytes));entries+=second.copy(categoryName=text(budget-firstBytes))
+        assertEquals(bytes,utf8(capacityWire(snapshot,entries)))
+        assertTrue(entries.all { it.categoryName.length in 1..1024 })
+        return entries
+    }
+
+    @Test fun chineseDraftOneByteBeyondFinalConfigurationRejectsPreviewAndSaveWithoutAnyMutation() =
+        previewAndSaveCapacity(1)
+
+    @Test fun chineseDraftAtExactFinalConfigurationLimitPreviewsAndSavesAndRemainsReadable() =
+        previewAndSaveCapacity(0)
+
+    private fun previewAndSaveCapacity(excess:Int) {
+        val suffix=UUID.randomUUID().toString();val name="classification-preview-capacity-$suffix.db";val taskName="classification-preview-capacity-tasks-$suffix.db"
+        try {
+            lateinit var expected:ValidatedBackup
+            lateinit var expectedTask:String
+            LedgerStore(app,name).use { store ->
+                val wallet=store.saveAccount(LedgerAccount(name="合成预览容量资金",amountCents=10_000))
+                store.setDefaultWallet(wallet.uid)
+                store.saveEdited(LedgerRecord(capture=Capture(Source.MANUAL,"manual","合成凭证"),
+                    bill=ParsedBill(100,Direction.EXPENSE,"合成容量账单","其他",1_798_776_000_000,null,true,"",true),
+                    state=RecordState.POSTED),walletAccountUid=wallet.uid,manualWalletSelected=true)
+                val seed=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
+                val baseline=seed.classification!!.configuration.copy(version="seed")
+                val draft=ClassificationRule("","合成中文容量草稿",true,Direction.EXPENSE,"cat:expense:other",0,
+                    List(20) { ClassificationCondition(value="合".repeat(200)) })
+                // New persisted rule IDs and versions are UUIDs, each36 ASCII bytes.
+                val future=baseline.copy(version="x".repeat(36),customRules=listOf(draft.copy(id="x".repeat(36))))
+                val replacements=capacityReplacements(future,2_000_000+excess)
+                val baselineBytes=utf8(capacityWire(baseline,replacements))
+                assertTrue(baselineBytes<2_000_000)
+                assertTrue(capacityWire(baseline,replacements).length<baselineBytes)
+                LedgerBackup.restore(store,seed.copy(classification=ClassificationBackup(baseline,emptyList(),replacements)))
+                RecognitionTasks(app,taskName,classificationStore=store).use { tasks ->
+                    val queued=tasks.create(Source.IMAGE,"image")
+                    val frozen=tasks.classificationSnapshot(queued)
+                    val before=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
+                    val beforeTask=tasks.snapshot().toString()
+                    val input=ClassificationInput.hypothetical(Direction.EXPENSE,"合".repeat(200),emptyList(),"IMAGE")
+                    if(excess>0) {
+                        for(action in listOf<()->Any?>({ store.previewClassification(input,draft) },{ store.saveClassificationRule(draft) })) {
+                            val failure=runCatching(action).exceptionOrNull()
+                            assertTrue("Preview and Save must reject a final2000001-byte configuration",failure is ClassificationException)
+                            assertEquals("RULE_INVALID",(failure as ClassificationException).code)
+                            assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream()))
+                            assertEquals(beforeTask,tasks.snapshot().toString())
+                            assertEquals(frozen,tasks.classificationSnapshot(queued))
+                        }
+                        expected=before
+                    } else {
+                        val preview=store.previewClassification(input,draft)
+                        assertEquals(CategorySource.CUSTOM_RULE,preview.preview.decision.source)
+                        assertTrue(preview.preview.rules.single { it.selected }.conditions.all { it.matched })
+                        assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream()))
+                        assertEquals(beforeTask,tasks.snapshot().toString())
+                        val saved=store.saveClassificationRule(draft)
+                        expected=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
+                        val afterClassification=requireNotNull(expected.classification)
+                        assertEquals(2_000_000,utf8(capacityWire(afterClassification.configuration,replacements)))
+                        assertEquals(saved,afterClassification.configuration.customRules.single())
+                        assertEquals(before,expected.copy(classification=before.classification))
+                        assertEquals(before.classification!!.snapshots,afterClassification.snapshots)
+                        assertEquals(beforeTask,tasks.snapshot().toString())
+                        assertEquals(frozen,tasks.classificationSnapshot(queued))
+                    }
+                    expectedTask=beforeTask
+                }
+            }
+            LedgerStore(app,name).use { reopened -> RecognitionTasks(app,taskName,classificationStore=reopened).use { tasks ->
+                assertEquals(expected,LedgerBackup.decode(LedgerBackup.encode(reopened,app.channels).byteInputStream()))
+                assertEquals(expected.classification!!.configuration,reopened.classificationRules())
+                assertEquals(expectedTask,tasks.snapshot().toString())
+            } }
+        } finally { app.deleteDatabase(taskName);app.deleteDatabase(name) }
+    }
 
     @Test fun draftsUseSaveOrderingAndValidationWhileLongOrMissingBusinessFieldsStayEditableAndUnsaved() {
         val name="classification-preview-boundaries-${UUID.randomUUID()}.db"

@@ -28,9 +28,9 @@ internal object ClassificationStorage {
         ClassificationCodec.readSnapshot(serialized)
         db.update("classification_configuration",ContentValues().apply { put("payload",serialized) },"singleton=1",null)
     }
-    private fun payload(db:SQLiteDatabase,snapshot:ClassificationSnapshot)=
-        ClassificationCodec.configuration(snapshot,CategoryReplacementStorage.entries(db))
-    private fun write(db:SQLiteDatabase,snapshot:ClassificationSnapshot) { writePayload(db,payload(db,snapshot)) }
+    private fun write(db:SQLiteDatabase,snapshot:ClassificationSnapshot) {
+        writePayload(db,ClassificationCodec.configuration(snapshot,CategoryReplacementStorage.entries(db)))
+    }
     private fun changed(db:SQLiteDatabase,snapshot:ClassificationSnapshot) = write(db,snapshot.copy(version=UUID.randomUUID().toString()))
     private fun target(db:SQLiteDatabase,rule:ClassificationRule) {
         try { CategoryDirectory.requireCategory(db,rule.categoryId,rule.direction) }
@@ -46,13 +46,14 @@ internal object ClassificationStorage {
             else (current.customRules.filter { it.direction==input.direction }.maxOfOrNull { it.order } ?: -1)+1,conflictReason=null)
         val rules=current.customRules.filterNot { it.id==rule.id }+rule
         if(rules.size>2_000)throw ClassificationException("RULE_INVALID","分类规则数量过多")
-        val snapshot=current.copy(customRules=rules)
-        ClassificationCodec.readSnapshot(payload(db,snapshot).toString())
+        // Validate the final UUID version too: a restored version can have a different byte length.
+        val snapshot=current.copy(version=UUID.randomUUID().toString(),customRules=rules)
+        ClassificationCodec.configuration(snapshot,CategoryReplacementStorage.entries(db))
         return snapshot to rule
     }
     fun save(db:SQLiteDatabase,input:ClassificationRule):ClassificationRule {
         val (snapshot,rule)=prepared(db,input)
-        changed(db,snapshot);return rule
+        write(db,snapshot);return rule
     }
     fun replaceTarget(db:SQLiteDatabase,id:String,replacementId:String) {
         val current=configuration(db)
