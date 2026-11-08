@@ -30,7 +30,13 @@ const sumValues=list=>list.reduce((sum,value)=>sum+cents(value),0n);
 const directionLabel=value=>({EXPENSE:'支出',INCOME:'收入',TRANSFER:'转账'})[value]||'待确认';
 const filterDirection=()=>({expense:'EXPENSE',income:'INCOME',transfer:'TRANSFER',all:''})[filter]||'';
 const expenseOf=r=>r.direction==='EXPENSE'?cents(r.amountCents):r.direction==='TRANSFER'?cents(r.transfer?.feeCents):0n;
-const transferName=r=>r.direction==='TRANSFER'?`${r.transfer?.from?.accountName||r.transfer?.from?.reference?.name||'待选钱包'} → ${r.transfer?.to?.accountName||r.transfer?.to?.reference?.name||'待选钱包'}`:r.merchant||'未填写商户';
+const receiptFieldValue=field=>typeof field?.value==='string'?field.value.trim():'';
+const recordMerchant=r=>String(r?.merchant??'').trim()||receiptFieldValue(r?.receipt?.merchant);
+const knownReceiptApps={'com.tencent.mm':'微信','com.eg.android.AlipayGphone':'支付宝','com.taobao.taobao':'淘宝','com.unionpay':'云闪付','com.jingdong.app.mall':'京东','com.xunmeng.pinduoduo':'拼多多','com.sankuai.meituan':'美团'};
+const receiptSourceNames={ocr:'识别文字',node:'页面节点',capture:'采集来源'};
+const receiptFieldSpecs=[['merchant','商家'],['productDescription','商品说明'],['transactionDescription','交易说明'],['orderRemark','订单备注'],['serviceProvider','服务商'],['receiptIssuer','凭证来源'],['sourceApp','来源应用']];
+function formatReceiptSourceApp(value){const raw=String(value??'').trim();if(!raw)return '';const app=(automatic.applications||[]).find(a=>a.packageName===raw&&a.label);return app?.label||knownReceiptApps[raw]||raw}
+const transferName=r=>r.direction==='TRANSFER'?`${r.transfer?.from?.accountName||r.transfer?.from?.reference?.name||'待选钱包'} → ${r.transfer?.to?.accountName||r.transfer?.to?.reference?.name||'待选钱包'}`:recordMerchant(r)||(r?.receipt?'未提供':'未填写商户');
 const signedMoney=(cents,income=false)=>`¥ ${income?'+':'-'}${money(cents)}`;
 function escapeText(value){const e=document.createElement('span');e.textContent=value??'';return e.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function localTime(time){const d=new Date(time),pad=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
@@ -226,21 +232,21 @@ function loadMoreRecords(){
 function newDraft(){editorBaseline=null;draft={id:0,submissionToken:submissionToken(),walletAccountUid:walletSettings.defaultAccountUid,manualWalletSelected:false,amount:'',direction:'EXPENSE',merchant:'',category:'餐饮',occurredAt:Date.now(),note:'',state:'REVIEW',source:'MANUAL',reason:'',rawText:''};previewUrl='';importError='';updateEditor()}
 function recordWithDetails(record){
  if(record._detailsLoaded||!native?.recordDetails)return {...record};
- try{const details=JSON.parse(native.recordDetails(record.id));if(!details.ok)throw Error(details.error);return {...record,...details.record,rawText:details.rawText,history:details.history}}
+ try{const details=JSON.parse(native.recordDetails(record.id));if(!details.ok)throw Error(details.error);return {...record,...details.record,receipt:details.record?.receipt!==undefined?details.record.receipt:(record.receipt??null),rawText:details.rawText,history:details.history,_detailsLoaded:true}}
  catch(_){notify('详情读取失败，请重新打开');return {...record,history:[],rawText:''}}
 }
 function syncRecordHistory(){
  if(!draft?.id||(!recordPanelOpen&&page!=='import'))return;
  const current=records.find(r=>r.id===draft.id);if(!current)return;
- const revision=r=>JSON.stringify([r.refund,r.historyRevision,r.hasScreenshot,r._storedMerchant??r.merchant,r.hasMerchantIcon,r.merchantIconKey,r.merchantIconRevision,r.iconStatus,r.paymentProvider,r.wallet,r.transfer]);
+ const revision=r=>JSON.stringify([r.refund,r.historyRevision,r.hasScreenshot,r._storedMerchant??recordMerchant(r),r.hasMerchantIcon,r.merchantIconKey,r.merchantIconRevision,r.iconStatus,r.paymentProvider,r.wallet,r.transfer,r.receipt]);
  if(revision(current)===revision(draft))return;
- const wasDirty=editorDirty(),edits=readDraft(),financialChanged=current.amountCents!==draft.amountCents;
- const merchant=edits.merchant===(draft._storedMerchant??draft.merchant)?current.merchant:edits.merchant;
- const {transfer:transferInput,...fields}=edits;draft={...draft,...recordWithDetails(current),...fields,transferInput:wasDirty?transferInput:undefined,merchant,_storedMerchant:current.merchant,amount:financialChanged?String(current.amountCents/100):edits.amount};
+ const wasDirty=editorDirty(),edits=readDraft(),financialChanged=current.amountCents!==draft.amountCents,currentMerchant=recordMerchant(current);
+ const merchant=edits.merchant===(draft._storedMerchant??draft.merchant)?currentMerchant:edits.merchant;
+ const {transfer:transferInput,...fields}=edits;draft={...draft,...recordWithDetails(current),...fields,transferInput:wasDirty?transferInput:undefined,merchant,_storedMerchant:currentMerchant,amount:financialChanged?String(current.amountCents/100):edits.amount};
  if(!wasDirty)draft.expectedRevision=current.wallet?.revision??0;updateEditor();if(!wasDirty)editorBaseline=JSON.stringify(readDraft());remember();
 }
 function readDraft(){return {merchant:$('merchant').value,category:$('category').textContent,amount:$('amount').value,direction:$('direction').dataset.value,occurredAt:draft&&(draft.refund||localTime(draft.occurredAt)===$('occurred-at').value)?draft.occurredAt:new Date($('occurred-at').value).getTime(),note:$('note').value,...(draft?.manualWalletSelected?{walletAccountUid:draft.walletAccountUid,manualWalletSelected:true}:{}),...($('direction').dataset.value==='TRANSFER'?{transfer:readTransfer('record')}:{})}}
-function updateEditor(){if(!draft)return;$('merchant').value=draft.merchant||'';$('category').textContent=draft.category||'其他';$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
+function updateEditor(){if(!draft)return;$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=draft.category||'其他';$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
  const posted=draft.state==='POSTED';
  const editor=$('import'),automatic=['SMS','NOTIFICATION'].includes(draft.source),aiRecord=['OCR','IMAGE'].includes(draft.source);
  editor.classList.toggle('standard-record',!!draft.id&&(automatic||draft.source==='MANUAL'));editor.classList.toggle('ai-record',aiRecord);editor.classList.toggle('posted-record',posted);
@@ -264,7 +270,30 @@ document.querySelector('#import .pending').textContent=draft.recognitionTaskId?(
  $('refund-summary').hidden=!(draft.refund||draft.standaloneRefund);
  if(draft.standaloneRefund)$('refund-summary').textContent=`退款回执 · 本次成功退款 ¥${money(draft.standaloneRefund.refundedCents)} · 请核对原账单`;
  if(draft.refund){const r=draft.refund;$('refund-summary').textContent=refundPending?`原付 ¥${money(r.originalAmountCents)} · ${r.mode==='single'?'本次':'累计'}成功退款 ¥${money(r.refundedCents)}`:`${r.refundedCents===r.originalAmountCents?'已全额退款 · ':''}原付 ¥${money(r.originalAmountCents)} · 已退 ¥${money(r.refundedCents)} · 实付 ¥${money(draft.amountCents)}`}
- drawRecordWallet();renderCaptureGallery();
+ drawRecordWallet();renderReceiptDetails();renderCaptureGallery();
+}
+function renderReceiptDetails(){
+ const section=$('receipt-details');if(!section)return;
+ const receipt=draft?.receipt;
+ if(!receipt||typeof receipt!=='object'){section.hidden=true;section.innerHTML='';delete section.dataset.recordId;return}
+ const recordKey=String(draft.id||draft.recognitionTaskId||0),keepExpanded=section.dataset.recordId===recordKey&&$('receipt-evidence-toggle')?.getAttribute('aria-expanded')==='true';
+ section.dataset.recordId=recordKey;section.hidden=false;
+ const rows=receiptFieldSpecs.map(([key,label])=>{
+  const rawVal=receiptFieldValue(receipt[key]),missing=key==='merchant'&&!rawVal;
+  if(key!=='merchant'&&!rawVal)return '';
+  const displayVal=missing?'未提供':key==='sourceApp'?formatReceiptSourceApp(rawVal):rawVal;
+  return `<div class="receipt-field" data-receipt-field="${key}"><dt>${label}</dt><dd class="receipt-value${missing?' is-missing':''}">${escapeText(displayVal)}</dd></div>`;
+ }).filter(Boolean).join('');
+ const evidenceItems=receiptFieldSpecs.map(([key,label])=>{
+  const f=receipt[key];if(!f||typeof f!=='object')return '';
+  const val=receiptFieldValue(f),raw=String(f.rawText??'').trim()||val,src=String(f.source??'').trim();
+  if(!val&&!raw)return '';
+  const srcName=receiptSourceNames[src]||'凭证记录';
+  return `<div class="receipt-evidence-item" data-evidence-field="${key}" data-evidence-source="${escapeText(src)}"><div class="receipt-evidence-meta"><b>${label}</b><span class="receipt-source-tag">${escapeText(srcName)}</span></div><div class="receipt-evidence-raw">${escapeText(raw)}</div></div>`;
+ }).filter(Boolean).join('');
+ section.innerHTML=`<div class="receipt-heading"><b>凭证信息</b><small class="receipt-readonly">只读</small></div><dl class="receipt-fields">${rows}</dl>${evidenceItems?`<div class="receipt-verify"><button type="button" id="receipt-evidence-toggle" class="receipt-evidence-toggle" aria-expanded="${keepExpanded}" aria-controls="receipt-evidence-panel"><span>核对原始文字与来源</span><small class="receipt-toggle-state">${keepExpanded?'收起':'查看'}</small></button><div id="receipt-evidence-panel" class="receipt-evidence-panel"${keepExpanded?'':' hidden'}>${evidenceItems}</div></div>`:''}`;
+ const toggle=$('receipt-evidence-toggle'),panel=$('receipt-evidence-panel');
+ if(toggle&&panel)toggle.onclick=()=>{const next=panel.hidden;panel.hidden=!next;toggle.setAttribute('aria-expanded',String(next));const state=toggle.querySelector('.receipt-toggle-state');if(state)state.textContent=next?'收起':'查看'};
 }
 function historyKind(item){return ({payment:'付款截图',payment_supplement:'补充截图',refund_pending:'退款截图',partial_refund:'退款截图',full_refund:'退款截图',refund_supplement:'退款补图'})[item.kind]||'账单截图'}
 function renderCaptureGallery(){
@@ -293,7 +322,7 @@ function chooseRefundTarget(){if(!native||!draft?.id)return;try{const result=JSO
 function confirmRefundTarget(targetId){const target=records.find(r=>r.id===targetId);if(!(draft?.refund||draft?.standaloneRefund)||!target)return;const pendingId=draft.id;const refund=draft.refund||{...draft.standaloneRefund,originalAmountCents:target.refund?.originalAmountCents||target.amountCents,mode:'single'};showSheet('确认更新原账单？',`<p class="sheet-copy">${escapeText(target.merchant)} · ${localTime(target.occurredAt).replace('T',' ')}<br>原付 ¥${money(refund.originalAmountCents)}，${refund.mode==='single'?'本次':'累计'}成功退款 ¥${money(refund.refundedCents)}。将按原账单已记录的退款核算实付金额，重复退款不会再次扣减，原分类和备注继续保留。</p><div class="sheet-actions"><button type="button" id="refund-back">返回选择</button><button type="button" id="confirm-refund" class="primary">确认更新原账单</button></div>`);$('refund-back').onclick=chooseRefundTarget;$('confirm-refund').onclick=()=>{try{const result=JSON.parse(native.confirmRefund(pendingId,targetId));if(!result.ok){notify(result.error||'退款更新失败，请重新核对');return}closeSheet();refresh();const updated=records.find(r=>r.id===result.id);if(updated){applyRecord(updated);remember()}notify(result.updated?'退款已更新，原账单截图已保留':'该退款已记录，无需重复扣减')}catch(_){notify('退款更新失败，请重试')}}}
 function updateTimeChip(){$('time-label').textContent=$('occurred-at').value.replace('T',' ').replace(/-/g,'/');$('time-label').title='修改交易时间：'+$('time-label').textContent}
 function updateAmountSign(){$('amount-sign').textContent='¥ '+(({INCOME:'+',EXPENSE:'-',TRANSFER:''})[$('direction').dataset.value]||'');drawRecordWallet()}
-function applyRecord(r,keepPreview=false){draft={...recordWithDetails(r),_storedMerchant:r.merchant,expectedRevision:r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false};previewUrl=r.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':'';working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
+function applyRecord(r,keepPreview=false){const loaded=recordWithDetails(r),merchant=recordMerchant(loaded);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...loaded,merchant,_storedMerchant:merchant,expectedRevision:loaded.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false};previewUrl=loaded.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':'';working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
 function openRecord(id,keepPreview=false,anchor=null){
  const control=document.querySelector(`[data-pending="${id}"],[data-record="${id}"]`),origin=anchor||controlBounds(control);
  let r=records.find(x=>x.id===id);
