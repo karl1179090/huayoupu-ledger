@@ -6,12 +6,26 @@ import org.json.JSONObject
 
 /** Bounded wallet summaries shared by paged lists, legacy snapshots and detail refreshes. */
 object WalletReadModel {
+    fun selectionReason(source: String?, manualLocked: Boolean, evidence: String?, accountUid: String?): String? {
+        if (accountUid == null) return null
+        if (manualLocked || source == "MANUAL") return "MANUAL"
+        if (source != "PAYMENT_METHOD" || evidence == null) return source
+        val value = JSONObject(evidence)
+        if (value.optString("medium") != "BANK_CARD" || value.optBoolean("ambiguous")) return source
+        return when {
+            !value.isNull("bankCode") && !value.isNull("cardLast4") -> "BANK_AND_TAIL"
+            !value.isNull("bankCode") -> "UNIQUE_BANK"
+            else -> source
+        }
+    }
+
     fun summary(link: RecordWalletLink?, account: LedgerAccount?): JSONObject = JSONObject().apply {
         put("eligibility", link?.eligibility?.name ?: "LEGACY_EXCLUDED")
         put("accountUid", link?.accountUid ?: JSONObject.NULL); put("accountName", account?.name ?: JSONObject.NULL)
         put("kind", account?.kind ?: JSONObject.NULL); put("bankCode", account?.bankCode ?: JSONObject.NULL)
         put("cardLast4", account?.cardLast4 ?: JSONObject.NULL); put("archived", account?.archived ?: false)
         put("selectionSource", link?.selectionSource ?: JSONObject.NULL); put("manualLocked", link?.manualLocked ?: false)
+        put("selectionReason", selectionReason(link?.selectionSource, link?.manualLocked ?: false, link?.paymentEvidence, link?.accountUid) ?: JSONObject.NULL)
         put("appliedCents", link?.appliedCents ?: 0); put("reviewCode", link?.reviewCode ?: JSONObject.NULL)
         put("revision", link?.revision ?: 0); put("accountReference",link?.accountReference?.let(::JSONObject) ?: JSONObject.NULL)
     }

@@ -273,6 +273,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
                 sourceApp=previous.sourceApp ?: incoming.sourceApp,
                 recognition=previous.recognition ?: incoming.recognition,
+                bank=previous.bank ?: incoming.bank,
                 time=previous.time?.takeIf { it.accountingAt==result.bill.occurredAt }
                     ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
         }
@@ -366,7 +367,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         manualAccountUid:String?=null,manualSelected:Boolean=false,incomingEvidence:PaymentMethodEvidence?=record.bill.paymentMethod,
         deleted:Boolean=false,changed:Boolean=true,sourcePackage:String?=record.capture.origin,
         strictTransfer:Boolean=false,deferredDeltas:MutableMap<String,Long>?=null,
-        initialEligibility:WalletEligibility=WalletEligibility.ACTIVE,originalPosted:Boolean?=null):LedgerRecord {
+        initialEligibility:WalletEligibility=WalletEligibility.ACTIVE,originalPosted:Boolean?=null,humanConfirmed:Boolean=false):LedgerRecord {
         val previous=WalletAccounting.link(db,record.uid)
         val oldEffects=WalletAccounting.effects(db,record.uid)
         val oldTransfer=TransferAccounting.read(db,record.uid)
@@ -399,24 +400,59 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             }
             val settings=WalletAccounting.settings(db)
             if(manualSelected && manualAccountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
+            val bank=record.bill.receipt?.bank
+            val actualBankConflict=bank!=null && incomingEvidence?.medium in setOf("WECHAT_BALANCE","ALIPAY_BALANCE","UNSUPPORTED") &&
+                !manualSelected && previous?.manualLocked!=true
+            val accountEvidence=if(actualBankConflict)PaymentMethodEvidence("BANK_CARD",incomingEvidence!!.role,
+                bank?.bankCode,bank?.cardLast4,rawLabel=(record.bill.paymentMethod?.rawLabel.orEmpty()+" / "+incomingEvidence.rawLabel).take(80),
+                rawValue=(record.bill.paymentMethod?.rawValue.orEmpty()+" / "+incomingEvidence.rawValue).take(160),ambiguous=true)
+            else if(bank==null)incomingEvidence else
+                incomingEvidence?.takeIf { it.medium=="BANK_CARD" } ?: record.bill.paymentMethod?.takeIf { it.medium=="BANK_CARD" }
+                ?: PaymentMethodEvidence("BANK_CARD",when(bank.direction) { Direction.EXPENSE->"DEBIT";Direction.INCOME->"CREDIT";else->"UNKNOWN" },
+                    bank.bankCode,bank.cardLast4,ambiguous=bank.ambiguous)
             val resolution=if(isNew && deferredDeltas!=null && previous?.selectionSource=="IMPORT")
                 WalletResolution(link.accountUid,"IMPORT",link.reviewCode,link.evidenceFingerprint,link.manualLocked)
             else WalletResolver.resolve(accounts().map {
                 WalletCandidate(it.uid,it.type.name,it.kind,it.bankCode,it.cardLast4,it.archived)
-            },sourcePackage,incomingEvidence,settings.defaultAccountUid,settings.appBindings,
+            },sourcePackage,accountEvidence,settings.defaultAccountUid,settings.appBindings,
                 if(manualSelected)manualAccountUid else null,
-                previous?.takeIf { oldTransfer==null }?.let { WalletResolution(it.accountUid,it.selectionSource,it.reviewCode,it.evidenceFingerprint,it.manualLocked) })
+                previous?.takeIf { oldTransfer==null }?.let { WalletResolution(it.accountUid,it.selectionSource,it.reviewCode,it.evidenceFingerprint,it.manualLocked) },
+                requireActualBank=record.bill.receipt?.bank!=null)
             if(manualSelected && resolution.accountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
-            val evidence=if(incomingEvidence!=null && resolution.evidenceFingerprint==WalletResolver.fingerprint(incomingEvidence))
-                encodePaymentEvidence(incomingEvidence) else link.paymentEvidence
+            val evidence=if(accountEvidence!=null && resolution.evidenceFingerprint==WalletResolver.fingerprint(accountEvidence))
+                encodePaymentEvidence(accountEvidence) else link.paymentEvidence
             link=link.copy(accountUid=resolution.accountUid,selectionSource=resolution.selectionSource,
                 manualLocked=resolution.manualLocked || link.manualLocked || manualSelected,
                 paymentEvidence=evidence,evidenceFingerprint=resolution.evidenceFingerprint ?: link.evidenceFingerprint,
                 reviewCode=if(final.state!=record.state)link.reviewCode else resolution.reviewCode)
+            if (record.bill.receipt?.bank != null) {
+                val accountReviews=setOf("PAYMENT_METHOD_UNMATCHED","PAYMENT_METHOD_AMBIGUOUS","PAYMENT_EVIDENCE_CONFLICT","WALLET_REQUIRED")
+                val heldAccount=previous?.reviewCode in accountReviews && !manualSelected && !link.manualLocked
+                val heldDirection=previous?.reviewCode=="BANK_DIRECTION_REQUIRED" && !humanConfirmed
+                val accountReview=if(link.manualLocked)null else when {
+                    heldAccount -> previous?.reviewCode
+                    link.reviewCode in accountReviews -> link.reviewCode
+                    record.bill.receipt?.bank?.ambiguous==true -> "PAYMENT_METHOD_AMBIGUOUS"
+                    link.accountUid==null -> "PAYMENT_METHOD_UNMATCHED"
+                    else -> null
+                }
+                val review=accountReview ?: if(record.bill.direction==null || heldDirection)"BANK_DIRECTION_REQUIRED" else null
+                if(review!=null) {
+                    final=final.copy(state=RecordState.REVIEW,reason=when(review) {
+                        "BANK_DIRECTION_REQUIRED" -> "请确认银行交易收支方向后入账"
+                        "PAYMENT_EVIDENCE_CONFLICT","PAYMENT_METHOD_AMBIGUOUS" -> "银行账户证据冲突，请选择实际账户后入账"
+                        else -> "未找到凭证中的银行卡，请选择实际账户后入账"
+                    })
+                    link=link.copy(accountUid=if(accountReview!=null)null else link.accountUid,reviewCode=review)
+                } else if(link.reviewCode=="BANK_DIRECTION_REQUIRED") link=link.copy(reviewCode=null)
+            }
             if(final.state==RecordState.POSTED && link.accountUid==null) {
                 if(!isNew && oldEffects.isNotEmpty())throw WalletException("WALLET_REQUIRED","请选择钱包后入账")
-                final=record.copy(state=RecordState.REVIEW,reason="请选择钱包后入账")
-                link=link.copy(reviewCode="WALLET_REQUIRED")
+                val review=link.reviewCode ?: "WALLET_REQUIRED"
+                final=record.copy(state=RecordState.REVIEW,reason=if(review=="PAYMENT_METHOD_AMBIGUOUS")
+                    "银行账户证据冲突，请选择实际账户后入账" else if(review=="PAYMENT_METHOD_UNMATCHED")
+                    "未找到凭证中的银行卡，请选择实际账户后入账" else "请选择钱包后入账")
+                link=link.copy(reviewCode=review)
             } else if(record.state==RecordState.REVIEW && previous?.reviewCode=="WALLET_REQUIRED" &&
                 record.reason=="请选择钱包后入账" && link.accountUid!=null && record.bill.reliable && record.duplicateId==null) {
                 final=record.copy(state=RecordState.POSTED,reason="")
@@ -589,6 +625,16 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     evidence.feeCents!=null && details.feeCents!=null && evidence.feeCents!=details.feeCents ||
                         evidence.feeMode!=null && details.feeMode!=null && evidence.feeCents!=0L && evidence.feeMode!=details.feeMode
                 } } == true
+                if(directionConflict && bill.direction!=null && bill.receipt?.bank!=null && identified.wallet?.manualLocked!=true) {
+                    val presentation=enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                    val pending=presentation.copy(bill=presentation.bill.copy(direction=null),state=RecordState.REVIEW,
+                        reason="银行交易方向证据冲突，请确认收支方向后入账")
+                    check(db.update("records",values(pending),"id=?",arrayOf(pending.id.toString()))==1)
+                    appendPaymentScreenshot(db,pending,capture,screenshot,"identity_conflict")
+                    val reviewed=syncWallet(db,pending,incomingEvidence=bill.paymentMethod)
+                    db.setTransactionSuccessful()
+                    return IngestResult.Saved(reviewed,supplemented=true)
+                }
                 if(amountConflict || directionConflict || feeConflict) {
                     val linked=identified.wallet?.copy(reviewCode="TRANSFER_IDENTITY_CONFLICT",revision=identified.wallet.revision+1)
                     if(linked!=null)WalletAccounting.saveLink(db,linked)
@@ -615,7 +661,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val supplemented=appendPaymentScreenshot(db,identified,capture,screenshot)
                 // Strong identity also owns ordinary incomplete drafts. Complete the original
                 // draft under the same reliability gate as exact-duplicate supplementation.
-                val promoted=identified.state==RecordState.REVIEW && identified.duplicateId==null &&
+                val promoted=identified.state==RecordState.REVIEW && identified.duplicateId==null && identified.bill.receipt?.bank==null &&
                     identified.bill.refund==null && identified.bill.standaloneRefund==null &&
                     identified.transfer==null && identified.bill.transfer==null && bill.transfer==null &&
                     identified.capture.source in setOf(Source.OCR,Source.IMAGE) && capture.source in setOf(Source.OCR,Source.IMAGE) &&
@@ -694,7 +740,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val duplicate=if(detected is Duplicate.Exact && identityOwners.size>1)Duplicate.Possible(detected.id) else detected
             if (duplicate is Duplicate.Exact) {
                 val previous = requireNotNull(get(duplicate.id))
-                val promoted=previous.state==RecordState.REVIEW && previous.duplicateId==null && previous.bill.refund==null &&
+                val promoted=previous.state==RecordState.REVIEW && previous.duplicateId==null && previous.bill.receipt?.bank==null && previous.bill.refund==null &&
                     previous.capture.source in setOf(Source.OCR,Source.IMAGE) && !requireReview && bill.reliable
                 var original=if(promoted)previous.copy(bill=bill.copy(category=previous.bill.category,categoryDecision=previous.bill.categoryDecision),state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
                     else enrichPaymentPresentation(db,previous,capture,bill,merchantIcon)
@@ -925,7 +971,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             db.delete("merchant_icons", "record_id = ?", arrayOf(id.toString()))
             linkMerchantIcon(db, id, posted.bill.merchant, null)
             pruneIcon(db, previousKey)
-            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true,originalPosted=previous?.state==RecordState.POSTED)
+            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true,originalPosted=previous?.state==RecordState.POSTED,humanConfirmed=true)
             WalletAccounting.remember(db,token,"RECORD_SAVE",saved.uid)
             db.setTransactionSuccessful()
             return saved

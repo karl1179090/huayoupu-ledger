@@ -82,9 +82,10 @@ class NodeRecognitionRegistry(adapters:List<NodeLayoutAdapter>) {
         val resolved=receipt.time ?: TransactionTimeResolver.fallback(processingTime)
         if(resolved.recognitionAt!=processingTime.recognitionAt || candidate.bill.timeExplicit && !resolved.explicit)
             return NodeRoute(NodeRouteReason.INVALID_CANDIDATE,parseMillis=parseMillis)
-        fun node(field:ReceiptField?)=field?.copy(source="node")
+        fun node(field:ReceiptField?)=field?.copy(source=if(field.source=="ocr")"node" else field.source)
         val evidence=receipt.copy(merchant=node(receipt.merchant),productDescription=node(receipt.productDescription),transactionDescription=node(receipt.transactionDescription),
-            orderRemark=node(receipt.orderRemark),serviceProvider=node(receipt.serviceProvider),receiptIssuer=node(receipt.receiptIssuer),sourceApp=node(receipt.sourceApp),time=resolved)
+            orderRemark=node(receipt.orderRemark),serviceProvider=node(receipt.serviceProvider),receiptIssuer=node(receipt.receiptIssuer),sourceApp=node(receipt.sourceApp),
+            bank=receipt.bank?.copy(transactionType=node(receipt.bank?.transactionType)),time=resolved)
         return NodeRoute(NodeRouteReason.VERIFIED_LAYOUT,candidate.copy(bill=candidate.bill.copy(occurredAt=resolved.accountingAt,timeExplicit=resolved.explicit,receipt=evidence)),adapter.verification,parseMillis)
     }
     companion object {

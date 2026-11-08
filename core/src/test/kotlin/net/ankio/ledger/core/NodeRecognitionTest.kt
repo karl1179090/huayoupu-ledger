@@ -28,14 +28,16 @@ class NodeRecognitionTest {
             listOfNotNull(LocalOcrBillParser.parse(lines,100,200,clock.recognitionAt,policy=RecognitionPolicy.USER_INITIATED,
                 origin=snapshot.packageName,timeContext=clock)?.let { TransactionCandidate(CandidateId.SINGLE,it) })
         }))
-        val first=snapshot()
+        val first=snapshot(snapshot().nodes+CaptureNode(2,0,1,NodeBounds(0,70,100,90),"商户名称：合成商店"))
         val next=snapshot(listOf(CaptureNode(0,null,0,NodeBounds(0,0,100,200),"支付成功"),
-            CaptureNode(1,0,1,NodeBounds(0,30,100,60),"付款金额：99.99")))
+            CaptureNode(1,0,1,NodeBounds(0,30,100,60),"付款金额：99.99"),
+            CaptureNode(2,0,1,NodeBounds(0,70,100,90),"商户名称：合成商店")))
         assertFalse(first.sameTransaction(next))
         val initial=registry.select(first,false) { time }.candidate!!.bill
         val second=registry.select(next,false) { time }.candidate!!.bill
         assertEquals(1234L,initial.amountCents);assertEquals(9999L,second.amountCents)
-        assertEquals("node",second.receipt!!.sourceApp!!.source)
+        assertEquals("node",second.receipt!!.merchant!!.source)
+        assertEquals("capture",second.receipt!!.sourceApp!!.source)
     }
     @Test fun unknownProductionLayoutDoesNotFreezeProcessingClockOrInventCompatibility() {
         var clocks=0

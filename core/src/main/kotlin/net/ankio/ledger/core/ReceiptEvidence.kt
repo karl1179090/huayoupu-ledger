@@ -15,6 +15,21 @@ data class ReceiptField(
     }
 }
 
+/** Adapted bank notification evidence from the same receipt block, independent of its hosting app. */
+data class BankReceiptEvidence(
+    val bankCode: String? = null,
+    val cardLast4: String? = null,
+    val transactionType: ReceiptField? = null,
+    val direction: Direction? = null,
+    val ambiguous: Boolean = false,
+) {
+    init {
+        require(bankCode == null || BankCodes.normalize(bankCode) == bankCode)
+        require(cardLast4 == null || Regex("[0-9]{4}").matches(cardLast4))
+        require(direction == null || direction in setOf(Direction.EXPENSE, Direction.INCOME))
+    }
+}
+
 /** Business evidence is independent of ledger notes, classification, time and wallet decisions. */
 data class ReceiptEvidence(
     val version: Int = 1,
@@ -26,12 +41,13 @@ data class ReceiptEvidence(
     val serviceProvider: ReceiptField? = null,
     val receiptIssuer: ReceiptField? = null,
     val sourceApp: ReceiptField? = null,
+    val bank: BankReceiptEvidence? = null,
     val time: ReceiptTimeEvidence? = null,
     val recognition: RecognitionEvidence? = null,
 ) {
     init {
         require(version == 1 && Regex("[A-Za-z0-9_-]{1,80}").matches(blockId))
         require(listOfNotNull(merchant, productDescription, transactionDescription, orderRemark,
-            serviceProvider, receiptIssuer, sourceApp).all { it.blockId == blockId })
+            serviceProvider, receiptIssuer, sourceApp, bank?.transactionType).all { it.blockId == blockId })
     }
 }

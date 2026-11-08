@@ -82,6 +82,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 #detailDialog.system-flow .system-target{background:var(--tint);color:var(--grape-deep)}
 .ai-status,.ai-pill{background:var(--tint);color:var(--grape-deep)}
 #direction{background:var(--tint);color:var(--grape-deep)}
+#direction.pending-direction{background:#FFF4E5;color:#B45309;border:1px dashed #F59E0B}
 
 /* ---------- 底部导航 ---------- */
 .bottom-nav{background:linear-gradient(to bottom,#FFFFFFC2,#FFFFFFF0);box-shadow:0 -8px 25px #EDE9F766;border:0}
