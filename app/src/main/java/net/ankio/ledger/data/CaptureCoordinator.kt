@@ -12,20 +12,23 @@ class CaptureCoordinator(context: Context) {
 
     suspend fun acceptRecognition(capture: Capture, bill: ParsedBill?, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, eventKey:String?=null, operationKey:String?=null,
         policy:RecognitionPolicy=RecognitionPolicy.USER_INITIATED, allowed: () -> Boolean): IngestResult =
-        acceptCandidate(capture,bill?.let { TransactionCandidate(CandidateId.SINGLE,it) },screenshot,merchantIcon,eventKey,operationKey,policy,allowed).outcome
+        acceptCandidate(capture,bill?.let { TransactionCandidate(CandidateId.SINGLE,it) },screenshot,merchantIcon,eventKey,operationKey,policy,allowed=allowed).outcome
 
     suspend fun acceptCandidate(capture:Capture,candidate:TransactionCandidate?,screenshot:ByteArray?=null,merchantIcon:ByteArray?=null,
         eventKey:String?=null,operationKey:String?=null,policy:RecognitionPolicy=RecognitionPolicy.USER_INITIATED,
-        allowed:()->Boolean):CandidateSubmission = mutex.withLock {
+        classificationSnapshot:ClassificationSnapshot?=null,allowed:()->Boolean):CandidateSubmission = mutex.withLock {
         val candidateId=candidate?.id ?: CandidateId.SINGLE
         if (!allowed() || candidate == null) return@withLock CandidateSubmission(candidateId,IngestResult.Ignored)
-        val bill=candidate.bill
-        if(!policy.allows(bill,capture.origin))return@withLock CandidateSubmission(candidateId,IngestResult.Skipped("该交易需通过摇一摇或截图导入核对"))
+        if(!policy.allows(candidate.bill,capture.origin))return@withLock CandidateSubmission(candidateId,IngestResult.Skipped("该交易需通过摇一摇或截图导入核对"))
         synchronized(app.channels) {
             if (!allowed()) CandidateSubmission(candidateId,IngestResult.Ignored)
-            else (if(operationKey==null)CandidateSubmission(candidateId,app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon))
-                else app.store.ingestCandidate(capture.copy(text=capture.text.take(32_768)),candidate,operationKey,eventKey,screenshot,merchantIcon)).also {
+            else synchronized(app.store) {
+                val bill=app.store.classify(candidate.bill,classificationSnapshot ?: app.store.classificationRules())
+                val classified=candidate.copy(bill=bill)
+                (if(operationKey==null)CandidateSubmission(candidateId,app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon))
+                else app.store.ingestCandidate(capture.copy(text=capture.text.take(32_768)),classified,operationKey,eventKey,screenshot,merchantIcon)).also {
                 if (it.outcome is IngestResult.Saved || it.outcome == IngestResult.DuplicateSkipped && merchantIcon!=null) app.changed(true)
+                }
             }
         }
     }

@@ -26,6 +26,7 @@ data class ParsedBill(
     val standaloneRefund: StandaloneRefundEvidence? = null,
     val transfer: TransferEvidence? = null,
     val receipt: ReceiptEvidence? = null,
+    val categoryDecision: CategoryDecision? = null,
 )
 
 /** A completed receipt with no original total stays pending until its original payment is verified. */

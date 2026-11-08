@@ -218,6 +218,7 @@
        <button aria-label="修改交易时间" id="time-label" type="button"></button>
        <input aria-label="交易时间" id="occurred-at" type="hidden"/>
       </div>
+      <p id="category-explanation" class="category-explanation" hidden=""></p>
       <p id="refund-summary" class="refund-summary" hidden=""></p>
       <button type="button" id="record-wallet" class="wallet-choice" onclick="chooseWallet('record')"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>选择钱包</span><span class="chevron">›</span></button>
       <div id="record-transfer" class="transfer-form" hidden></div><p id="wallet-explanation" class="wallet-explanation"></p>
@@ -328,6 +329,7 @@
     </section>
     <section class="card category-preferences" aria-label="分类管理">
      <button id="category-settings" type="button" onclick="openCategoryManager()"><i aria-hidden="true" class="fa-solid fa-tag"></i><b>分类管理</b><small id="category-summary-count">支出与收入分类</small><span class="chevron">›</span></button>
+     <button id="classification-rules-settings" type="button" onclick="openClassificationRules()"><i aria-hidden="true" class="fa-solid fa-wand-magic-sparkles"></i><b>自动分类规则</b><small id="classification-rules-summary">按商家自动归类</small><span class="chevron">›</span></button>
     </section>
     <section class="card account-preferences" aria-label="账户与偏好">
      <button id="backup"><i aria-hidden="true" class="fa-solid fa-folder-open"></i><b>账单与备份</b><span class="chevron">›</span></button>

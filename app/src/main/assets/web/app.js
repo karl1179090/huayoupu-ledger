@@ -17,7 +17,34 @@ document.addEventListener('click',e=>{const control=e.target.closest('button,[ro
 let automatic={enabled:false,applications:[]},screenshotStorage={},captureHealth={enabled:false,ready:false};
 let walletSettings={defaultAccountUid:null,appBindings:{}},bankCodeOptions=[],manualWalletUid=null,manualWalletSelected=false,manualSubmissionToken='';
 const submissionToken=()=>window.crypto?.randomUUID?.()||'submit-'+Date.now()+'-'+Math.random().toString(36).slice(2);
-let records=[],channels={},accounts=[],bankOptions=[],customCategories={expense:[],income:[]},categoryDirectory=null,categoryIconOptions=null,automationRunning=false,filter='expense',page='ledger',month=localMonth(Date.now()),draft=null,working=false,importError='',previewUrl='',timer;
+let records=[],channels={},accounts=[],bankOptions=[],customCategories={expense:[],income:[]},categoryDirectory=null,categoryIconOptions=null,classificationRules={formatVersion:1,version:'',customRules:[],builtinRules:[]},activeRulesSheetRefresh=null,automationRunning=false,filter='expense',page='ledger',month=localMonth(Date.now()),draft=null,working=false,importError='',previewUrl='',timer;
+function normRuleKeyword(s){return Array.from(String(s||'').normalize('NFKC').toLowerCase()).filter(c=>!/\s/u.test(c)).join('')}
+function normalizeRuleItem(r,idx=0){
+ if(!r||typeof r!=='object')return null;
+ const dir=String(r.direction||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE';
+ const conds=Array.isArray(r.conditions)&&r.conditions.length?r.conditions.map(c=>({field:String(c?.field||'MERCHANT').toUpperCase(),operator:String(c?.operator||'CONTAINS').toUpperCase()==='EQUALS'?'EQUALS':'CONTAINS',value:String(c?.value||'')})):[];
+ return {id:String(r.id||`rule:${dir.toLowerCase()}:${idx}`),name:String(r.name||''),enabled:r.enabled!==false,direction:dir,categoryId:String(r.categoryId||''),order:typeof r.order==='number'?r.order:idx,matchMode:String(r.matchMode||'ALL').toUpperCase(),source:r.source||null,conditions:conds,conflictReason:r.conflictReason||null};
+}
+function applyClassificationRules(raw){
+ if(!raw||typeof raw!=='object')return;
+ classificationRules={formatVersion:Number(raw.formatVersion||1),version:String(raw.version||''),customRules:Array.isArray(raw.customRules)?raw.customRules.map((r,i)=>normalizeRuleItem(r,i)).filter(Boolean):[],builtinRules:Array.isArray(raw.builtinRules)?raw.builtinRules.map((r,i)=>normalizeRuleItem(r,i)).filter(Boolean):[]};
+}
+function customRulesByDirection(dir){
+ const d=String(dir||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE';
+ return (classificationRules.customRules||[]).filter(r=>r.direction===d).sort((a,b)=>(a.order??0)-(b.order??0)||String(a.id).localeCompare(String(b.id)));
+}
+function formatRuleConditionSummary(rule){
+ const cond=(rule?.conditions||[]).find(c=>c.field==='MERCHANT')||rule?.conditions?.[0];
+ if(!cond)return '商家关键词';
+ return `商家${cond.operator==='EQUALS'?'等于':'包含'}「${cond.value}」`;
+}
+function formatCategoryDecision(record){
+ if(!record||record.direction==='TRANSFER')return '';
+ const d=record.categoryDecision;if(!d||typeof d!=='object')return '';
+ const exp=String(d.explanation||'').trim();
+ if(exp)return exp;
+ return ({CUSTOM_RULE:'按规则自动归类',BUILTIN_RULE:'内置规则自动归类',FALLBACK_OTHER:'未命中规则，归入其他',MANUAL:'人工选择分类',IMPORT:'保留导入分类',LEGACY:'保留原分类'})[d.source]||'';
+}
 const captureName=r=>r.captureMode==='page'||['page_auto','wechat_auto','payment_auto'].some(origin=>String(r.origin||'').startsWith(origin))||/^(page_auto|wechat_auto|payment_auto)/.test(String(r.diagnostic?.trigger||''))?'自动记账':sourceNames[r.source];
 const sourceNames={OCR:'摇一摇',IMAGE:'图片导入',SMS:'自动 · 短信',NOTIFICATION:'自动 · 通知',MANUAL:'手动'};
 const ALLOWED_CATEGORY_ICONS=new Set(['utensils','bus','bag-shopping','gamepad','house','plus','graduation-cap','shirt','basket-shopping','phone','gift','ellipsis','wallet','award','rotate-left','tag','heart','paw','plane','coffee','car','book','briefcase','coins','music','dumbbell']);
@@ -181,6 +208,7 @@ function closeRecordPanel(animate=true,done=()=>{}){const panel=$('record-panel'
 function settingsHelp(){showSheet('如何记账',`<div class="settings-help"><h3>支付结果自动记账</h3><p>选择微信或支付宝并开启自动识别，按步骤授予页面识别权限。仅在所选应用已适配、可读取且通过隐私检查的成功页采集。有效支出有可用钱包时直接入账；可信的本人充值与提现需双方及费用信息完整，否则整笔待确认，普通收入由你主动记录。</p><h3>没抓到，摇一摇补录</h3><p>先在“应用白名单”选择允许摇一摇的应用，再打开单笔支付结果或账单详情，摇动手机补录。红包、快速返回等没有停留在成功页的交易，也可以用这个方式记录。</p><h3>收入由你主动记录</h3><p>自动识别记录支出，以及已适配且可信的本人钱包充值与提现；普通收入由你手动、截图或摇一摇记录。</p><h3>本人钱包互转</h3><p>手动选择两个自己的资产钱包，支持额外扣手续费或到账扣手续费。本金不计收支，手续费计支出。信息不全时整笔待确认，双方余额都不动；给别人转账仍是支出。</p><h3>迁移历史账本</h3><p>可先导入钱包余额快照，再导历史账单并关闭余额联动。导入默认关闭，后续编辑和删除也不改变余额；完整迁移可使用 ZIP 备份。</p><h3>钱包余额自动更新</h3><p>普通收支优先匹配明确的付款方式，其次使用应用钱包和默认钱包。本人互转必须确认双方，不套用默认钱包。新账单更新余额，退款回到原钱包；升级前的历史记录不追溯扣款。资产余额可为负数，也可手动校准。</p><h3>记录保存在本机</h3><p>识别在本机完成，无需配置，截图不上传。账单和商户图标保存在本机。截图由应用自动压缩和定期清理，清理截图不会删除账单。</p></div>`)}
 function drawSettings(){
  if($('category-summary-count'))$('category-summary-count').textContent=`支出 ${directoryItems('expense').length} 个 · 收入 ${directoryItems('income').length} 个`;
+ if($('classification-rules-summary')){const all=classificationRules?.customRules||[],enabled=all.filter(r=>r.enabled!==false).length;$('classification-rules-summary').textContent=all.length?`启用 ${enabled} 条 · 共 ${all.length} 条`:'按商家自动归类'}
  $('shake-application-count').textContent=captureHealth.shakeSelectedCount?`已选 ${captureHealth.shakeSelectedCount} 个`:'请选择应用';
  for(const toggle of document.querySelectorAll('[data-payment-app]')) {
   const app=(automatic.applications||[]).find(a=>a.packageName===toggle.dataset.paymentApp);
@@ -233,15 +261,15 @@ function refresh(){
   const scope=listScope();
   const result=JSON.parse(native.snapshotFirst?native.snapshotFirst(month,query,filterDirection(),viewKey):native.snapshotView?native.snapshotView(month,query,viewLimit,filterDirection(),viewKey):native.snapshot());
   if(result.error||result.ok===false)throw Error(result.error);
-  if(result.unchanged)return false;
+  if(result.unchanged){if(activeRulesSheetRefresh){activeRulesSheetRefresh(true);drawSettings()}return false}
   const retainTail=!!native.snapshotFirst&&loadedScope===scope&&dataRevision===result.dataRevision&&records.length>(result.records||[]).length;
   const previousView=ledgerView;
   records=retainTail?[...result.records,...records.slice(result.records.length)]:result.records;
   viewKey=result.viewKey||'';dataRevision=result.dataRevision||'';loadedScope=scope;
   ledgerView=result.ledgerView||null;
   if(retainTail&&ledgerView){ledgerView.hasMore=previousView.hasMore;ledgerView.nextCursor=previousView.nextCursor}
-  recognitionTasks=result.recognitionTasks||[];channels=result.channels;accounts=result.accounts||[];bankOptions=result.bankOptions||[];customCategories=result.customCategories||{expense:[],income:[]};if(result.categoryDirectory)categoryDirectory=result.categoryDirectory;if(result.categoryIconOptions)categoryIconOptions=result.categoryIconOptions;automationRunning=!!result.automationRunning;automatic=result.automatic||{enabled:false,applications:[]};screenshotStorage=result.screenshotStorage||{};captureHealth=result.captureHealth||{enabled:false,ready:false};walletSettings=result.walletSettings||{defaultAccountUid:null,appBindings:{}};bankCodeOptions=result.bankCodeOptions||[];
-  showUndo(result.pendingDeletion);render();syncTaskEditor();syncRecordHistory();if(manualOpen||page==='manual')drawCategories();else drawManualWallet();if(page==='stats')drawStats();if(draft){updateEditor();drawRecordWallet()}return true;
+  recognitionTasks=result.recognitionTasks||[];channels=result.channels;accounts=result.accounts||[];bankOptions=result.bankOptions||[];customCategories=result.customCategories||{expense:[],income:[]};if(result.categoryDirectory)categoryDirectory=result.categoryDirectory;if(result.categoryIconOptions)categoryIconOptions=result.categoryIconOptions;if(result.classificationRules)applyClassificationRules(result.classificationRules);else if(native.classificationRules){try{const cr=JSON.parse(native.classificationRules());if(cr.ok&&cr.classificationRules)applyClassificationRules(cr.classificationRules)}catch(_){}}automationRunning=!!result.automationRunning;automatic=result.automatic||{enabled:false,applications:[]};screenshotStorage=result.screenshotStorage||{};captureHealth=result.captureHealth||{enabled:false,ready:false};walletSettings=result.walletSettings||{defaultAccountUid:null,appBindings:{}};bankCodeOptions=result.bankCodeOptions||[];
+  showUndo(result.pendingDeletion);render();syncTaskEditor();syncRecordHistory();if(manualOpen||page==='manual')drawCategories();else drawManualWallet();if(page==='stats')drawStats();if(draft){updateEditor();drawRecordWallet()}if(activeRulesSheetRefresh)activeRulesSheetRefresh(false);return true;
  }catch(_){notify('账本读取失败，请重试');return false}
 }
 function loadMoreRecords(){
@@ -257,24 +285,24 @@ function loadMoreRecords(){
   ledgerView.hasMore=result.ledgerView.hasMore;ledgerView.nextCursor=result.ledgerView.nextCursor;render();
  }catch(_){notify('更多账单读取失败，请重试')}finally{loadingPage=false}
 }
-function newDraft(){editorBaseline=null;const defCat=findCategoryItem('EXPENSE',null,'餐饮');draft={id:0,submissionToken:submissionToken(),walletAccountUid:walletSettings.defaultAccountUid,manualWalletSelected:false,amount:'',direction:'EXPENSE',merchant:'',category:defCat.name,categoryId:defCat.id,occurredAt:Date.now(),note:'',state:'REVIEW',source:'MANUAL',reason:'',rawText:''};previewUrl='';importError='';updateEditor()}
+function newDraft(){editorBaseline=null;const defCat=findCategoryItem('EXPENSE',null,'餐饮');draft={id:0,submissionToken:submissionToken(),walletAccountUid:walletSettings.defaultAccountUid,manualWalletSelected:false,_categoryEdited:true,amount:'',direction:'EXPENSE',merchant:'',category:defCat.name,categoryId:defCat.id,occurredAt:Date.now(),note:'',state:'REVIEW',source:'MANUAL',reason:'',rawText:''};previewUrl='';importError='';updateEditor()}
 function recordWithDetails(record){
  if(record._detailsLoaded||!native?.recordDetails)return {...record};
- try{const details=JSON.parse(native.recordDetails(record.id));if(!details.ok)throw Error(details.error);return {...record,...details.record,receipt:details.record?.receipt!==undefined?details.record.receipt:(record.receipt??null),rawText:details.rawText,history:details.history,_detailsLoaded:true}}
+ try{const details=JSON.parse(native.recordDetails(record.id));if(!details.ok)throw Error(details.error);const merged={...record,...details.record,receipt:details.record?.receipt!==undefined?details.record.receipt:(record.receipt??null),rawText:details.rawText,history:details.history,_detailsLoaded:true};if(merged.categoryDecision===undefined&&record.categoryDecision!==undefined)merged.categoryDecision=record.categoryDecision;return merged}
  catch(_){notify('详情读取失败，请重新打开');return {...record,history:[],rawText:''}}
 }
 function syncRecordHistory(){
  if(!draft?.id||(!recordPanelOpen&&page!=='import'))return;
  const current=records.find(r=>r.id===draft.id);if(!current)return;
- const revision=r=>JSON.stringify([r.refund,r.historyRevision,r.hasScreenshot,r._storedMerchant??recordMerchant(r),r.category,r.categoryId,r.categoryIcon,r.hasMerchantIcon,r.merchantIconKey,r.merchantIconRevision,r.iconStatus,r.paymentProvider,r.wallet,r.transfer,r.receipt]);
+ const revision=r=>JSON.stringify([r.refund,r.historyRevision,r.hasScreenshot,r._storedMerchant??recordMerchant(r),r.category,r.categoryId,r.categoryIcon,r.categoryDecision?.explanation,r.categoryDecision?.source,r.categoryDecision?.categoryId,r.hasMerchantIcon,r.merchantIconKey,r.merchantIconRevision,r.iconStatus,r.paymentProvider,r.wallet,r.transfer,r.receipt]);
  if(revision(current)===revision(draft))return;
  const wasDirty=editorDirty(),edits=readDraft(),financialChanged=current.amountCents!==draft.amountCents,currentMerchant=recordMerchant(current);
  const merchant=edits.merchant===(draft._storedMerchant??draft.merchant)?currentMerchant:edits.merchant;
  const {transfer:transferInput,...fields}=edits;draft={...draft,...recordWithDetails(current),...fields,transferInput:wasDirty?transferInput:undefined,merchant,_storedMerchant:currentMerchant,amount:financialChanged?String(current.amountCents/100):edits.amount};
  if(!wasDirty){const resolved=resolveRecordCategory(current);draft.category=resolved.name;draft.categoryId=resolved.id;draft.expectedRevision=current.wallet?.revision??0}updateEditor();if(!wasDirty)editorBaseline=JSON.stringify(readDraft());remember();
 }
-function readDraft(){const direction=$('direction').dataset.value,category=$('category').textContent,categoryId=direction==='TRANSFER'?null:($('category').dataset.categoryId||findCategoryItem(direction,draft?.categoryId,category)?.id||null);return {merchant:$('merchant').value,category,...(direction!=='TRANSFER'&&categoryId?{categoryId}:{}),amount:$('amount').value,direction,occurredAt:draft&&(draft.refund||localTime(draft.occurredAt)===$('occurred-at').value)?draft.occurredAt:new Date($('occurred-at').value).getTime(),note:$('note').value,...(draft?.manualWalletSelected?{walletAccountUid:draft.walletAccountUid,manualWalletSelected:true}:{}),...(direction==='TRANSFER'?{transfer:readTransfer('record')}:{})}}
-function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
+function readDraft(){const direction=$('direction').dataset.value,category=$('category').textContent,categoryId=direction==='TRANSFER'?null:($('category').dataset.categoryId||findCategoryItem(direction,draft?.categoryId,category)?.id||null);return {merchant:$('merchant').value,category,...(direction!=='TRANSFER'&&categoryId?{categoryId}:{}),amount:$('amount').value,direction,occurredAt:draft&&(draft.refund||localTime(draft.occurredAt)===$('occurred-at').value)?draft.occurredAt:new Date($('occurred-at').value).getTime(),note:$('note').value,categoryEdited:!!draft?._categoryEdited,...(draft?.manualWalletSelected?{walletAccountUid:draft.walletAccountUid,manualWalletSelected:true}:{}),...(direction==='TRANSFER'?{transfer:readTransfer('record')}:{})}}
+function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');const catExplain=$('category-explanation'),decisionText=formatCategoryDecision({...draft,direction:$('direction')?.dataset?.value||draft.direction});if(catExplain){catExplain.hidden=!decisionText;catExplain.textContent=decisionText}$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
  const posted=draft.state==='POSTED';
  const editor=$('import'),automatic=['SMS','NOTIFICATION'].includes(draft.source),aiRecord=['OCR','IMAGE'].includes(draft.source);
  editor.classList.toggle('standard-record',!!draft.id&&(automatic||draft.source==='MANUAL'));editor.classList.toggle('ai-record',aiRecord);editor.classList.toggle('posted-record',posted);
@@ -350,7 +378,7 @@ function chooseRefundTarget(){if(!native||!draft?.id)return;try{const result=JSO
 function confirmRefundTarget(targetId){const target=records.find(r=>r.id===targetId);if(!(draft?.refund||draft?.standaloneRefund)||!target)return;const pendingId=draft.id;const refund=draft.refund||{...draft.standaloneRefund,originalAmountCents:target.refund?.originalAmountCents||target.amountCents,mode:'single'};showSheet('确认更新原账单？',`<p class="sheet-copy">${escapeText(target.merchant)} · ${localTime(target.occurredAt).replace('T',' ')}<br>原付 ¥${money(refund.originalAmountCents)}，${refund.mode==='single'?'本次':'累计'}成功退款 ¥${money(refund.refundedCents)}。将按原账单已记录的退款核算实付金额，重复退款不会再次扣减，原分类和备注继续保留。</p><div class="sheet-actions"><button type="button" id="refund-back">返回选择</button><button type="button" id="confirm-refund" class="primary">确认更新原账单</button></div>`);$('refund-back').onclick=chooseRefundTarget;$('confirm-refund').onclick=()=>{try{const result=JSON.parse(native.confirmRefund(pendingId,targetId));if(!result.ok){notify(result.error||'退款更新失败，请重新核对');return}closeSheet();refresh();const updated=records.find(r=>r.id===result.id);if(updated){applyRecord(updated);remember()}notify(result.updated?'退款已更新，原账单截图已保留':'该退款已记录，无需重复扣减')}catch(_){notify('退款更新失败，请重试')}}}
 function updateTimeChip(){$('time-label').textContent=$('occurred-at').value.replace('T',' ').replace(/-/g,'/');$('time-label').title='修改交易时间：'+$('time-label').textContent}
 function updateAmountSign(){$('amount-sign').textContent='¥ '+(({INCOME:'+',EXPENSE:'-',TRANSFER:''})[$('direction').dataset.value]||'');drawRecordWallet()}
-function applyRecord(r,keepPreview=false){const detailed=recordWithDetails(r),resolved=resolveRecordCategory(detailed),merchant=recordMerchant(detailed);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...detailed,merchant,category:resolved.name,categoryId:resolved.id,_storedMerchant:merchant,expectedRevision:detailed.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false};previewUrl=detailed.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':'';working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
+function applyRecord(r,keepPreview=false){const detailed=recordWithDetails(r),resolved=resolveRecordCategory(detailed),merchant=recordMerchant(detailed);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...detailed,merchant,category:resolved.name,categoryId:resolved.id,_storedMerchant:merchant,_categoryEdited:false,expectedRevision:detailed.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false};previewUrl=detailed.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':'';working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
 function openRecord(id,keepPreview=false,anchor=null){
  const control=document.querySelector(`[data-pending="${id}"],[data-record="${id}"]`),origin=anchor||controlBounds(control);
  let r=records.find(x=>x.id===id);
@@ -376,6 +404,7 @@ function setChannel(key,enabled){if(native){native.setChannel(key,enabled);setTi
 function revokeChannel(key){if(native){native.revokeChannel(key);setTimeout(refresh,100)}else notify('请在 Android 应用中管理系统授权')}
 function privacy(){if(native?.privacyFrom)native.privacyFrom(nativeOrigin(document.querySelector('.privacy-banner')));else if(native)native.privacy();else showSheet('截图与账本保存在本机','<p class="sheet-copy">账单、账户、分类和备注，以及新增、修改、删除操作，均在本机完成和保存。</p><p class="sheet-copy">开启自动识别后，仅在所选应用能明确读取付款成功状态和金额、通过隐私检查后截图记录支出及已适配的本人钱包充值、提现；密码、验证和无法确认的页面跳过。摇一摇仅在你主动选择的应用白名单内取图，也须通过隐私检查。应用目录和图标只在本机用于选择，不上传。识别在本机完成，截图和账本不上传。</p><p class="sheet-copy">你可随时移除允许识别的应用、暂停识别，或撤销系统授权。</p>')}
 function showSheet(title,html){
+ if(title!=='自动分类规则')activeRulesSheetRefresh=null;
  const panel=$('sheet'),wasOpen=panel.open,wasClosing=sheetClosing;sheetClosing=false;panel.classList.remove('sheet-closing','capture-viewer');delete panel.dataset.fileOperation;
  $('sheet-title').textContent=title;$('sheet-content').innerHTML=html;$('sheet-content').scrollTop=0;
  if(wasOpen){if(wasClosing||panel._morph)FluidMotion.run(panel,sheetAnchor,false,()=>{},null);return}
@@ -386,6 +415,7 @@ function showSheet(title,html){
  requestAnimationFrame(()=>{if(panel.open&&!sheetClosing)FluidMotion.run(panel,sheetAnchor,false,()=>{},null)});
 }
 function closeSheet(animate=true){
+ activeRulesSheetRefresh=null;
  const panel=$('sheet');if(!panel?.open)return;if(sheetClosing&&animate)return;sheetClosing=true;panel.classList.add('sheet-closing');
  const finish=()=>{FluidMotion.stop(panel);panel.close();panel.classList.remove('capture-viewer','sheet-closing');sheetClosing=false;if(panel._returnControl?.isConnected)panel._returnControl.focus({preventScroll:true})};
  if(animate)FluidMotion.run(panel,sheetAnchor,true,finish,null);else finish();
@@ -408,14 +438,15 @@ $('category').onclick=()=>{
   if(manageBtn){manageBtn.hidden=false;manageBtn.onclick=()=>openCategoryManager(dir)}
   const items=directoryItems(dir),curId=$('category').dataset.categoryId||'',curName=$('category').textContent;
   box.innerHTML=items.map(c=>{const selected=curId?c.id===curId:c.name===curName;return `<button type="button" class="sheet-row category-sheet-row" data-category="${escapeText(c.name)}" data-category-id="${escapeText(c.id)}"><span class="category-sheet-label">${categoryBadge(c.name,c.direction,c.icon)}<b>${escapeText(c.name)}</b></span><span>${selected?'✓':''}</span></button>`}).join('');
-  box.querySelectorAll('[data-category]').forEach(b=>b.onclick=()=>{$('category').textContent=b.dataset.category;$('category').dataset.categoryId=b.dataset.categoryId||'';if(draft){draft.category=b.dataset.category;draft.categoryId=b.dataset.categoryId||null}closeSheet();remember()});
+  box.querySelectorAll('[data-category]').forEach(b=>b.onclick=()=>{const nextId=b.dataset.categoryId||'';$('category').textContent=b.dataset.category;$('category').dataset.categoryId=nextId;if(draft){draft._categoryEdited=true;draft.category=b.dataset.category;draft.categoryId=nextId||null;if(draft.id)draft.categoryDecision={...(draft.categoryDecision||{}),categoryId:nextId||null,source:'MANUAL',manual:true,ruleId:null,ruleVersion:null,explanation:'人工选择分类'};const catExplain=$('category-explanation'),decisionText=formatCategoryDecision({...draft,direction:$('direction')?.dataset?.value||draft.direction});if(catExplain){catExplain.hidden=!decisionText;catExplain.textContent=decisionText}}closeSheet();remember()});
  };
  renderChoices(activeDir());
  document.querySelectorAll('[data-direction]').forEach(b=>b.onclick=()=>{
   const nextDir=b.dataset.direction,prevDir=$('direction').dataset.value;
   $('direction').dataset.value=nextDir;$('direction').textContent=directionLabel(nextDir);
-  if(nextDir==='TRANSFER'){$('category').textContent='转账';$('category').dataset.categoryId='';if(draft){draft.category='转账';draft.categoryId=null}}
-  else if(prevDir!==nextDir||!$('category').dataset.categoryId||!directoryItems(nextDir).some(c=>c.id===$('category').dataset.categoryId)){const nextCat=findCategoryItem(nextDir,null,null);$('category').textContent=nextCat.name;$('category').dataset.categoryId=nextCat.id;if(draft){draft.category=nextCat.name;draft.categoryId=nextCat.id}}
+  if(nextDir==='TRANSFER'){$('category').textContent='转账';$('category').dataset.categoryId='';if(draft){if(prevDir!==nextDir)draft._categoryEdited=true;draft.category='转账';draft.categoryId=null}}
+  else if(prevDir!==nextDir||!$('category').dataset.categoryId||!directoryItems(nextDir).some(c=>c.id===$('category').dataset.categoryId)){const nextCat=findCategoryItem(nextDir,null,null);$('category').textContent=nextCat.name;$('category').dataset.categoryId=nextCat.id;if(draft){if(prevDir!==nextDir)draft._categoryEdited=true;draft.category=nextCat.name;draft.categoryId=nextCat.id;if(draft.id&&prevDir!==nextDir)draft.categoryDecision={...(draft.categoryDecision||{}),categoryId:nextCat.id,source:'MANUAL',manual:true,ruleId:null,ruleVersion:null,explanation:'人工选择分类'}}}
+  const catExplain=$('category-explanation'),decisionText=formatCategoryDecision({...draft,direction:nextDir});if(catExplain){catExplain.hidden=!decisionText;catExplain.textContent=decisionText}
   updateAmountSign();document.querySelectorAll('[data-direction]').forEach(e=>e.classList.toggle('active',e===b));renderChoices(nextDir);remember();
  });
 };
@@ -563,6 +594,130 @@ function openCategoryManager(initialDirection){
  renderManager();
 }
 $('manage-category').onclick=()=>openCategoryManager(manualType);
+function openClassificationRules(initialDirection){
+ let manageDir=String(initialDirection||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE',editingRule=null,formDir=manageDir,formName='',formKeyword='',formOperator='CONTAINS',formEnabled=true,formCategoryId='',internalMutation=false;
+ const syncFromNative=()=>{
+  if(native?.getCategoryDirectory){try{const res=JSON.parse(native.getCategoryDirectory());if(res.ok){if(res.categoryDirectory)categoryDirectory=res.categoryDirectory;if(res.categoryIconOptions)categoryIconOptions=res.categoryIconOptions}}catch(_){}}
+  if(native?.classificationRules){try{const res=JSON.parse(native.classificationRules());if(res.ok&&res.classificationRules)applyClassificationRules(res.classificationRules)}catch(_){}}
+ };
+ const ensureValidCategoryId=(dir,preferredId)=>{
+  const list=directoryItems(dir),d=String(dir||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE';
+  const matched=preferredId&&list.find(c=>c.id===preferredId&&c.direction===d);
+  return matched?matched.id:(list[0]?.id||'');
+ };
+ const captureDraftInputs=()=>{
+  if($('rule-name'))formName=$('rule-name').value;
+  if($('rule-keyword'))formKeyword=$('rule-keyword').value;
+  if($('rule-operator'))formOperator=$('rule-operator').value==='EQUALS'?'EQUALS':'CONTAINS';
+  if($('rule-enabled'))formEnabled=!!$('rule-enabled').checked;
+  if($('rule-direction'))formDir=$('rule-direction').value==='INCOME'?'INCOME':'EXPENSE';
+  if($('rule-category'))formCategoryId=$('rule-category').value;
+ };
+ const applyRulesResult=res=>{
+  if(res?.classificationRules)applyClassificationRules(res.classificationRules);
+  internalMutation=true;
+  try{viewKey='';dataRevision='';loadedScope='';refresh();drawSettings();remember()}finally{internalMutation=false}
+ };
+ syncFromNative();
+ formCategoryId=ensureValidCategoryId(formDir,'');
+ const renderRulesSheet=(focusSelector=null)=>{
+  const expRules=customRulesByDirection('EXPENSE'),incRules=customRulesByDirection('INCOME'),rules=manageDir==='INCOME'?incRules:expRules;
+  const dirLabel=manageDir==='INCOME'?'收入':'支出',formDirLabel=formDir==='INCOME'?'收入':'支出';
+  const dirCategories=directoryItems(formDir);
+  formCategoryId=ensureValidCategoryId(formDir,formCategoryId);
+  const firstEnabledId=rules.find(r=>r.enabled!==false)?.id||null;
+  showSheet('自动分类规则',`<div class="category-manager-header"><div class="segmented" id="rule-manage-tabs" role="tablist" aria-label="自动分类规则方向"><button type="button" data-rule-dir="EXPENSE" class="${manageDir==='EXPENSE'?'active':''}" aria-pressed="${manageDir==='EXPENSE'}">支出规则 (${expRules.length})</button><button type="button" data-rule-dir="INCOME" class="${manageDir==='INCOME'?'active':''}" aria-pressed="${manageDir==='INCOME'}">收入规则 (${incRules.length})</button></div>${editingRule?'<button type="button" id="reset-rule-form" class="category-add-btn">+ 新增规则</button>':''}</div><p class="sheet-copy rule-scope-note" id="classification-rules-note">按列表从上到下匹配，<b>首条命中的启用规则生效</b>。修改、停用或删除规则仅影响后续新识别账单，不会修改已有账单。</p><div class="category-editor-card" id="rule-editor-card"><div class="rule-editor-top"><h4 id="rule-editor-title">${editingRule?`编辑规则 · ${escapeText(editingRule.name)}`:`新增${formDirLabel}规则`}</h4><label class="rule-enable-control" for="rule-enabled"><input type="checkbox" id="rule-enabled" ${formEnabled?'checked':''}/><span>启用规则</span></label></div><label class="sheet-copy" for="rule-name">规则名称（必填，最多 80 字）</label><input class="month-input" id="rule-name" maxlength="80" value="${escapeText(formName)}" placeholder="例如：星巴克咖啡、地铁通勤"/><div class="rule-form-grid"><div><label class="sheet-copy" for="rule-direction">适用方向</label><select class="month-input" id="rule-direction"><option value="EXPENSE" ${formDir==='EXPENSE'?'selected':''}>支出</option><option value="INCOME" ${formDir==='INCOME'?'selected':''}>收入</option></select></div><div><label class="sheet-copy" for="rule-category">目标分类</label><select class="month-input" id="rule-category">${dirCategories.map(c=>`<option value="${escapeText(c.id)}" ${c.id===formCategoryId?'selected':''}>${escapeText(c.name)}</option>`).join('')}</select></div></div><div class="rule-form-grid"><div><label class="sheet-copy" for="rule-operator">商家匹配方式</label><select class="month-input" id="rule-operator"><option value="CONTAINS" ${formOperator!=='EQUALS'?'selected':''}>商家包含</option><option value="EQUALS" ${formOperator==='EQUALS'?'selected':''}>商家等于</option></select></div><div><label class="sheet-copy" for="rule-keyword">商家关键词（必填）</label><input class="month-input" id="rule-keyword" maxlength="200" value="${escapeText(formKeyword)}" placeholder="例如：星巴克、瑞幸"/></div></div><p class="category-field-error" id="rule-form-error" role="alert" hidden></p><div class="sheet-actions">${editingRule?'<button type="button" id="cancel-rule-edit">取消编辑</button>':'<button type="button" onclick="closeSheet()">关闭</button>'}<button type="button" class="primary" id="save-rule">${editingRule?'保存修改':'保存规则'}</button></div></div><div class="category-manage-list" id="classification-rules-list">${rules.length?rules.map((rule,idx)=>{const targetCat=directoryItems(rule.direction).find(c=>c.id===rule.categoryId),targetName=targetCat?targetCat.name:'失效分类（请重新选择）',targetIcon=targetCat?targetCat.icon:'tag',condSummary=formatRuleConditionSummary(rule),isFirst=rule.enabled!==false&&rule.id===firstEnabledId;return `<div class="category-manage-row rule-manage-row${rule.enabled===false?' is-disabled':''}" data-rule-row="${escapeText(rule.id)}" data-rule-name="${escapeText(rule.name)}" data-rule-enabled="${rule.enabled!==false}"><div class="rule-manage-main">${categoryBadge(targetName,rule.direction,targetIcon)}<div class="category-manage-info"><b><span class="rule-row-name">${escapeText(rule.name)}</span><span class="rule-target-tag" data-rule-target-name="${escapeText(rule.id)}">→ ${escapeText(targetName)}</span>${isFirst?`<span class="rule-first-tag" data-rule-first-priority="${escapeText(rule.id)}">首条优先</span>`:''}${rule.enabled===false?'<span class="rule-disabled-tag">已停用</span>':''}</b><span class="category-manage-meta" data-rule-summary="${escapeText(rule.id)}">${escapeText(condSummary)}</span><span class="rule-priority-meta">优先级 #${idx+1}${isFirst?' · 首条命中优先':rule.enabled===false?' · 已停用不参与匹配':' · 按顺序依次匹配'}${rule.conflictReason?' · '+escapeText(rule.conflictReason):''}</span></div><button type="button" class="switch rule-row-switch" role="switch" data-toggle-rule="${escapeText(rule.id)}" aria-checked="${rule.enabled!==false}" aria-label="${rule.enabled!==false?'停用':'启用'}规则 ${escapeText(rule.name)}"></button></div><div class="rule-manage-bar"><span class="rule-priority-meta">目标分类：<b data-rule-category-label="${escapeText(rule.id)}">${escapeText(targetName)}</b></span><div class="category-manage-actions"><button type="button" class="category-action-btn" data-rule-up="${escapeText(rule.id)}" aria-label="上移规则 ${escapeText(rule.name)}" ${idx===0?'disabled':''}>↑</button><button type="button" class="category-action-btn" data-rule-down="${escapeText(rule.id)}" aria-label="下移规则 ${escapeText(rule.name)}" ${idx===rules.length-1?'disabled':''}>↓</button><button type="button" class="category-action-btn" data-edit-rule="${escapeText(rule.id)}" aria-label="编辑规则 ${escapeText(rule.name)}">编辑</button><button type="button" class="category-action-btn danger-btn" data-delete-rule="${escapeText(rule.id)}" aria-label="删除规则 ${escapeText(rule.name)}">删除</button></div></div></div>`}).join(''):`<div class="empty-state" id="classification-rules-empty">暂无${dirLabel}自动分类规则<br>在上方填写商家关键词与目标分类即可添加</div>`}</div>`);
+  const clearInvalid=()=>['rule-name','rule-keyword','rule-category','rule-operator','rule-direction'].forEach(id=>$(id)?.removeAttribute('aria-invalid'));
+  const showError=(msg,field=null)=>{clearInvalid();const el=$('rule-form-error');if(el){el.textContent=msg||'';el.hidden=!msg}if(field){field.setAttribute('aria-invalid','true');field.focus({preventScroll:true})}if(msg)notify(msg)};
+  ['rule-name','rule-keyword','rule-category','rule-operator'].forEach(id=>{const el=$(id);if(el)el.oninput=()=>{if(el.getAttribute('aria-invalid')==='true')showError('')}});
+  document.querySelectorAll('[data-rule-dir]').forEach(b=>b.onclick=()=>{
+   const nextDir=b.dataset.ruleDir==='INCOME'?'INCOME':'EXPENSE';
+   manageDir=nextDir;editingRule=null;formDir=nextDir;formName='';formKeyword='';formOperator='CONTAINS';formEnabled=true;formCategoryId=ensureValidCategoryId(nextDir,'');
+   syncFromNative();renderRulesSheet(`[data-rule-dir="${nextDir}"]`);
+  });
+  $('rule-direction').onchange=()=>{
+   captureDraftInputs();
+   formDir=$('rule-direction').value==='INCOME'?'INCOME':'EXPENSE';
+   manageDir=formDir;
+   formCategoryId=ensureValidCategoryId(formDir,formCategoryId);
+   renderRulesSheet('#rule-direction');
+  };
+  const resetForm=()=>{editingRule=null;formDir=manageDir;formName='';formKeyword='';formOperator='CONTAINS';formEnabled=true;formCategoryId=ensureValidCategoryId(manageDir,'');renderRulesSheet('#rule-name')};
+  if($('reset-rule-form'))$('reset-rule-form').onclick=resetForm;
+  if($('cancel-rule-edit'))$('cancel-rule-edit').onclick=resetForm;
+  $('save-rule').onclick=()=>{
+   showError('');
+   const rawName=$('rule-name').value.trim(),rawKeyword=$('rule-keyword').value.trim(),operator=$('rule-operator').value,dir=$('rule-direction').value,catId=$('rule-category').value,enabled=!!$('rule-enabled').checked;
+   if(!rawName){showError('请输入规则名称',$('rule-name'));return}
+   if(rawName.length>80){showError('规则名称不能超过 80 个字符',$('rule-name'));return}
+   if(/[\u0000-\u001F\u007F-\u009F]/.test(rawName)){showError('规则名称包含不支持的字符',$('rule-name'));return}
+   if(!['EXPENSE','INCOME'].includes(dir)){showError('请选择有效的适用方向',$('rule-direction'));return}
+   const validCat=directoryItems(dir).find(c=>c.id===catId&&c.direction===dir);
+   if(!validCat){showError('请选择当前方向下的有效目标分类',$('rule-category'));return}
+   if(!['CONTAINS','EQUALS'].includes(operator)){showError('请选择有效的商家匹配方式',$('rule-operator'));return}
+   if(!rawKeyword||!normRuleKeyword(rawKeyword)){showError('请输入有效的商家关键词（不能仅为空白）',$('rule-keyword'));return}
+   if(rawKeyword.length>200){showError('商家关键词不能超过 200 个字符',$('rule-keyword'));return}
+   if(Array.from(rawKeyword).some(c=>{const cp=c.codePointAt(0);return (cp<=31||(cp>=127&&cp<=159))&&!/\s/u.test(c)})){showError('商家关键词包含不支持的控制字符',$('rule-keyword'));return}
+   if(!native?.saveClassificationRule){showError('请在 Android 应用中保存自动分类规则');return}
+   try{
+    const wasEditing=!!editingRule,dirRules=customRulesByDirection(dir),order=editingRule&&editingRule.direction===dir?editingRule.order:dirRules.length;
+    const payload={...(editingRule?.id?{id:editingRule.id}:{}),name:rawName,enabled,direction:dir,categoryId:validCat.id,order,matchMode:'ALL',source:null,conditions:[{field:'MERCHANT',operator,value:rawKeyword}]};
+    const result=JSON.parse(native.saveClassificationRule(JSON.stringify(payload)));
+    if(!result.ok){if(result.code==='RULE_TARGET')syncFromNative();showError(result.error||'规则保存失败');return}
+    editingRule=null;manageDir=dir;formDir=dir;formName='';formKeyword='';formOperator='CONTAINS';formEnabled=true;formCategoryId=validCat.id;
+    applyRulesResult(result);renderRulesSheet('#rule-name');notify(wasEditing?'规则已更新':'规则已保存');
+   }catch(_){showError('规则保存失败，请重试')}
+  };
+  document.querySelectorAll('[data-edit-rule]').forEach(b=>b.onclick=()=>{
+   const found=rules.find(r=>r.id===b.dataset.editRule);if(!found)return;
+   const cond=(found.conditions||[]).find(c=>c.field==='MERCHANT')||found.conditions?.[0]||{operator:'CONTAINS',value:''};
+   editingRule={...found};manageDir=found.direction;formDir=found.direction;formName=found.name;formEnabled=found.enabled!==false;formOperator=cond.operator==='EQUALS'?'EQUALS':'CONTAINS';formKeyword=cond.value||'';formCategoryId=ensureValidCategoryId(found.direction,found.categoryId);
+   renderRulesSheet('#rule-name');
+  });
+  document.querySelectorAll('[data-toggle-rule]').forEach(b=>b.onclick=()=>{
+   const found=rules.find(r=>r.id===b.dataset.toggleRule);if(!found)return;
+   if(!native?.saveClassificationRule){showError('请在 Android 应用中修改规则状态');return}
+   captureDraftInputs();
+   const nextEnabled=!(found.enabled!==false);
+   const payload={id:found.id,name:found.name,enabled:nextEnabled,direction:found.direction,categoryId:found.categoryId,order:found.order,matchMode:found.matchMode||'ALL',source:null,conditions:found.conditions};
+   try{
+    const result=JSON.parse(native.saveClassificationRule(JSON.stringify(payload)));
+    if(!result.ok){showError(result.error||'规则状态更新失败');return}
+    if(editingRule?.id===found.id){editingRule.enabled=nextEnabled;formEnabled=nextEnabled}
+    applyRulesResult(result);renderRulesSheet(`[data-toggle-rule="${CSS.escape(found.id)}"]`);notify(nextEnabled?'规则已启用':'规则已停用');
+   }catch(_){showError('规则状态更新失败，请重试')}
+  });
+  const moveRule=(id,delta)=>{
+   const idx=rules.findIndex(r=>r.id===id),targetIdx=idx+delta;if(idx<0||targetIdx<0||targetIdx>=rules.length)return;
+   if(!native?.reorderClassificationRules){showError('请在 Android 应用中调整规则顺序');return}
+   captureDraftInputs();
+   const ids=rules.map(r=>r.id);[ids[idx],ids[targetIdx]]=[ids[targetIdx],ids[idx]];
+   try{
+    const result=JSON.parse(native.reorderClassificationRules(manageDir,JSON.stringify(ids)));
+    if(!result.ok){showError(result.error||'规则排序失败');return}
+    applyRulesResult(result);
+    const preferredBtn=delta<0?(targetIdx===0?`[data-rule-down="${CSS.escape(id)}"]`:`[data-rule-up="${CSS.escape(id)}"]`):(targetIdx===rules.length-1?`[data-rule-up="${CSS.escape(id)}"]`:`[data-rule-down="${CSS.escape(id)}"]`);
+    renderRulesSheet(preferredBtn);
+   }catch(_){showError('规则排序失败，请重试')}
+  };
+  document.querySelectorAll('[data-rule-up]').forEach(b=>b.onclick=()=>moveRule(b.dataset.ruleUp,-1));
+  document.querySelectorAll('[data-rule-down]').forEach(b=>b.onclick=()=>moveRule(b.dataset.ruleDown,1));
+  document.querySelectorAll('[data-delete-rule]').forEach(b=>b.onclick=()=>{
+   const found=rules.find(r=>r.id===b.dataset.deleteRule);if(!found)return;
+   if(!native?.deleteClassificationRule){showError('请在 Android 应用中删除规则');return}
+   captureDraftInputs();
+   try{
+    const result=JSON.parse(native.deleteClassificationRule(found.id));
+    if(!result.ok){showError(result.error||'规则删除失败');return}
+    if(editingRule?.id===found.id){editingRule=null;formName='';formKeyword='';formOperator='CONTAINS';formEnabled=true}
+    applyRulesResult(result);renderRulesSheet('#rule-name');notify('规则已删除');
+   }catch(_){showError('规则删除失败，请重试')}
+  });
+  if(focusSelector){const target=$('sheet-content')?.querySelector(focusSelector);if(target&&!target.disabled)target.focus({preventScroll:true});else $('rule-name')?.focus({preventScroll:true})}
+ };
+ activeRulesSheetRefresh=(pullNative=false)=>{if(internalMutation)return;if(!$('sheet')?.open||!$('classification-rules-list')){activeRulesSheetRefresh=null;return}captureDraftInputs();if(pullNative)syncFromNative();formCategoryId=ensureValidCategoryId(formDir,formCategoryId);renderRulesSheet()};
+ renderRulesSheet('#rule-name');
+}
 const categoryAliases=[
  [/停车|泊车/,'square-parking'],[/高速|路桥|过路|通行/,'road'],[/母婴|亲子|育儿|奶粉|宝宝/,'baby'],[/宠物/,'paw'],
  [/咖啡|茶饮|奶茶/,'mug-saucer'],[/餐|美食|饮食|食品|外卖|零食|吃饭/,'utensils'],[/交通|打车|公交|地铁|出行|车费/,'bus'],
