@@ -5,13 +5,14 @@ import net.ankio.ledger.core.Direction
 import net.ankio.ledger.core.ReceiptEvidence
 import net.ankio.ledger.core.ReceiptField
 import net.ankio.ledger.core.ReceiptTimeEvidence
+import net.ankio.ledger.core.ReceiptBlockOrigin
 import org.json.JSONObject
 
 /** Shared bounded record/backup/detail representation. No raw page text is reconstructed on read. */
 object ReceiptEvidenceCodec {
     const val MAX_BYTES = 32 * 1024
     private val fields = setOf("merchant", "productDescription", "transactionDescription", "orderRemark",
-        "serviceProvider", "receiptIssuer", "sourceApp", "bank")
+        "serviceProvider", "receiptIssuer", "sourceApp", "bank", "blockOrigin")
 
     fun json(receipt: ReceiptEvidence?): Any = receipt?.let { evidence ->
         fun field(value: ReceiptField?): Any = value?.let {
@@ -25,6 +26,9 @@ object ReceiptEvidenceCodec {
             .put("transactionDescription", field(evidence.transactionDescription)).put("orderRemark", field(evidence.orderRemark))
             .put("serviceProvider", field(evidence.serviceProvider)).put("receiptIssuer", field(evidence.receiptIssuer))
             .put("sourceApp", field(evidence.sourceApp)).put("bank", bank)
+            .also { json -> evidence.blockOrigin?.let { block -> json.put("blockOrigin",JSONObject().put("kind",block.kind)
+                .put("pageWidth",block.pageWidth).put("pageHeight",block.pageHeight).put("left",block.left)
+                .put("top",block.top).put("right",block.right).put("bottom",block.bottom)) } }
             .put("time", evidence.time?.let { time -> JSONObject()
                 .put("rawText",time.rawText).put("accountingAt",time.accountingAt).put("localDate",time.localDate)
                 .put("zoneId",time.zoneId).put("precision",time.precision).put("source",time.source)
@@ -63,9 +67,19 @@ object ReceiptEvidenceCodec {
             ReceiptTimeEvidence(text(value,"rawText"),integer("accountingAt"),text(value,"localDate"),text(value,"zoneId"),
                 text(value,"precision"),text(value,"source"),text(value,"reference"),integer("recognitionAt"))
         }
+        val blockOrigin=if(obj.isNull("blockOrigin"))null else obj.getJSONObject("blockOrigin").let { value ->
+            require(value.keys().asSequence().toSet()==setOf("kind","pageWidth","pageHeight","left","top","right","bottom"))
+            fun coordinate(key:String):Int {
+                require(value.get(key) is Int || value.get(key) is Long)
+                val number=value.getLong(key);require(number in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong())
+                return number.toInt()
+            }
+            ReceiptBlockOrigin(text(value,"kind"),coordinate("pageWidth"),coordinate("pageHeight"),
+                coordinate("left"),coordinate("top"),coordinate("right"),coordinate("bottom"))
+        }
         return ReceiptEvidence(version=obj.getInt("version"), blockId=text(obj, "blockId"),
             merchant=field("merchant"), productDescription=field("productDescription"),
             transactionDescription=field("transactionDescription"), orderRemark=field("orderRemark"),
-            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time)
+            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time,blockOrigin=blockOrigin)
     }
 }

@@ -13,6 +13,6 @@ data class ReceiptBlockOrigin(
     init {
         require(kind in setOf("MIXED_DEBIT","NESTED_BANK"))
         require(pageWidth>0 && pageHeight>0)
-        require(left>=0 && top>=0 && right in (left+1)..pageWidth && bottom in (top+1)..pageHeight)
+        require(left>=0 && top>=0 && right>left && right<=pageWidth && bottom>top && bottom<=pageHeight)
     }
 }
