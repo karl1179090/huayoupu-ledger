@@ -533,6 +533,15 @@ function renderReceiptDetails(){
   const timeSrcName=timeSourceNames[timeSrc]||receiptSourceNames[timeSrc]||'识别文字';
   evidenceItems.push(`<div class="receipt-evidence-item" data-evidence-field="time" data-evidence-source="${escapeText(timeSrc)}"><div class="receipt-evidence-meta"><b>交易时间</b><span class="receipt-source-tag">${escapeText(timeSrcName)}</span></div><div class="receipt-evidence-raw">${escapeText(timeRaw)}</div></div>`);
  }
+ if(receipt.blockOrigin&&typeof receipt.blockOrigin==='object'){
+  const origin=receipt.blockOrigin;
+  const originKindNames={NESTED_BANK:'内嵌银行凭证',MIXED_DEBIT:'独立扣款卡'};
+  const kindLabel=originKindNames[origin.kind]||origin.kind||'凭证区块';
+  const hasCoords=origin.pageWidth>0&&origin.pageHeight>0&&origin.left!=null&&origin.top!=null&&origin.right!=null&&origin.bottom!=null;
+  const rectText=hasCoords?`${kindLabel} · 原图位置 ${origin.left},${origin.top}–${origin.right},${origin.bottom} / ${origin.pageWidth}×${origin.pageHeight}`:kindLabel;
+  const techInfo=receipt.blockId?`<details class="receipt-block-tech"><summary>技术信息</summary><div class="receipt-tech-content">区块 ID: <code>${escapeText(receipt.blockId)}</code></div></details>`:'';
+  evidenceItems.unshift(`<div class="receipt-evidence-item receipt-block-evidence" data-evidence-field="blockOrigin" data-evidence-kind="${escapeText(origin.kind||'')}"><div class="receipt-evidence-meta"><b>区块来源</b><span class="receipt-source-tag">${escapeText(kindLabel)}</span></div><div class="receipt-evidence-raw">${escapeText(rectText)}</div>${techInfo}</div>`);
+ }
  section.innerHTML=`<div class="receipt-heading"><b>凭证信息</b><small class="receipt-readonly">只读</small></div><dl class="receipt-fields">${rows.join('')}</dl>${evidenceItems.length?`<div class="receipt-verify"><button type="button" id="receipt-evidence-toggle" class="receipt-evidence-toggle" aria-expanded="${keepExpanded}" aria-controls="receipt-evidence-panel"><span>核对原始文字与来源</span><small class="receipt-toggle-state">${keepExpanded?'收起':'查看'}</small></button><div id="receipt-evidence-panel" class="receipt-evidence-panel"${keepExpanded?'':' hidden'}>${evidenceItems.join('')}</div></div>`:''}`;
  const toggle=$('receipt-evidence-toggle'),panel=$('receipt-evidence-panel');
  if(toggle&&panel)toggle.onclick=()=>{const next=panel.hidden;panel.hidden=!next;toggle.setAttribute('aria-expanded',String(next));const state=toggle.querySelector('.receipt-toggle-state');if(state)state.textContent=next?'收起':'查看'};

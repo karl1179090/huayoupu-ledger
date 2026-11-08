@@ -271,6 +271,11 @@ html,body{height:100%;overscroll-behavior:none}body.native-app{background:var(--
 .receipt-evidence-meta b{color:#495765;font-weight:600}
 .receipt-source-tag{display:inline-flex;align-items:center;padding:1px 6px;border-radius:8px;background:#e8f3ef;color:#2e785f;font-size:10px;font-weight:600;white-space:nowrap}
 .receipt-evidence-raw{font-size:12px;line-height:1.5;color:#526170;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap}
+.receipt-block-tech{margin-top:6px;padding-top:4px;border-top:1px dashed #e2e8ec;font-size:11px}
+.receipt-block-tech summary{color:#6c7d8c;cursor:pointer;user-select:none;font-size:11px}
+.receipt-block-tech summary:hover{color:#3c6857}
+.receipt-block-tech .receipt-tech-content{margin-top:4px;font-size:11px;color:#526170;overflow-wrap:anywhere;word-break:break-all}
+.receipt-block-tech code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#eef3f6;padding:1px 4px;border-radius:4px;font-size:10px;color:#2e3842}
 .large-text .receipt-field{grid-template-columns:1fr;row-gap:2px}
 .large-text .receipt-field dd{text-align:left}
 @media(max-width:340px){.receipt-field{grid-template-columns:60px minmax(0,1fr);column-gap:8px}}
