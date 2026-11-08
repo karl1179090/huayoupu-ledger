@@ -556,6 +556,17 @@ async function runTests() {
       assert.equal(recNy202.receipt.time.source, 'EXPLICIT', 'Source remains EXPLICIT');
       assert.equal(recNy202.receipt.time.precision, 'DATE', 'Precision remains DATE');
 
+      // (3.5) 统计分类明细 (showCategoryDetails): In New York, DATE Shanghai 2026-11-05 must display
+      // "2026-11-05 仅日期", never 11-04 or 11:00 or fabricated 00:00.
+      await nyPage.evaluate(() => showCategoryDetails('教育', 'expense'));
+      await nyPage.waitForFunction(() => document.querySelector('#sheet').open);
+      const detailSmallNy = await nyPage.locator('.category-detail-row[data-category-record="202"] small').textContent();
+      assert.equal(detailSmallNy.trim(), '2026-11-05 仅日期', 'showCategoryDetails in New York displays 2026-11-05 仅日期');
+      assert.doesNotMatch(detailSmallNy, /2026-11-04|11:00|00:00/, 'No timezone day shift or fabricated midnight in category details');
+      await nyPage.screenshot({ path: path.join(screenshotDir, 'after-12-newyork-category-detail.png') });
+      console.log('✓ after-12-newyork-category-detail.png captured');
+      await nyPage.evaluate(() => closeSheet(false));
+
       // (4) 实际改日: Change date to 2026-11-07T00:00, timeEdited becomes true, source becomes MANUAL
       await nyPage.locator('[data-record="202"]').click();
       await nyPage.waitForFunction(() => !document.querySelector('#record-panel')._morph);
@@ -588,6 +599,283 @@ async function runTests() {
       console.log('✓ Cross-timezone America/New_York tests passed!');
     } finally {
       await nyPage.close();
+    }
+
+    // =========================================================================
+    // 13. Mixed 201+ rows ordering in America/New_York:
+    // Effective accounting day descending order, instant/id descending tiebreak
+    // =========================================================================
+    console.log('[t04] Running mixed 201+ rows ordering test in America/New_York context...');
+    const mixedPage = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      reducedMotion: 'reduce',
+      timezoneId: 'America/New_York'
+    });
+
+    try {
+      await mixedPage.route('https://**', r => r.abort());
+      await mixedPage.clock.install({ time: new Date('2026-11-06T12:30:00+08:00') });
+      await installSyntheticBridge(mixedPage);
+
+      await mixedPage.goto(pathToFileURL(path.resolve('app/src/main/assets/web/index.html')).href);
+      await mixedPage.evaluate(() => document.fonts.ready);
+
+      // Inject 1 Shanghai DATE 11/2 record + 201 New York ordinary 11/1 23:00 records
+      await mixedPage.evaluate(() => {
+        const dateRecord = {
+          id: 3000, uid: 'rec-date-3000', state: 'POSTED', source: 'OCR', origin: 'shake',
+          merchant: '合成书局 DATE 11月2日', category: '教育', categoryId: 'cat:expense:education',
+          amountCents: 2500, direction: 'EXPENSE',
+          occurredAt: new Date('2026-11-02T00:00:00+08:00').getTime(), // 1793548800000
+          note: '', rawText: '交易日期：2026年11月02日',
+          hasScreenshot: false, hasMerchantIcon: false, walletAccountUid: 'wechat',
+          receipt: {
+            version: 1, blockId: 'single',
+            merchant: { value: '合成书局 DATE 11月2日', rawText: '商户名称：合成书局', source: 'ocr', blockId: 'single' },
+            time: {
+              rawText: '交易日期：2026年11月02日',
+              accountingAt: new Date('2026-11-02T00:00:00+08:00').getTime(),
+              localDate: '2026-11-02', zoneId: 'Asia/Shanghai',
+              precision: 'DATE', source: 'EXPLICIT', reference: 'RECOGNITION',
+              recognitionAt: Date.now()
+            }
+          }
+        };
+
+        const ordinaryRecords = Array.from({ length: 201 }, (_, i) => ({
+          id: 1000 + i, uid: `rec-ord-${1000 + i}`, state: 'POSTED', source: 'OCR', origin: 'shake',
+          merchant: `合成普通商户 #${i + 1}`, category: '餐饮', categoryId: 'cat:expense:dining',
+          amountCents: 1000, direction: 'EXPENSE',
+          // New York 2026-11-01 23:00 = 1793592000000, spread by 1ms so instants are strictly ordered
+          occurredAt: new Date('2026-11-01T23:00:00-05:00').getTime() + i,
+          note: `普通记录 ${i + 1}`, rawText: '',
+          hasScreenshot: false, hasMerchantIcon: false, walletAccountUid: 'wechat',
+          receipt: {
+            version: 1, blockId: 'single',
+            time: {
+              rawText: '2026-11-01 23:00',
+              accountingAt: new Date('2026-11-01T23:00:00-05:00').getTime() + i,
+              localDate: '2026-11-01', zoneId: 'America/New_York',
+              precision: 'SECOND', source: 'EXPLICIT', reference: 'RECOGNITION',
+              recognitionAt: Date.now()
+            }
+          }
+        }));
+
+        window.fixtureRecords = [dateRecord, ...ordinaryRecords];
+        refresh();
+      });
+
+      // Verify day headers order: 11月2日 MUST come before 11月1日
+      const headers = await mixedPage.locator('.day-header').allTextContents();
+      assert(headers.length >= 2, 'Has at least 2 day headers');
+      assert.match(headers[0], /11月2日/, 'First day header must be 11月2日 (DATE receipt day)');
+      assert.match(headers[1], /11月1日/, 'Second day header must be 11月1日 (Ordinary records day)');
+
+      // Verify records count under each day header
+      const sections = mixedPage.locator('.transactions');
+      assert.equal(await sections.nth(0).locator('.transaction').count(), 1, '11月2日 section has 1 DATE record');
+      assert.equal(await sections.nth(1).locator('.transaction').count(), 201, '11月1日 section has 201 ordinary records');
+
+      await mixedPage.screenshot({ path: path.join(screenshotDir, 'after-13-newyork-mixed-201-order.png') });
+      console.log('✓ after-13-newyork-mixed-201-order.png captured');
+      console.log('✓ Mixed 201+ rows effective-day ordering passed!');
+    } finally {
+      await mixedPage.close();
+    }
+
+    // =========================================================================
+    // 14. Inconsistent legacy receipt metadata guard test:
+    // When accountingAt !== occurredAt, metadata is untrusted.
+    // Bill must use true occurredAt for month, time, grouping, filter and picker.
+    // Raw evidence remains preserved in panel, no trusted DATE basis label.
+    // =========================================================================
+    console.log('[t04] Running mismatched legacy metadata guard test...');
+    const mismatchPage = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      reducedMotion: 'reduce',
+      timezoneId: 'America/New_York'
+    });
+
+    try {
+      await mismatchPage.route('https://**', r => r.abort());
+      await mismatchPage.clock.install({ time: new Date('2026-11-06T12:30:00+08:00') });
+      await installSyntheticBridge(mismatchPage);
+
+      await mismatchPage.goto(pathToFileURL(path.resolve('app/src/main/assets/web/index.html')).href);
+      await mismatchPage.evaluate(() => document.fonts.ready);
+
+      // Inconsistent synthetic record: true occurredAt is NY 2026-10-31 12:00:00 (1793462400000)
+      // Stale DATE receipt.time has accountingAt = Shanghai 2026-11-05 (1793808000000)
+      await mismatchPage.evaluate(() => {
+        const mismatched = {
+          id: 401, uid: 'rec-401', state: 'POSTED', source: 'OCR', origin: 'shake',
+          merchant: '不一致凭证商户', category: '教育', categoryId: 'cat:expense:education',
+          amountCents: 5800, direction: 'EXPENSE',
+          occurredAt: 1793462400000, // 2026-10-31 12:00:00 EDT
+          note: '不一致旧元数据测试', rawText: '商户名称：不一致凭证商户\n交易日期：2026年11月05日',
+          hasScreenshot: false, hasMerchantIcon: false, walletAccountUid: 'wechat',
+          receipt: {
+            version: 1, blockId: 'single',
+            merchant: { value: '不一致凭证商户', rawText: '商户名称：不一致凭证商户', source: 'ocr', blockId: 'single' },
+            time: {
+              rawText: '交易日期：2026年11月05日',
+              accountingAt: 1793808000000, // Nov 5 != Oct 31 occurredAt
+              localDate: '2026-11-05', zoneId: 'Asia/Shanghai',
+              precision: 'DATE', source: 'EXPLICIT', reference: 'RECOGNITION',
+              recognitionAt: Date.now()
+            }
+          }
+        };
+        window.fixtureRecords = [mismatched];
+        refresh();
+      });
+
+      // (1) In November 2026, the record must NOT be visible because true occurredAt is October 31!
+      assert.equal(await mismatchPage.locator('[data-record="401"]').count(), 0, 'Untrusted DATE record not visible in November');
+
+      // Switch to October 2026: record MUST be visible!
+      await mismatchPage.evaluate(() => {
+        month = '2026-10';
+        refresh();
+      });
+      assert.equal(await mismatchPage.locator('[data-record="401"]').count(), 1, 'Untrusted DATE record visible in October 2026');
+
+      // Verify list display uses actual occurredAt and ordinary time (12:00), NOT "仅日期"
+      const timeInList = await mismatchPage.locator('[data-record="401"] .record-time').textContent();
+      assert.equal(timeInList.trim(), '12:00', 'Displays ordinary 12:00, NOT 仅日期');
+
+      // Verify day header is 10月31日, NOT 11月5日
+      const octHeader = await mismatchPage.locator('.day-header').textContent();
+      assert.match(octHeader, /10月31日/, 'Day header is 10月31日 based on real occurredAt');
+
+      // (2) Open detail panel:
+      await mismatchPage.locator('[data-record="401"]').click();
+      await mismatchPage.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+
+      const timeLabelText = await mismatchPage.locator('#time-label').textContent();
+      assert.equal(timeLabelText.trim(), '2026/10/31 12:00', 'Detail time label uses real occurredAt 2026/10/31 12:00');
+
+      // Basis label must be hidden: untrusted metadata gets no trusted DATE basis
+      const basisEl = mismatchPage.locator('#time-basis');
+      assert.equal(await basisEl.isHidden(), true, 'No trusted DATE basis label for mismatched metadata');
+
+      // In evidence panel, raw text is still preserved as evidence
+      await mismatchPage.locator('#receipt-evidence-toggle').click();
+      const rawEvidence = await mismatchPage.locator('[data-evidence-field="time"] .receipt-evidence-raw').textContent();
+      assert.equal(rawEvidence.trim(), '交易日期：2026年11月05日', 'Raw text remains preserved in evidence panel');
+
+      await mismatchPage.screenshot({ path: path.join(screenshotDir, 'after-14-mismatched-metadata-detail.png') });
+      console.log('✓ after-14-mismatched-metadata-detail.png captured');
+
+      // (3) Modify note and save: exact original occurredAt (1793462400000) preserved, timeEdited: false
+      await mismatchPage.locator('#note').fill('仅修改备注保持原时间');
+      await mismatchPage.locator('#import-form .primary').click();
+      await mismatchPage.waitForFunction(() => !document.querySelector('#record-panel').classList.contains('active'));
+
+      const lastSave = await mismatchPage.evaluate(() => window.savedCalls[window.savedCalls.length - 1]);
+      assert.equal(lastSave.id, 401);
+      assert.equal(lastSave.timeEdited, false, 'timeEdited is false');
+      assert.equal(lastSave.occurredAt, 1793462400000, 'Exact occurredAt timestamp never rewritten');
+
+      console.log('✓ Inconsistent metadata guard tests passed!');
+    } finally {
+      await mismatchPage.close();
+    }
+
+    // =========================================================================
+    // 15. Trend details fallback test when ledgerView.summary.days is absent/null:
+    // When summary.days is null, showTrendDetails uses client-side sums(list.filter(r => recordDay(r) === day)).
+    // Top-level shared recordDay(r) must be used without ReferenceError.
+    // Trusted DATE records (e.g. 202 on Nov 5) must be grouped under trusted day (day 5),
+    // and ordinary/untrusted records must be grouped under real occurredAt day.
+    // =========================================================================
+    console.log('[t04] Running trend details fallback test without summary.days...');
+    const trendPage = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      reducedMotion: 'reduce',
+      timezoneId: 'Asia/Shanghai'
+    });
+
+    const pageErrors = [];
+    trendPage.on('pageerror', err => pageErrors.push(err.message));
+
+    try {
+      await trendPage.route('https://**', r => r.abort());
+      await trendPage.clock.install({ time: new Date('2026-11-06T12:30:00+08:00') });
+      await installSyntheticBridge(trendPage);
+
+      await trendPage.goto(pathToFileURL(path.resolve('app/src/main/assets/web/index.html')).href);
+      await trendPage.evaluate(() => document.fonts.ready);
+
+      // Explicitly delete summary.days to force the fallback calculation path in drawChart & showTrendDetails
+      await trendPage.evaluate(() => {
+        // Add an untrusted mismatched record: occurredAt on Nov 3, but stale time says Nov 5
+        const untrusted = {
+          id: 501, uid: 'rec-501', state: 'POSTED', source: 'OCR', origin: 'shake',
+          merchant: '不可信日期商户', category: '餐饮', categoryId: 'cat:expense:dining',
+          amountCents: 1500, direction: 'EXPENSE',
+          occurredAt: new Date('2026-11-03T10:00:00.000+08:00').getTime(),
+          note: 'occurredAt为3号', rawText: '',
+          hasScreenshot: false, hasMerchantIcon: false, walletAccountUid: 'wechat',
+          receipt: {
+            version: 1, blockId: 'single',
+            time: {
+              rawText: '2026-11-05',
+              accountingAt: new Date('2026-11-05T00:00:00.000+08:00').getTime(), // mismatch!
+              localDate: '2026-11-05', zoneId: 'Asia/Shanghai',
+              precision: 'DATE', source: 'EXPLICIT', reference: 'RECOGNITION',
+              recognitionAt: Date.now()
+            }
+          }
+        };
+        window.fixtureRecords.push(untrusted);
+        refresh();
+        if (ledgerView?.summary) {
+          delete ledgerView.summary.days;
+        }
+        render();
+      });
+
+      // Click trend caption to open trend details sheet
+      await trendPage.evaluate(() => document.querySelector('.trend-caption').click());
+      await trendPage.waitForFunction(() => document.querySelector('#sheet').open);
+
+      assert.equal(pageErrors.length, 0, 'No JavaScript ReferenceError thrown during showTrendDetails fallback');
+
+      // Verify table rows:
+      // Day 5 (11/5): must contain 58.00 from record 202 (trusted DATE)
+      // Day 3 (11/3): must contain 89.00 (rec 203) + 15.00 (rec 501) = 104.00, confirming rec 501 grouped by occurredAt
+      // Day 6 (11/6): must contain 36.50 (rec 201) + 42.00 (rec 205) = 78.50 (ordinary / fallback)
+      const tableRows = await trendPage.evaluate(() => {
+        const rows = document.querySelectorAll('table.trend-table tbody tr');
+        return Array.from(rows).map(tr => {
+          const day = tr.querySelector('th')?.textContent?.trim();
+          const amount = tr.querySelectorAll('td')[0]?.textContent?.trim();
+          return { day, amount };
+        });
+      });
+
+      const day5Row = tableRows.find(r => r.day === '11/5');
+      assert(day5Row, 'Day 11/5 row exists');
+      assert.equal(day5Row.amount, '58.00', 'Day 5 row correctly groups trusted DATE record (58.00)');
+
+      const day3Row = tableRows.find(r => r.day === '11/3');
+      assert(day3Row, 'Day 11/3 row exists');
+      assert.equal(day3Row.amount, '104.00', 'Day 3 row groups untrusted record under real occurredAt day (89.00 + 15.00 = 104.00)');
+
+      const day6Row = tableRows.find(r => r.day === '11/6');
+      assert(day6Row, 'Day 11/6 row exists');
+      assert.equal(day6Row.amount, '78.50', 'Day 6 row groups ordinary and fallback records (36.50 + 42.00 = 78.50)');
+
+      await trendPage.screenshot({ path: path.join(screenshotDir, 'after-15-trend-fallback.png') });
+      console.log('✓ after-15-trend-fallback.png captured');
+      console.log('✓ Trend details fallback without summary.days passed!');
+    } finally {
+      await trendPage.close();
     }
 
     console.log('ALL TRANSACTION TIME TESTS PASSED!');
