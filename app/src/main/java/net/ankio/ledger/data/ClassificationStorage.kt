@@ -101,6 +101,7 @@ internal object ClassificationStorage {
     fun validateBackup(backup:ClassificationBackup,categories:List<LedgerCategory>) {
         val targets=categories.associateBy { it.id }
         fun validate(snapshot:ClassificationSnapshot,requireTargets:Boolean) {
+            ClassificationCodec.snapshot(snapshot)
             (snapshot.customRules+snapshot.builtinRules).forEach { rule ->
                 ClassificationCodec.validateRule(rule,true)
                 if(requireTargets)require(targets[rule.categoryId]?.direction==rule.direction) { "规则目标分类不存在或方向不一致" }

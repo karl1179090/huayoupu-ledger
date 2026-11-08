@@ -114,4 +114,72 @@ class CompoundClassificationTest {
         } } finally { app.deleteDatabase(name) }
     }
 
+    @Test fun mergedRulesBeyondReaderLimitRollbackAllRestoreEffectsAndTwoThousandStillReadBack() {
+        val sourceName="compound-count-source-${UUID.randomUUID()}.db"
+        val targetName="compound-count-target-${UUID.randomUUID()}.db"
+        try { LedgerStore(app,sourceName).use { source -> LedgerStore(app,targetName).use { target ->
+            fun seed(store:LedgerStore,prefix:String,count:Int) {
+                val original=store.classificationRules()
+                val clean=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
+                val rules=List(count) { index -> ClassificationRule("synthetic-$prefix-$index","合成$prefix$index",true,
+                    Direction.EXPENSE,"cat:expense:dining",index,listOf(ClassificationCondition(value="合成"),
+                        ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.NOT_CONTAINS,"打车")),source="IMAGE") }
+                val seeded=clean.copy(classification=ClassificationBackup(original.copy(version="synthetic-$prefix",customRules=rules),emptyList()))
+                assertEquals(0,LedgerBackup.restore(store,seeded))
+                assertEquals(count,LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream()).classification!!.configuration.customRules.size)
+            }
+            seed(source,"incoming",1001);seed(target,"local",1000)
+            LedgerStore(app,sourceName).use { assertEquals(1001,it.classificationRules().customRules.size) }
+            LedgerStore(app,targetName).use { assertEquals(1000,it.classificationRules().customRules.size) }
+            val localAccount=target.saveAccount(LedgerAccount(name="合成保留资金",amountCents=20_000))
+            target.setDefaultWallet(localAccount.uid)
+            target.saveEdited(LedgerRecord(capture=Capture(Source.MANUAL,"manual","合成原账单"),
+                bill=ParsedBill(500,Direction.EXPENSE,"合成原商家","餐饮",1_798_776_000_000,null,true,"",true),state=RecordState.POSTED),
+                walletAccountUid=localAccount.uid,manualWalletSelected=true)
+            target.holdClassificationSnapshot("synthetic-count-local-snapshot")
+            val category=source.saveCategory(name="合成导入新分类",direction=Direction.EXPENSE)
+            val incomingAccount=source.saveAccount(LedgerAccount(name="合成导入资金",amountCents=30_000))
+            source.setDefaultWallet(incomingAccount.uid)
+            source.saveEdited(LedgerRecord(capture=Capture(Source.MANUAL,"manual","合成新增来源账单"),
+                bill=ParsedBill(700,Direction.EXPENSE,"合成新增来源商家",category.name,1_798_776_100_000,null,true,"",true),state=RecordState.POSTED),
+                walletAccountUid=incomingAccount.uid,manualWalletSelected=true)
+            source.holdClassificationSnapshot("synthetic-count-incoming-snapshot")
+            val incoming=LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream())
+            val configuration=target.classificationRules();val records=target.all();val accounts=target.accounts()
+            val wallet=target.walletSnapshot();val categories=target.categoryDirectory();val snapshots=target.classificationBackup()
+            assertTrue("Restore itself must reject a merged 2001-rule configuration",runCatching { LedgerBackup.restore(target,incoming) }.isFailure)
+            fun assertPreserved(store:LedgerStore) {
+                assertEquals(configuration,store.classificationRules());assertEquals(records,store.all());assertEquals(accounts,store.accounts())
+                assertEquals(wallet,store.walletSnapshot());assertEquals(categories,store.categoryDirectory());assertEquals(snapshots,store.classificationBackup())
+            }
+            assertPreserved(target)
+            LedgerStore(app,targetName).use(::assertPreserved)
+            source.deleteClassificationRule("synthetic-incoming-1000")
+            val boundary=LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream())
+            assertEquals(1,LedgerBackup.restore(target,boundary))
+            assertEquals(2000,target.classificationRules().customRules.size)
+            LedgerStore(app,targetName).use { assertEquals(2000,it.classificationRules().customRules.size) }
+            assertEquals(19_500L,target.getAccount(localAccount.id)!!.amountCents)
+        } } } finally { app.deleteDatabase(sourceName);app.deleteDatabase(targetName) }
+    }
+    @Test fun snapshotWireFormatRejectsEveryStructureTheReaderCannotRestore() {
+        val rule=ClassificationRule("synthetic-rule","合成持久化",true,Direction.EXPENSE,"cat:expense:dining",0,
+            listOf(ClassificationCondition(value="合成")))
+        val snapshot=ClassificationSnapshot("synthetic-version",listOf(rule),emptyList())
+        val boundary=List(2000) { rule.copy(id="synthetic-$it",order=it) }
+        val accepted=snapshot.copy(customRules=boundary,builtinRules=boundary)
+        assertEquals(accepted,ClassificationCodec.readSnapshot(ClassificationCodec.snapshot(accepted).toString()))
+        val invalidRules=listOf(rule.copy(id=""),rule.copy(id="x".repeat(161)),rule.copy(name=""),rule.copy(name="x".repeat(81)),
+            rule.copy(name="合成\u0000"),rule.copy(categoryId=""),rule.copy(categoryId="x".repeat(161)),rule.copy(direction=Direction.TRANSFER),
+            rule.copy(order=-1),rule.copy(order=1_000_001),rule.copy(conditions=emptyList()),rule.copy(conditions=List(21) { rule.conditions.single() }),
+            rule.copy(conditions=listOf(ClassificationCondition(value="　 "))),rule.copy(conditions=listOf(ClassificationCondition(value="x".repeat(201)))),
+            rule.copy(conditions=listOf(ClassificationCondition(value="合成\u0000"))),rule.copy(source="IMAGE:com.synthetic.viewer"),
+            rule.copy(conflictReason="x".repeat(201)))
+        val invalidSnapshots=listOf(snapshot.copy(version=""),snapshot.copy(version="v".repeat(161)),
+            snapshot.copy(customRules=boundary+rule),snapshot.copy(builtinRules=boundary+rule),
+            snapshot.copy(customRules=listOf(rule,rule)),snapshot.copy(builtinRules=listOf(rule,rule)))+
+            invalidRules.map { snapshot.copy(customRules=listOf(it)) }
+        invalidSnapshots.forEach { invalid -> assertTrue("Serializer must reject an unreadable snapshot",runCatching { ClassificationCodec.snapshot(invalid) }.isFailure) }
+    }
+
 }
