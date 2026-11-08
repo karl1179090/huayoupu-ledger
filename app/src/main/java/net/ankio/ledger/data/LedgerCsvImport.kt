@@ -45,7 +45,7 @@ object LedgerCsvImport {
                 val occurrence=occurrences.getOrDefault(signature,0);occurrences[signature]=occurrence+1
                 qianjiRecord(fields,UUID.nameUUIDFromBytes(("qianji-v10\u0000$signature\u0000$occurrence").toByteArray()).toString())
             }
-            records.add(record);rowNumbers[record.uid]=index+2
+            records.add(record.copy(bill=record.bill.copy(categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else CategoryDecision(null,CategorySource.IMPORT,true,explanation="保留导入分类"))));rowNumbers[record.uid]=index+2
         } catch(error:Exception) { errors.add(RowError(index+2,error.message ?: "字段无效")) } }
         return Document(if(qi)"钱迹 V10 模板" else if(v2)"花有谱通用 CSV v2" else "花有谱通用 CSV v1（本地时区）",
             records,errors,rows.size-1,sha,if(qi)"qianji-v10" else if(v2)"ledger-v2" else "ledger-v1",rowNumbers)

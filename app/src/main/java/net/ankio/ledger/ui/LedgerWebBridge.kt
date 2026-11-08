@@ -21,6 +21,8 @@ import net.ankio.ledger.data.LedgerAccount
 import net.ankio.ledger.data.AccountType
 import net.ankio.ledger.data.AccountBanks
 import net.ankio.ledger.data.CustomCategory
+import net.ankio.ledger.data.ClassificationCodec
+import net.ankio.ledger.data.ClassificationException
 import net.ankio.ledger.data.CategoryDirectory
 import net.ankio.ledger.data.CategoryException
 import net.ankio.ledger.data.LedgerCategory
@@ -131,6 +133,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("merchant", record.bill.merchant)
                 put("receipt", ReceiptEvidenceCodec.json(record.bill.receipt))
                 put("category", record.bill.category)
+                put("categoryDecision",ClassificationCodec.decision(record.bill.categoryDecision))
                 app.store.categoryFor(record).let { category ->
                     put("categoryId", category?.id ?: JSONObject.NULL); put("categoryIcon", category?.icon ?: "tag")
                 }
@@ -200,6 +203,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("records", records).put("recognitionTasks",tasks).put("channels", channels)
             .put("accounts", accounts).put("customCategories", custom)
             .put("categoryDirectory", directoryData()).put("categoryIconOptions", categoryIconOptions())
+            .put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules()))
             .put("walletSettings",walletSettingsData())
             .put("bankCodeOptions",JSONArray().apply { BankCodes.entries.forEach { put(JSONObject().put("code",it.code).put("label",it.label)) } })
             .put("bankOptions",JSONArray().apply { AccountBanks.entries.forEach {
@@ -231,6 +235,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
             .put("categoryId",app.store.categoryFor(record)?.id ?: JSONObject.NULL).put("categoryIcon",app.store.categoryFor(record)?.icon ?: "tag")
             .put("receipt",ReceiptEvidenceCodec.json(record.bill.receipt))
+            .put("categoryDecision",ClassificationCodec.decision(record.bill.categoryDecision))
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
@@ -354,6 +359,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 val saved = app.store.saveEdited(base.copy(transfer=transfer,
                     bill = base.bill.copy(amountCents = cents, direction = direction,
                         merchant = merchant, category = category, occurredAt = occurredAt,
+                        categoryDecision=net.ankio.ledger.core.CategoryDecision(app.store.categoryDirectory(direction).firstOrNull { it.name==category }?.id,net.ankio.ledger.core.CategorySource.MANUAL,true,explanation="人工选择分类"),
                         reliable = true, reason = "", transfer=null, timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
                     note = note),
                     walletAccountUid=if(input.has("walletAccountUid")&&!input.isNull("walletAccountUid"))string(input,"walletAccountUid",64) else null,
@@ -569,6 +575,26 @@ class LedgerWebBridge(private val activity: MainActivity) {
         JSONObject().put("ok",true).put("selectedCount",app.channels.selectedShakePackages().size)
             .put("generation",app.channels.shakeMasterGeneration()).put("captureHealth",app.captureHealth.snapshot()).toString()
     } catch(error:Exception) { structuredFailure(error,"应用选择保存失败").toString() }
+
+    private fun classificationResponse()=JSONObject().put("ok",true).put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules()))
+    private fun ruleFailure(error:Exception)=failure(error.message ?: "分类规则操作失败，请重试",(error as? ClassificationException)?.code ?: "RULE_INVALID").toString()
+    @JavascriptInterface fun classificationRules():String=try {
+        synchronized(app.store) { classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun saveClassificationRule(json:String):String=try {
+        checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
+        val rule=ClassificationCodec.readRule(JSONObject(json))
+        synchronized(app.store) { app.store.saveClassificationRule(rule);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun deleteClassificationRule(id:String):String=try {
+        synchronized(app.store) { app.store.deleteClassificationRule(id);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun reorderClassificationRules(direction:String,idsJson:String):String=try {
+        checkInput(idsJson.length<=200_000,"规则顺序过长")
+        val entries=JSONArray(idsJson);checkInput(entries.length()<=2_000,"规则数量过多")
+        val ids=(0 until entries.length()).map { entries.get(it) as? String ?: throw ClassificationException("RULE_INVALID","规则顺序无效") }
+        synchronized(app.store) { app.store.reorderClassificationRules(categoryDirection(direction),ids);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
 
     private fun categoryJson(category: LedgerCategory) = JSONObject().put("id", category.id).put("name", category.name)
         .put("direction", category.direction.name).put("icon", category.icon).put("order", category.order)
@@ -816,6 +842,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
 
     private fun failure(message:String,code:String="OPERATION_FAILED") = JSONObject().put("ok",false).put("error",message).put("code",code)
     private fun failureCode(error:Exception):String = when(error) {
+        is ClassificationException -> error.code
         is CategoryException -> error.code
         is WalletException -> error.code
         is IllegalArgumentException -> error.message?.takeIf { it=="STATISTICS_OVERFLOW" } ?: "INVALID_INPUT"

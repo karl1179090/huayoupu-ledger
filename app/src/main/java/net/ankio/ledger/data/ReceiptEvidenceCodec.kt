@@ -4,6 +4,7 @@ import net.ankio.ledger.core.BankReceiptEvidence
 import net.ankio.ledger.core.Direction
 import net.ankio.ledger.core.ReceiptEvidence
 import net.ankio.ledger.core.ReceiptField
+import net.ankio.ledger.core.ReceiptTimeEvidence
 import org.json.JSONObject
 
 /** Shared bounded record/backup/detail representation. No raw page text is reconstructed on read. */
@@ -23,7 +24,11 @@ object ReceiptEvidenceCodec {
             .put("merchant", field(evidence.merchant)).put("productDescription", field(evidence.productDescription))
             .put("transactionDescription", field(evidence.transactionDescription)).put("orderRemark", field(evidence.orderRemark))
             .put("serviceProvider", field(evidence.serviceProvider)).put("receiptIssuer", field(evidence.receiptIssuer))
-            .put("sourceApp", field(evidence.sourceApp)).put("bank", bank).also { require(it.toString().toByteArray(Charsets.UTF_8).size <= MAX_BYTES) }
+            .put("sourceApp", field(evidence.sourceApp)).put("bank", bank)
+            .put("time", evidence.time?.let { time -> JSONObject()
+                .put("rawText",time.rawText).put("accountingAt",time.accountingAt).put("localDate",time.localDate)
+                .put("zoneId",time.zoneId).put("precision",time.precision).put("source",time.source)
+                .put("reference",time.reference).put("recognitionAt",time.recognitionAt) } ?: JSONObject.NULL).also { require(it.toString().toByteArray(Charsets.UTF_8).size <= MAX_BYTES) }
     } ?: JSONObject.NULL
 
     fun encode(receipt: ReceiptEvidence?): String? = receipt?.let { json(it).toString() }
@@ -34,7 +39,7 @@ object ReceiptEvidenceCodec {
 
     fun decode(obj: JSONObject): ReceiptEvidence {
         require(obj.toString().toByteArray(Charsets.UTF_8).size <= MAX_BYTES)
-        require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId") }) { "凭证字段不支持" }
+        require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId", "time") }) { "凭证字段不支持" }
         require(obj.get("version") is Int && obj.getInt("version") == 1) { "凭证版本不支持" }
         fun text(value: JSONObject, key: String) = value.get(key) as? String ?: error("凭证字段类型错误：$key")
         fun field(key: String, parent: JSONObject = obj): ReceiptField? {
@@ -49,9 +54,18 @@ object ReceiptEvidenceCodec {
             BankReceiptEvidence(optional("bankCode"), optional("cardLast4"), field("transactionType", value),
                 optional("direction")?.let(Direction::valueOf), value.get("ambiguous") as? Boolean ?: error("银行证据类型错误"))
         }
+        val time=if(obj.isNull("time"))null else obj.getJSONObject("time").let { value ->
+            require(value.keys().asSequence().toSet() == setOf("rawText","accountingAt","localDate","zoneId","precision","source","reference","recognitionAt"))
+            fun integer(key:String):Long {
+                require(value.get(key) is Int || value.get(key) is Long)
+                return value.getLong(key)
+            }
+            ReceiptTimeEvidence(text(value,"rawText"),integer("accountingAt"),text(value,"localDate"),text(value,"zoneId"),
+                text(value,"precision"),text(value,"source"),text(value,"reference"),integer("recognitionAt"))
+        }
         return ReceiptEvidence(version=obj.getInt("version"), blockId=text(obj, "blockId"),
             merchant=field("merchant"), productDescription=field("productDescription"),
             transactionDescription=field("transactionDescription"), orderRemark=field("orderRemark"),
-            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank)
+            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time)
     }
 }

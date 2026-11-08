@@ -41,7 +41,9 @@ class RecognitionCommitRecoveryTest {
             val result = CaptureProcessor(app, OcrClient(app, backend))
                 .processPrepared(image, Source.IMAGE, "image", task) { true } as IngestResult.Saved
             val record = result.record
-            assertEquals(bill, record.bill)
+            assertEquals(bill.copy(category="其他"), record.bill.copy(categoryDecision=null))
+            assertEquals(CategorySource.FALLBACK,record.bill.categoryDecision!!.source)
+            assertEquals(app.tasks.classificationSnapshot(task)!!.version,record.bill.categoryDecision!!.ruleVersion)
             assertEquals(Source.IMAGE, record.capture.source); assertEquals("image", record.capture.origin)
             assertEquals("合成付款成功 12.50", record.capture.text)
             assertEquals(RecordState.POSTED, record.state)
@@ -234,7 +236,7 @@ class RecognitionCommitRecoveryTest {
                 db.version = 4
             }
             val operation = RecognitionTasks(app, name).use { tasks ->
-                assertEquals(5, tasks.readableDatabase.version)
+                assertEquals(7, tasks.readableDatabase.version)
                 val existing = tasks.operationKey(1)!!
                 val newer = tasks.create(Source.IMAGE, "image")
                 assertNotEquals(existing, tasks.operationKey(newer)); existing

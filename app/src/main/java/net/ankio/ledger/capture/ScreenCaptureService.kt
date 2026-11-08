@@ -403,6 +403,7 @@ open class ScreenCaptureService:AccessibilityService() {
                 // returned since acquisition. Legacy full-display capture needs a second owner check.
                 if(Build.VERSION.SDK_INT<34 && currentTarget(pkg,target.id,observed?.switchGeneration)==null)
                     throw RecognitionException("页面已经切换，本次截图未发送，可打开详情摇一摇补录")
+                ledger.tasks.recordOriginalCaptureDay(task,System.currentTimeMillis(),java.time.ZoneId.systemDefault().id)
                 if(automatic)ledger.tasks.diagnose(task,"capture_context","payment_success_result:${System.currentTimeMillis()}")
                 ledger.tasks.diagnose(task,"timing","captured_age_ms=${SystemClock.elapsedRealtime()-trigger.eventAtMs}")
                 val image=withContext(Dispatchers.Default) { ledger.recognizer.prepareScreenshot(bitmap!!) }

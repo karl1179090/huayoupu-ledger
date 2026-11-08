@@ -12,7 +12,7 @@ data class ValidatedBackup(val records: List<LedgerRecord>, val channels: Map<Ch
     val accounts: List<LedgerAccount> = emptyList(), val categories: List<CustomCategory> = emptyList(),
     val histories:Map<String,List<RestoredCaptureHistory>> = emptyMap(),
     val wallets:WalletSnapshot? = null, val metadataVersion:Int = 3,
-    val categoryDirectory:List<LedgerCategory> = emptyList(), val recordCategoryIds:Map<String,String> = emptyMap())
+    val categoryDirectory:List<LedgerCategory> = emptyList(), val recordCategoryIds:Map<String,String> = emptyMap(),val classification:ClassificationBackup?=null)
 
 object LedgerBackup {
     const val MAX_BYTES = 16 * 1024 * 1024
@@ -53,7 +53,7 @@ object LedgerBackup {
             require(previousRefund==(record.bill.refund?.refundedCents ?: 0L)) { "退款历史与汇总不一致" }
     }
     fun encode(store:LedgerStore,channels:ChannelSettings):String = StagedLedgerBackup.capture(store,includeIcons=false).use { snapshot->
-        val root=JSONObject(encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory))
+        val root=JSONObject(encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory,snapshot.classification))
         val histories=JSONObject();var imageBytes=0L
         snapshot.records.forEach { record->
             val entries=JSONArray()
@@ -108,6 +108,7 @@ object LedgerBackup {
 
     private fun preflightCategories(backup:ValidatedBackup) {
         val records=backup.records.associateBy { it.uid }
+        backup.classification?.let { ClassificationStorage.validateBackup(it,backup.categoryDirectory) }
         CategoryDirectory.validateSnapshot(backup.categoryDirectory)
         val categories=backup.categoryDirectory.associateBy { it.id }
         if (categories.isNotEmpty()) backup.records.filter { it.bill.direction in setOf(Direction.EXPENSE,Direction.INCOME) }.forEach {
@@ -127,7 +128,7 @@ object LedgerBackup {
 
     fun encode(records: List<LedgerRecord>, channels: ChannelSettings,
                accounts: List<LedgerAccount> = emptyList(), categories: List<CustomCategory> = emptyList(),wallets:WalletSnapshot?=null,
-               categoryDirectory:List<LedgerCategory> = emptyList()): String {
+               categoryDirectory:List<LedgerCategory> = emptyList(),classification:ClassificationBackup?=null): String {
         CategoryDirectory.validateSnapshot(categoryDirectory)
         val categoryIndex=categoryDirectory.associateBy { it.direction to it.name }
         val settings = JSONObject()
@@ -148,6 +149,7 @@ object LedgerBackup {
             r.bill.paymentMethod?.let { put("paymentMethod",WalletBackupCodec.evidenceJson(it)) }
             r.bill.standaloneRefund?.let { put("standaloneRefund",WalletBackupCodec.standaloneJson(it)) }
             r.bill.receipt?.let { put("receipt",ReceiptEvidenceCodec.json(it)) }
+            r.bill.categoryDecision?.let { put("categoryDecision",ClassificationCodec.decision(it)) }
             r.bill.refund?.let { refund -> put("refund",JSONObject().put("provider",refund.provider)
                 .put("originalAmountCents",refund.originalAmountCents).put("refundedCents",refund.refundedCents)
                 .put("mode",refund.mode).put("refundId",refund.refundId?:JSONObject.NULL)) }
@@ -180,10 +182,11 @@ object LedgerBackup {
             toReference=d.toReference ?: d.toAccountUid?.let { WalletFileReference(it).json() },
             recognitionEvidence=d.recognitionEvidence ?: record.bill.transfer?.let(TransferEvidenceCodec::encode)) } },records.associate { it.uid to emptyMap() })
         WalletBackupCodec.validate(records,accounts,snapshot)
-        return JSONObject().put("format", "simple-ledger").put("version", 7).put("wallets",WalletBackupCodec.encode(snapshot))
+        return JSONObject().put("format", "simple-ledger").put("version", 8).put("wallets",WalletBackupCodec.encode(snapshot))
             .put("channels", settings).put("records", array).put("accounts", accountArray)
             .put("categoryDirectory",JSONArray().apply { categoryDirectory.forEach { put(JSONObject().put("id",it.id).put("name",it.name)
                 .put("direction",it.direction.name).put("icon",it.icon).put("order",it.order).put("isFallback",it.isFallback)) } })
+            .put("classification",classification?.let(ClassificationCodec::backup) ?: JSONObject.NULL)
             .put("customCategories", custom).toString(2)
     }
 
@@ -203,7 +206,7 @@ object LedgerBackup {
     /** Reuse the legacy schema validation for ZIP metadata, whose image bytes live separately. */
     internal fun decodeMetadata(root: JSONObject): ValidatedBackup {
         val version = root.get("version")
-        require(root.get("format") == "simple-ledger" && version is Int && version in 1..7) { "备份格式或版本不支持" }
+        require(root.get("format") == "simple-ledger" && version is Int && version in 1..8) { "备份格式或版本不支持" }
         val array = root.getJSONArray("records")
         require(array.length() <= 100_000) { "备份记录过多" }
         val uids = mutableSetOf<String>()
@@ -244,9 +247,12 @@ object LedgerBackup {
                     if (obj.isNull("transactionId")) null else text("transactionId"), bool("reliable"), text("reason"), bool("timeExplicit"),refund,
                     if(obj.isNull("paymentMethod"))null else WalletBackupCodec.evidence(obj.getJSONObject("paymentMethod")),
                     if(obj.isNull("standaloneRefund"))null else WalletBackupCodec.standalone(obj.getJSONObject("standaloneRefund")),
-                    receipt=if(obj.isNull("receipt"))null else ReceiptEvidenceCodec.decode(obj.getJSONObject("receipt"))),
+                    receipt=if(obj.isNull("receipt"))null else ReceiptEvidenceCodec.decode(obj.getJSONObject("receipt")),
+                    categoryDecision=ClassificationCodec.readDecision(obj.optJSONObject("categoryDecision"))),
                 state = state, reason = text("reason"), note = text("note", 500),
-                identities=obj.optJSONArray("identities")?.let { TransactionIdentities.decode(it.toString()) } ?: emptyList())
+                identities=obj.optJSONArray("identities")?.let { TransactionIdentities.decode(it.toString()) } ?: emptyList()).also { record ->
+                record.bill.receipt?.time?.let { require(it.accountingAt==record.bill.occurredAt) { "凭证记账时间不一致" } }
+            }
         }
         val settings = root.getJSONObject("channels")
         val channels = ChannelSettings.Channel.entries.associateWith { channel ->
@@ -339,6 +345,6 @@ object LedgerBackup {
             val item=array.getJSONObject(index)
             if(item.isNull("categoryId"))null else item.getString("uid") to ((item.get("categoryId") as? String) ?: error("分类标识格式错误"))
         }.toMap()
-        return ValidatedBackup(restored,channels,accounts,categories,histories,wallets,version,directory,categoryIds).also(::preflightCategories)
+        return ValidatedBackup(restored,channels,accounts,categories,histories,wallets,version,directory,categoryIds,if(version>=8)root.optJSONObject("classification")?.let(ClassificationCodec::readBackup) else null).also(::preflightCategories)
     }
 }

@@ -12,19 +12,20 @@ import net.ankio.ledger.core.RecognitionPolicy
 import net.ankio.ledger.data.IngestResult
 
 /** Shared local persistence pipeline; the bundled recognizer reads the exact stored image. */
-class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient = app.recognizer) {
+class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient = app.recognizer,
+    private val recognitionClock:()->net.ankio.ledger.core.RecognitionTimeContext={net.ankio.ledger.core.RecognitionTimeContext.now()}) {
     suspend fun process(bitmap: Bitmap, source: Source, origin: String, taskId:Long?=null, beforeAccept:suspend ()->Unit={}, allowed: () -> Boolean): IngestResult {
-        return processRecognition(source,origin,taskId,beforeAccept,allowed) { guard ->
-            recognize(client.prepareScreenshot(bitmap), taskId, origin, guard)
+        return processRecognition(source,origin,taskId,beforeAccept,allowed) { guard, time ->
+            recognize(client.prepareScreenshot(bitmap), taskId, origin, guard, time)
         }
     }
     suspend fun processPrepared(image:ByteArray,source:Source,origin:String,taskId:Long,allowed:()->Boolean):IngestResult =
-        processRecognition(source,origin,taskId,{},allowed) { guard -> recognize(image, taskId, origin, guard) }
+        processRecognition(source,origin,taskId,{},allowed) { guard, time -> recognize(image, taskId, origin, guard, time) }
 
-    private suspend fun recognize(image:ByteArray,taskId:Long?,origin:String,guard:()->Boolean):net.ankio.ledger.ocr.RecognitionResult {
+    private suspend fun recognize(image:ByteArray,taskId:Long?,origin:String,guard:()->Boolean,time:()->net.ankio.ledger.core.RecognitionTimeContext):net.ankio.ledger.ocr.RecognitionResult {
         val prepared:(ByteArray)->Unit={ bytes -> taskId?.let { app.tasks.prepared(it,bytes);app.changed() } }
         val liveAt=taskId?.let(app.tasks::livePaymentAt)
-        return client.recognizePrepared(image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,policy=policy(taskId),origin=origin)
+        return client.recognizePrepared(image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,policy=policy(taskId),origin=origin,recognitionTime=time)
     }
 
     private fun policy(taskId:Long?) = if(taskId?.let(app.tasks::automatic)==true)
@@ -34,7 +35,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
         "已记账 ¥${net.ankio.ledger.core.Money.format(cents)}${if(transfer)"（钱包转账）" else ""}"
 
     private suspend fun processRecognition(source:Source,origin:String,taskId:Long?,beforeAccept:suspend ()->Unit,allowed:()->Boolean,
-        recognize:suspend (()->Boolean)->net.ankio.ledger.ocr.RecognitionResult):IngestResult {
+        recognize:suspend (()->Boolean,()->net.ankio.ledger.core.RecognitionTimeContext)->net.ankio.ledger.ocr.RecognitionResult):IngestResult {
         require(source == Source.OCR || source == Source.IMAGE)
         val guard={ allowed() && (taskId==null || app.tasks.exists(taskId)) }
         try {
@@ -54,7 +55,11 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 app.changed();return IngestResult.DuplicateSkipped
             }
             taskId?.let { app.tasks.diagnose(it,"stage","local_recognition");app.tasks.diagnose(it,"engine","local") }
-            val recognized = recognize(guard)
+            val classification=taskId?.let(app.tasks::classificationSnapshot) ?: app.store.classificationRules()
+            var frozenTime:net.ankio.ledger.core.RecognitionTimeContext?=null
+            val recognitionTime = { frozenTime ?: (taskId?.let { app.tasks.beginRecognition(it,recognitionClock) }
+                ?: recognitionClock()).also { frozenTime=it } }
+            val recognized = recognize(guard,recognitionTime)
             currentCoroutineContext().ensureActive()
             beforeAccept()
             if(!guard())throw CancellationException("识别已停止")
@@ -68,7 +73,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 if(recognized.iconDetails.isNotBlank())app.tasks.diagnose(it,"icon_details",recognized.iconDetails)
                 app.tasks.diagnose(it,"stage","save_result")
             }
-            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), allowed=guard).outcome
+            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText, recognitionTime().recognitionAt), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), classificationSnapshot=classification, allowed=guard).outcome
             if(result==IngestResult.Ignored&&!guard())throw CancellationException("识别已停止")
             taskId?.let { id ->
                 // Explain REVIEW without exporting the model response or financial fields.
@@ -91,7 +96,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                         app.tasks.update(id,if(review)"REVIEW" else "SUCCEEDED",message,result.record.id)
                     }
                     IngestResult.DuplicateSkipped -> {
-                        val capture=Capture(source,origin,recognized.rawText)
+                        val capture=Capture(source,origin,recognized.rawText,recognitionTime().recognitionAt)
                         // The primary legacy field may still be a Taobao order ID;
                         // resolve an Alipay/WeChat alias through the scoped index first.
                         val original=operationKey?.let(app.store::committedCapture)?.record

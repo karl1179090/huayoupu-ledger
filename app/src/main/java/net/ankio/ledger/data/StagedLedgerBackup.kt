@@ -10,7 +10,7 @@ internal class StagedLedgerBackup private constructor(
     val records:List<LedgerRecord>,val accounts:List<LedgerAccount>,val categories:List<CustomCategory>,val wallets:WalletSnapshot,
     val histories:Map<String,List<RecordCaptureHistory>>,val files:Map<String,File>,
     val historyAssets:Map<String,Map<Int,String>>,val iconAssets:Map<String,String>,private val directory:File,
-    val categoryDirectory:List<LedgerCategory>,
+    val categoryDirectory:List<LedgerCategory>,val classification:ClassificationBackup,
 ):Closeable {
     override fun close() { directory.listFiles()?.forEach { it.delete() };directory.delete() }
     companion object {
@@ -52,7 +52,7 @@ internal class StagedLedgerBackup private constructor(
                         icons[record.uid]=register(file)
                     }
                 }
-                val result=StagedLedgerBackup(records,accounts,categories,wallets,histories,files,historyAssets,icons,directory,store.categoryDirectory())
+                val result=StagedLedgerBackup(records,accounts,categories,wallets,histories,files,historyAssets,icons,directory,store.categoryDirectory(),store.classificationBackup())
                 db.setTransactionSuccessful();result
             } catch(error:Throwable) {
                 directory.listFiles()?.forEach { it.delete() };directory.delete();throw error
