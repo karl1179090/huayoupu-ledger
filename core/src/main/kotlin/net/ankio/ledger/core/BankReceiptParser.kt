@@ -37,8 +37,11 @@ object BankReceiptParser {
             if(value.isBlank() || value.length>512 || raw.length>2048)null else ReceiptField(value,raw)
         }.distinctBy { it.value }
         fun values(label: Regex)=fields(label).map { normalize(it.value).filterNot(Char::isWhitespace) }
-        val amounts = values(amountLabel).mapNotNull(Money::parseCents).filter { it in 1..Money.MAX_CENTS }.distinct()
+        val amountValues=values(amountLabel)
+        val parsedAmounts=amountValues.map(Money::parseCents)
+        val amounts=parsedAmounts.filterNotNull().filter { it in 1..Money.MAX_CENTS }.distinct()
         if (amounts.isEmpty()) return null
+        val amount=amounts.singleOrNull()?.takeIf { parsedAmounts.all { cents -> cents!=null && cents in 1..Money.MAX_CENTS } }
         val accounts = values(accountLabel)
         val banks = scoped.flatMap { BankCodes.find(it.text) }.toSet()
         val tails = accounts.flatMap { tail.findAll(it).map { match -> match.groupValues[1].ifBlank { match.groupValues[2] } }.toList() }.distinct()
@@ -53,7 +56,7 @@ object BankReceiptParser {
         }
         val ambiguous = malformedTail || banks.size != 1 || tails.size > 1 || scoped.count { heading.containsMatchIn(it.text) } > 1
         val reasons = buildList {
-            if (amounts.size != 1) add("交易金额不明确")
+            if (amount == null) add("交易金额不明确")
             if (direction == null) add("请确认银行交易收支方向")
             if (ambiguous) add("银行账户证据冲突，请确认实际账户")
         }
@@ -71,7 +74,7 @@ object BankReceiptParser {
                 ?: base.receiptIssuer ?: unknownIssuer?.let { ReceiptField(it.text.trim(),it.text) },
             bank=BankReceiptEvidence(bankCode, tails.singleOrNull(), fields(typeLabel).singleOrNull(), direction, ambiguous))
         val time=TransactionTimeResolver.resolve(scoped,timeContext)
-        return ParsedBill(amounts.singleOrNull(), direction, merchant, "其他", time.accountingAt,
+        return ParsedBill(amount, direction, merchant, "其他", time.accountingAt,
             LocalOcrBillParser.transactionId(scoped), reasons.isEmpty(), reasons.joinToString("；"),
             timeExplicit=time.explicit, paymentMethod=evidence, receipt=receipt.copy(time=time))
     }

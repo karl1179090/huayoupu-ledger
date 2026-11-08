@@ -10,6 +10,12 @@ class BankReceiptParserTest {
         LocalOcrBillParser.parse((listOf("招商银行", "交易成功提醒") + fields).map(::LocalOcrLine),
             0, 0, now, policy=policy, origin="shake:com.tencent.mm")
 
+    @Test fun unreadableCompetingTransactionAmountCannotBeDiscardedToPostTheOtherValue() {
+        val bill=parse("交易类型：网上快捷支付","交易金额：12.00元","交易金额：无法读取","交易卡号：尾号0007")!!
+        assertNull(bill.amountCents)
+        assertFalse(bill.reliable)
+    }
+
     @Test fun bankTimeUsesTheFrozenRecognitionContextOrItsOwnExplicitTransactionDate() {
         val at=Instant.parse("2026-11-08T04:00:00Z").toEpochMilli()
         val context=RecognitionTimeContext(at,"Asia/Shanghai")
