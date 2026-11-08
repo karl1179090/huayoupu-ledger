@@ -103,7 +103,9 @@ internal object CategoryDirectory {
         val type = requireNotNull(direction)
         byName(db, type, name)?.let { return it }
         val next = list(db, type).maxOfOrNull { it.order }?.plus(1) ?: 0
-        val id = UUID.nameUUIDFromBytes("category:${type.name}:$name".toByteArray(Charsets.UTF_8)).toString()
+        var id = UUID.nameUUIDFromBytes("category:${type.name}:$name".toByteArray(Charsets.UTF_8)).toString()
+        // A previous category can retain this name-derived ID after a rename. Its identity stays with it.
+        while (find(db, id) != null) id = UUID.randomUUID().toString()
         return LedgerCategory(id, name, type, order = next).also { insert(db, it) }
     }
 
