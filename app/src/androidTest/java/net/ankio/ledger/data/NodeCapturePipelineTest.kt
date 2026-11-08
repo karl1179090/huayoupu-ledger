@@ -162,6 +162,8 @@ class NodeCapturePipelineTest {
         val cash=app.store.saveAccount(LedgerAccount(name="合成缺微信零钱现金",amountCents=20000,kind="cash"))
         app.store.setDefaultWallet(cash.uid);app.store.setAppWallet(PaymentApps.WECHAT,null)
         val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm");var saved:Long?=null
+        val copies=listOf("t13-pending-json-${UUID.randomUUID()}.db","t13-pending-zip-${UUID.randomUUID()}.db")
+        val archive=java.io.File(app.cacheDir,"t13-pending-${UUID.randomUUID()}.zip")
         try {
             val snapshot=QualifiedWechatNodeFixture.page(merchant="合成缺图账户-${UUID.randomUUID()}")
             val processor=CaptureProcessor(app,OcrClient(app,RecognitionBackend { _,_,_,_,_,_->error("must not invoke OCR") }),{time})
@@ -172,10 +174,39 @@ class NodeCapturePipelineTest {
             assertEquals("Explicit actual payment cannot fall back to default cash",RecordState.REVIEW,result.record.state)
             assertEquals(20000L,app.store.getAccount(cash.id)!!.amountCents)
             assertTrue(app.store.walletMovements(cash.uid).none { it.recordUid==result.record.uid })
+            assertTrue(result.record.bill.paymentMethod!!.executed)
+            assertEquals("ACTUAL_ACCOUNT_REQUIRED",result.record.wallet!!.reviewCode)
+            assertNull(result.record.wallet!!.accountUid);assertEquals(0L,result.record.wallet!!.appliedCents)
+            fun assertPendingRestored(copy:LedgerStore) {
+                val restored=copy.all().single { it.uid==result.record.uid }
+                assertEquals(RecordState.REVIEW,restored.state)
+                assertEquals(result.record.bill.paymentMethod,restored.bill.paymentMethod)
+                assertEquals(result.record.bill.receipt,restored.bill.receipt)
+                assertEquals("ACTUAL_ACCOUNT_REQUIRED",restored.wallet!!.reviewCode)
+                assertNull(restored.wallet!!.accountUid);assertEquals(0L,restored.wallet!!.appliedCents)
+                assertNull(copy.screenshot(restored.id))
+                assertEquals(20000L,copy.getAccountByUid(cash.uid)!!.amountCents)
+                assertTrue(copy.walletMovements(cash.uid).none { it.recordUid==restored.uid })
+            }
+            val backup=LedgerBackup.decode(LedgerBackup.encode(app.store,app.channels).byteInputStream())
+            LedgerStore(app,copies[0]).use { copy ->
+                assertTrue(LedgerBackup.restore(copy,backup)>0);assertPendingRestored(copy)
+                val accounts=copy.accounts();val movements=copy.walletMovements(cash.uid)
+                assertEquals(0,LedgerBackup.restore(copy,backup));assertEquals(accounts,copy.accounts());assertEquals(movements,copy.walletMovements(cash.uid))
+            }
+            archive.outputStream().use { LedgerArchive.write(app.store,app.channels,it) }
+            LedgerStore(app,copies[1]).use { copy ->
+                LedgerArchive.read(archive.inputStream(),app.cacheDir).use { prepared ->
+                    assertTrue(LedgerArchive.restore(copy,prepared)>0);assertPendingRestored(copy)
+                    val accounts=copy.accounts();val movements=copy.walletMovements(cash.uid)
+                    assertEquals(0,LedgerArchive.restore(copy,prepared));assertEquals(accounts,copy.accounts());assertEquals(movements,copy.walletMovements(cash.uid))
+                }
+            }
         } finally {
             saved?.let(app.store::delete);app.tasks.operationKey(task)?.let { app.store.writableDatabase.delete("wallet_submissions","token=?",arrayOf(it)) };app.tasks.delete(task)
             app.store.setDefaultWallet(settings.defaultAccountUid);app.store.setAppWallet(PaymentApps.WECHAT,settings.appBindings[PaymentApps.WECHAT])
             app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(cash.uid));app.store.deleteAccount(cash.id)
+            copies.forEach(app::deleteDatabase);archive.delete()
         }
     }
 
