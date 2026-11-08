@@ -93,4 +93,13 @@ class MixedReceiptPartitionerTest {
             "支付方式：优先从零钱支付").map(::LocalOcrLine)
         assertTrue(parse(page).isEmpty())
     }
+
+    @Test fun payLaterServiceHeaderStillKeepsTheCompletedDebitIndependent() {
+        val page=lines("先享后付服务通知","优先从零钱支付","交易已关闭")+
+            lines("扣款成功","交易金额：12.34元","商户名称：合成咖啡","通过零钱扣款",top=600)
+        val candidate=TransactionPageParser.parse(page,1080,1800,time,origin="shake:com.tencent.mm").single()
+        assertEquals(1234L,candidate.bill.amountCents)
+        assertEquals("WECHAT_BALANCE",candidate.bill.paymentMethod!!.medium)
+        assertFalse(candidate.rawText!!.contains("先享后付"))
+    }
 }

@@ -2,7 +2,7 @@ package net.ankio.ledger.core
 
 /** Null leaves unsupported layouts on the existing parser; empty means a service-only page. */
 object MixedReceiptPartitioner {
-    private val service=Regex("^(?:自动扣费)?服务开通(?:通知|成功)$|^(?:付款|支付)偏好(?:通知|设置)$|^免密支付开通成功$")
+    private val service=Regex("^(?:自动扣费|先享后付)?服务(?:开通(?:通知|成功)|通知)$|^(?:付款|支付)偏好(?:通知|设置)$|^免密支付开通成功$")
     private val debit=Regex("^(?:扣款|付款|支付|扣费)成功$")
     private val bankHeading=Regex("^(?:.*银行[：: ]*)?(?:交易成功提醒|交易提醒|动账通知|消费提醒|账户变动通知)$")
     private val peripheral=Regex("^(?:广告|为你推荐|猜你喜欢|相关推荐|积分推荐)(?:[：:>〉\\s]|$)")
