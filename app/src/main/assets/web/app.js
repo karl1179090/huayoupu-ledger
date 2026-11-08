@@ -133,13 +133,36 @@ const knownReceiptApps={'com.tencent.mm':'微信','com.eg.android.AlipayGphone':
 const receiptSourceNames={ocr:'识别文字',node:'页面节点',capture:'采集来源'};
 const receiptFieldSpecs=[['merchant','商家'],['productDescription','商品说明'],['transactionDescription','交易说明'],['orderRemark','订单备注'],['serviceProvider','服务商'],['receiptIssuer','凭证来源'],['sourceApp','来源应用']];
 function formatReceiptSourceApp(value){const raw=String(value??'').trim();if(!raw)return '';const app=(automatic.applications||[]).find(a=>a.packageName===raw&&a.label);return app?.label||knownReceiptApps[raw]||raw}
-function receiptTimeBasis(time,userEdited=false){
+function isTrustedDateMetadata(time,occurredAt){
+ if(!time||typeof time!=='object')return false;
+ if(time.precision!=='DATE')return false;
+ if(time.source!=='EXPLICIT'&&time.source!=='YEAR_INFERRED')return false;
+ if(typeof time.accountingAt!=='number'||!Number.isFinite(time.accountingAt))return false;
+ if(occurredAt!==undefined&&occurredAt!==null&&time.accountingAt!==occurredAt)return false;
+ if(typeof time.localDate!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(time.localDate))return false;
+ const d=new Date(time.localDate+'T00:00:00');
+ return !isNaN(d.getTime());
+}
+function trustedReceiptDate(record,timeEdited=false){
+ if(!record||timeEdited||record._timeEdited)return null;
+ const t=record.receipt?.time;
+ if(!isTrustedDateMetadata(t,record.occurredAt))return null;
+ return t.localDate;
+}
+function receiptTimeBasis(time,userEdited=false,record=null){
  if(userEdited)return '人工修改记账时间';
  if(!time||typeof time!=='object')return '';
  const {source,precision,reference}=time;
  if(source==='MANUAL')return '人工修改记账时间';
  if(source==='RECOGNITION_FALLBACK')return '使用识别时间';
- if(source==='EXPLICIT')return precision==='DATE'?'凭证日期（仅日期）':'凭证交易时间';
+ if(precision==='DATE'){
+  if(record&&!trustedReceiptDate(record,userEdited))return '';
+  if(!record&&!isTrustedDateMetadata(time))return '';
+  if(source==='EXPLICIT')return '凭证日期（仅日期）';
+  if(source==='YEAR_INFERRED')return reference==='ORIGINAL_CAPTURE'?'凭证日期，年份按采集日期推断':'凭证日期，年份按识别日期推断';
+  return '';
+ }
+ if(source==='EXPLICIT')return '凭证交易时间';
  if(source==='YEAR_INFERRED')return reference==='ORIGINAL_CAPTURE'?'凭证日期，年份按采集日期推断':'凭证日期，年份按识别日期推断';
  return '';
 }
@@ -149,16 +172,21 @@ function escapeText(value){const e=document.createElement('span');e.textContent=
 function localTime(time){const d=new Date(time),pad=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`}
 function localMonth(time){const d=new Date(time),value=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;return value.length<7?localTime(time).slice(0,7):value.slice(0,7)}
 function recordMonth(r){
- if(r?.receipt?.time?.precision==='DATE'&&r.receipt.time.localDate){
-  return r.receipt.time.localDate.slice(0,7);
- }
+ const trusted=trustedReceiptDate(r);
+ if(trusted)return trusted.slice(0,7);
  return localMonth(r?.occurredAt);
 }
 function itemDateKey(item){
- if(item.record?.receipt?.time?.precision==='DATE'&&item.record.receipt.time.localDate){
-  return item.record.receipt.time.localDate;
+ if(item.record){
+  const trusted=trustedReceiptDate(item.record);
+  if(trusted)return trusted;
  }
  return localTime(item.time).slice(0,10);
+}
+function recordDisplayTime(r){
+ const trusted=trustedReceiptDate(r);
+ if(trusted)return `${trusted} 仅日期`;
+ return localTime(r?.occurredAt).replace('T',' ');
 }
 function monthRecords(){return records.filter(r=>r.state==='POSTED'&&recordMonth(r)===month)}
 function sums(list){return list.reduce((a,r)=>{if(r.direction==='INCOME')a.income+=cents(r.amountCents);else a.expense+=expenseOf(r);return a},{income:0n,expense:0n})}
@@ -196,7 +224,11 @@ function render(){
   &&(filter==='all'||r.direction===filterDirection()||filter==='expense'&&!r.direction)
   &&(!query||[r.merchant,transferName(r),resolveRecordCategory(r).name,r.category,r.note,r.transactionId,sourceNames[r.source]].some(v=>String(v||'').toLowerCase().includes(search))));
  const attempts=recognitionTasks.filter(t=>!t.recordId&&!['SKIPPED','DUPLICATE'].includes(t.status)&&localMonth(t.createdAt)===month&&(!query||[captureName(t),taskNames[t.status],t.message].some(v=>String(v||'').toLowerCase().includes(search))));
- const timeline=[...shown.map(record=>({record,time:record.occurredAt,id:record.id})),...attempts.map(task=>({task,time:task.createdAt,id:task.id}))].sort((a,b)=>b.time-a.time||b.id-a.id||Number(!!a.task)-Number(!!b.task));
+ const timeline=[...shown.map(record=>({record,time:record.occurredAt,id:record.id})),...attempts.map(task=>({task,time:task.createdAt,id:task.id}))].sort((a,b)=>{
+  const dayDiff=itemDateKey(b).localeCompare(itemDateKey(a));
+  if(dayDiff!==0)return dayDiff;
+  return b.time-a.time||b.id-a.id||Number(!!a.task)-Number(!!b.task);
+ });
  const groups=new Map();for(const item of timeline){const key=itemDateKey(item);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(item)}
  const dailyTotals=new Map();if(!query&&ledgerView?.summary?.days)for(const row of ledgerView.summary.days)if(row.direction===direction)dailyTotals.set(row.day,(dailyTotals.get(row.day)||0n)+cents(row.amount));
  const today=localTime(Date.now()).slice(0,10),yesterday=localTime(Date.now()-86400000).slice(0,10);
@@ -209,7 +241,7 @@ function render(){
    if(item.task)return recognitionRow(item.task);
    const r=item.record,catLabel=resolveRecordCategory(r).name||'其他';
    const pending=r.state==='REVIEW',income=r.direction==='INCOME',source=captureName(r)||'手动',aiSource=['OCR','IMAGE'].includes(r.source);
-   return swipeRow(`<button class="transaction entry ${pending?'ai-pending-entry':''}" ${pending?'data-pending':'data-record'}="${r.id}" aria-label="${pending?'':'编辑'}${escapeText(transferName(r))}，${pending?'待确认记账':directionLabel(r.direction)+money(r.amountCents)+'元'}，${escapeText(catLabel)}，${escapeText(source)}">${ledgerIcon(r,pending)}<span class="record-main entry-text"><span class="record-name entry-title">${escapeText(transferName(r))}</span><span class="record-meta entry-subtitle"><span class="record-time">${r.receipt?.time?.precision==='DATE'?'仅日期':localTime(r.occurredAt).slice(11)}</span><span class="record-category">${escapeText(catLabel)}</span><span class="tag ${aiSource?'ai':r.source==='MANUAL'?'manual':''}">${escapeText(source)}</span></span></span>${pending?'<span class="pending tag">待确认</span>':`<span class="amount entry-amount ${income?'positive':''}">${r.direction==='TRANSFER'?'¥ '+money(r.amountCents):signedMoney(r.amountCents,income)}</span>`}<span class="chevron" aria-hidden="true">›</span></button>`,r.id,false,r.merchant||'账单');
+   return swipeRow(`<button class="transaction entry ${pending?'ai-pending-entry':''}" ${pending?'data-pending':'data-record'}="${r.id}" aria-label="${pending?'':'编辑'}${escapeText(transferName(r))}，${pending?'待确认记账':directionLabel(r.direction)+money(r.amountCents)+'元'}，${escapeText(catLabel)}，${escapeText(source)}">${ledgerIcon(r,pending)}<span class="record-main entry-text"><span class="record-name entry-title">${escapeText(transferName(r))}</span><span class="record-meta entry-subtitle"><span class="record-time">${trustedReceiptDate(r)?'仅日期':localTime(r.occurredAt).slice(11)}</span><span class="record-category">${escapeText(catLabel)}</span><span class="tag ${aiSource?'ai':r.source==='MANUAL'?'manual':''}">${escapeText(source)}</span></span></span>${pending?'<span class="pending tag">待确认</span>':`<span class="amount entry-amount ${income?'positive':''}">${r.direction==='TRANSFER'?'¥ '+money(r.amountCents):signedMoney(r.amountCents,income)}</span>`}<span class="chevron" aria-hidden="true">›</span></button>`,r.id,false,r.merchant||'账单');
   }).join('')+'</section>';
  }).join('');
  renderTimeline((query?'<p class="search-scope">搜索全部月份</p>':'')+(timelineMarkup||`<div class="empty-state">${query?'未找到匹配的账单':'这个月还没有'+(selected==='income'?'收入':'支出')+'账单'}<br>点击底部 + 手动记账或导入账单截图</div>`)+(ledgerView?.hasMore?'<button type="button" id="load-more-records" class="load-more-records">加载更多账单</button>':''));
@@ -299,7 +331,7 @@ function drawSettings(){
 function drawChart(list,now=new Date(),aggregated=null){
  const [year,mo]=month.split('-').map(Number),days=new Date(year,mo,0).getDate(),current=localMonth(now.getTime());
  const eligible=list.filter(r=>r.state==='POSTED'&&recordMonth(r)===month&&r.amountCents!=null&&['INCOME','EXPENSE','TRANSFER'].includes(r.direction));
- const recordDay=r=>(r.receipt?.time?.precision==='DATE'&&r.receipt?.time?.localDate)?Number(r.receipt.time.localDate.slice(8,10)):new Date(r.occurredAt).getDate();
+ const recordDay=r=>{const trusted=trustedReceiptDate(r);return trusted?Number(trusted.slice(8,10)):new Date(r.occurredAt).getDate()};
  // Current months stop at today, except explicitly dated future records. Past months use the full month.
  const lastDay=month<current?days:Math.max(month===current?now.getDate():1,...(aggregated?aggregated.map(r=>r.day):eligible.map(recordDay)));
  const mode=filter==='income'?'income':'expense',name=mode==='income'?'累计收入':'累计支出',values=Array(lastDay).fill(0n);
@@ -319,7 +351,7 @@ function drawChart(list,now=new Date(),aggregated=null){
 }
 function showTrendDetails(){
  const svg=document.querySelector('.chart svg'),last=Number(svg.dataset.endDay),[year,mo]=month.split('-').map(Number),list=monthRecords(),mode=filter==='income'?'income':'expense',label=mode==='income'?'收入':'支出';let cumulative=0n;
- const rows=Array.from({length:last},(_,i)=>{const day=i+1,total=ledgerView?.summary?.days?ledgerView.summary.days.filter(r=>r.day===day&&r.direction===(mode==='income'?'INCOME':'EXPENSE')).reduce((s,r)=>s+cents(r.amount),0n):sums(list.filter(r=>new Date(r.occurredAt).getDate()===day))[mode];cumulative+=total;return `<tr><th scope="row">${mo}/${day}</th><td>${money(total)}</td><td>${money(cumulative)}</td></tr>`}).join('');
+ const rows=Array.from({length:last},(_,i)=>{const day=i+1,total=ledgerView?.summary?.days?ledgerView.summary.days.filter(r=>r.day===day&&r.direction===(mode==='income'?'INCOME':'EXPENSE')).reduce((s,r)=>s+cents(r.amount),0n):sums(list.filter(r=>recordDay(r)===day))[mode];cumulative+=total;return `<tr><th scope="row">${mo}/${day}</th><td>${money(total)}</td><td>${money(cumulative)}</td></tr>`}).join('');
  showSheet(`${year}年${mo}月每日${label}`,`<div class="trend-curve">${svg.outerHTML}</div><p class="sheet-copy">仅计入已确认${label}账单。月初从 0 开始，逐日累加${label}金额；待确认及失败的识别不计入。</p><div class="trend-table-wrap"><table class="trend-table"><thead><tr><th scope="col">日期</th><th scope="col">当日${label}（元）</th><th scope="col">累计${label}（元）</th></tr></thead><tbody>${rows}</tbody></table></div>`);
 }
 
@@ -377,7 +409,7 @@ function readDraft(){
  else{occurredAt=new Date($('occurred-at').value).getTime()}
  return {merchant:$('merchant').value,category,...(direction!=='TRANSFER'&&categoryId?{categoryId}:{}),amount:$('amount').value,direction,occurredAt,timeEdited:!!draft?._timeEdited,categoryEdited:!!draft?._categoryEdited,note:$('note').value,...(draft?.manualWalletSelected?{walletAccountUid:draft.walletAccountUid,manualWalletSelected:true}:{}),...(direction==='TRANSFER'?{transfer:readTransfer('record')}:{})};
 }
-function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');const catExplain=$('category-explanation'),decisionText=formatCategoryDecision({...draft,direction:$('direction')?.dataset?.value||draft.direction});if(catExplain){catExplain.hidden=!decisionText;catExplain.textContent=decisionText}const isDateOnly=Boolean(!draft._timeEdited&&draft.receipt?.time?.precision==='DATE');$('occurred-at').value=(isDateOnly&&draft.receipt?.time?.localDate)?`${draft.receipt.time.localDate}T00:00`:localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
+function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');const catExplain=$('category-explanation'),decisionText=formatCategoryDecision({...draft,direction:$('direction')?.dataset?.value||draft.direction});if(catExplain){catExplain.hidden=!decisionText;catExplain.textContent=decisionText}const trustedDate=trustedReceiptDate(draft,draft._timeEdited);$('occurred-at').value=trustedDate?`${trustedDate}T00:00`:localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
  const posted=draft.state==='POSTED';
  const editor=$('import'),automatic=['SMS','NOTIFICATION'].includes(draft.source),aiRecord=['OCR','IMAGE'].includes(draft.source);
  editor.classList.toggle('standard-record',!!draft.id&&(automatic||draft.source==='MANUAL'));editor.classList.toggle('ai-record',aiRecord);editor.classList.toggle('posted-record',posted);
@@ -456,17 +488,17 @@ function viewHistory(sequence){
  pages.onscroll=()=>{const next=Math.max(0,Math.min(history.length-1,Math.round(pages.scrollLeft/Math.max(1,pages.clientWidth))));if(next!==current){current=next;describe()}};
  pages.scrollLeft=index*pages.clientWidth;describe();
 }
-function chooseRefundTarget(){if(!native||!draft?.id)return;try{const result=JSON.parse(native.refundCandidates(draft.id));if(!result.ok){notify(result.error||'无法读取原账单');return}showSheet('选择退款对应的原账单',`<p class="sheet-copy">核对商户、原付款金额和时间，确认后将更新原账单，并保留两次识别截图。</p>${result.candidates.map(r=>`<button type="button" class="sheet-row" data-refund-target="${r.id}"><span>${escapeText(r.merchant)}<br><small>${localTime(r.occurredAt).replace('T',' ')} · 原付 ¥${money(r.originalAmountCents)}</small></span><span>选择 ›</span></button>`).join('')||'<p class="sheet-copy">没有找到可关联的原账单。请先记录原付款，或核对支付平台和原付款金额后重新识别。</p>'}`);document.querySelectorAll('[data-refund-target]').forEach(button=>button.onclick=()=>confirmRefundTarget(Number(button.dataset.refundTarget)))}catch(_){notify('读取失败，请稍后重试')}}
-function confirmRefundTarget(targetId){const target=records.find(r=>r.id===targetId);if(!(draft?.refund||draft?.standaloneRefund)||!target)return;const pendingId=draft.id;const refund=draft.refund||{...draft.standaloneRefund,originalAmountCents:target.refund?.originalAmountCents||target.amountCents,mode:'single'};showSheet('确认更新原账单？',`<p class="sheet-copy">${escapeText(target.merchant)} · ${localTime(target.occurredAt).replace('T',' ')}<br>原付 ¥${money(refund.originalAmountCents)}，${refund.mode==='single'?'本次':'累计'}成功退款 ¥${money(refund.refundedCents)}。将按原账单已记录的退款核算实付金额，重复退款不会再次扣减，原分类和备注继续保留。</p><div class="sheet-actions"><button type="button" id="refund-back">返回选择</button><button type="button" id="confirm-refund" class="primary">确认更新原账单</button></div>`);$('refund-back').onclick=chooseRefundTarget;$('confirm-refund').onclick=()=>{try{const result=JSON.parse(native.confirmRefund(pendingId,targetId));if(!result.ok){notify(result.error||'退款更新失败，请重新核对');return}closeSheet();refresh();const updated=records.find(r=>r.id===result.id);if(updated){applyRecord(updated);remember()}notify(result.updated?'退款已更新，原账单截图已保留':'该退款已记录，无需重复扣减')}catch(_){notify('退款更新失败，请重试')}}}
+function chooseRefundTarget(){if(!native||!draft?.id)return;try{const result=JSON.parse(native.refundCandidates(draft.id));if(!result.ok){notify(result.error||'无法读取原账单');return}showSheet('选择退款对应的原账单',`<p class="sheet-copy">核对商户、原付款金额和时间，确认后将更新原账单，并保留两次识别截图。</p>${result.candidates.map(r=>`<button type="button" class="sheet-row" data-refund-target="${r.id}"><span>${escapeText(r.merchant)}<br><small>${recordDisplayTime(r)} · 原付 ¥${money(r.originalAmountCents)}</small></span><span>选择 ›</span></button>`).join('')||'<p class="sheet-copy">没有找到可关联的原账单。请先记录原付款，或核对支付平台和原付款金额后重新识别。</p>'}`);document.querySelectorAll('[data-refund-target]').forEach(button=>button.onclick=()=>confirmRefundTarget(Number(button.dataset.refundTarget)))}catch(_){notify('读取失败，请稍后重试')}}
+function confirmRefundTarget(targetId){const target=records.find(r=>r.id===targetId);if(!(draft?.refund||draft?.standaloneRefund)||!target)return;const pendingId=draft.id;const refund=draft.refund||{...draft.standaloneRefund,originalAmountCents:target.refund?.originalAmountCents||target.amountCents,mode:'single'};showSheet('确认更新原账单？',`<p class="sheet-copy">${escapeText(target.merchant)} · ${recordDisplayTime(target)}<br>原付 ¥${money(refund.originalAmountCents)}，${refund.mode==='single'?'本次':'累计'}成功退款 ¥${money(refund.refundedCents)}。将按原账单已记录的退款核算实付金额，重复退款不会再次扣减，原分类和备注继续保留。</p><div class="sheet-actions"><button type="button" id="refund-back">返回选择</button><button type="button" id="confirm-refund" class="primary">确认更新原账单</button></div>`);$('refund-back').onclick=chooseRefundTarget;$('confirm-refund').onclick=()=>{try{const result=JSON.parse(native.confirmRefund(pendingId,targetId));if(!result.ok){notify(result.error||'退款更新失败，请重新核对');return}closeSheet();refresh();const updated=records.find(r=>r.id===result.id);if(updated){applyRecord(updated);remember()}notify(result.updated?'退款已更新，原账单截图已保留':'该退款已记录，无需重复扣减')}catch(_){notify('退款更新失败，请重试')}}}
 function updateTimeChip(){
- const isDateOnly=Boolean(!draft?._timeEdited&&draft?.receipt?.time?.precision==='DATE');
- const trustedDate=isDateOnly&&draft?.receipt?.time?.localDate?draft.receipt.time.localDate.replace(/-/g,'/'):null;
+ const trustedDate=trustedReceiptDate(draft,draft?._timeEdited);
+ const isDateOnly=Boolean(trustedDate);
  const val=$('occurred-at').value||'';
- const formatted=trustedDate||(isDateOnly?val.slice(0,10).replace(/-/g,'/'):val.replace('T',' ').replace(/-/g,'/'));
+ const formatted=trustedDate?trustedDate.replace(/-/g,'/'):val.replace('T',' ').replace(/-/g,'/');
  $('time-label').textContent=formatted;
  $('time-label').title=(isDateOnly?'修改交易日期：':'修改交易时间：')+formatted;
  $('time-label').setAttribute('aria-label',(isDateOnly?'修改交易日期：':'修改交易时间：')+formatted);
- const basis=receiptTimeBasis(draft?.receipt?.time,draft?._timeEdited);
+ const basis=receiptTimeBasis(draft?.receipt?.time,draft?._timeEdited,draft);
  const basisEl=$('time-basis');
  if(basisEl){basisEl.textContent=basis;basisEl.hidden=!basis}
 }
@@ -545,8 +577,9 @@ $('category').onclick=()=>{
 };
 $('direction').onclick=()=>{if(draft?.refund||draft?.standaloneRefund){notify('含退款历史的消费不能直接改为转账');return}$('category').click()};
 $('time-label').onclick=()=>{
- const isDateOnly=Boolean(!draft?._timeEdited&&draft?.receipt?.time?.precision==='DATE');
- const origPickerVal=(draft?.receipt?.time?.precision==='DATE'&&draft?.receipt?.time?.localDate)?`${draft.receipt.time.localDate}T00:00`:(draft?._originalOccurredAt!=null?localTime(draft._originalOccurredAt):'');
+ const trustedDate=trustedReceiptDate(draft,draft?._timeEdited);
+ const isDateOnly=Boolean(trustedDate);
+ const origPickerVal=trustedDate?`${trustedDate}T00:00`:(draft?._originalOccurredAt!=null?localTime(draft._originalOccurredAt):'');
  const currentVal=$('occurred-at').value||origPickerVal;
  showSheet(isDateOnly?'修改交易日期':'修改交易时间',`<input id="time-picker" class="month-input" type="datetime-local" value="${currentVal}"/><div class="sheet-actions"><button onclick="closeSheet()">取消</button><button class="primary" id="time-apply">确定</button></div>`);
  $('time-apply').onclick=()=>{
@@ -1227,7 +1260,7 @@ function showCategoryDetails(category,type,key=category){
  function load(){try{if(periodStats&&native?.contributionRecords){const result=JSON.parse(native.contributionRecords(statsPeriod,key,type==='income'?'INCOME':'EXPENSE',list.length));if(!result.ok)throw Error(result.error);list.push(...result.records);more=result.hasMore}
  else if(native?.categoryRecords){const result=JSON.parse(native.categoryRecords(month,key,type==='income'?'INCOME':'EXPENSE',list.length));if(!result.ok)throw Error(result.error);list.push(...result.records.filter(r=>r.state==='POSTED'));more=result.hasMore}
  else list=monthRecords().filter(r=>{const cat=resolveRecordCategory(r).name;return type==='income'?r.direction==='INCOME'&&(cat===category||`category:${cat}`===key):key==='system:transfer_fee'?r.direction==='TRANSFER'&&expenseOf(r)>0n:r.direction==='EXPENSE'&&(cat===category||`category:${cat}`===key)}).map(r=>({...r,contributionCents:(type==='income'?cents(r.amountCents):expenseOf(r)).toString()}));draw()}catch(_){notify('明细读取失败，请重试')}}
- function draw(){const summary=statsCategories(type).find(r=>(r.key||r.name)===key);showSheet(`${category} · ${type==='income'?'收入':'支出'}明细`,`<p class="sheet-copy">${summary?.count??list.length} 笔 · 合计 ¥ ${money(summary?.amount??sumValues(list.map(r=>r.contributionCents??r.amountCents)))}</p><div class="category-detail-list">${list.map(r=>`<button type="button" class="category-detail-row" data-category-record="${r.id}">${ledgerIcon(r)}<span><b>${escapeText(r.direction==='TRANSFER'?'转账手续费':transferName(r))}</b><small>${localTime(r.occurredAt).replace('T',' ')}</small></span><strong>${signedMoney(r.contributionCents??(r.direction==='TRANSFER'?r.transfer?.feeCents:r.amountCents),type==='income')}</strong><span class="chevron">›</span></button>`).join('')||'<p class="empty-state">暂无账单</p>'}</div>${more?'<button id="category-more" class="load-more-records">加载更多</button>':''}`);$('sheet-content').querySelectorAll('[data-category-record]').forEach(b=>b.onclick=()=>{const anchor=b.getBoundingClientRect();closeSheet();openRecord(Number(b.dataset.categoryRecord),false,anchor)});if($('category-more'))$('category-more').onclick=load}
+ function draw(){const summary=statsCategories(type).find(r=>(r.key||r.name)===key);showSheet(`${category} · ${type==='income'?'收入':'支出'}明细`,`<p class="sheet-copy">${summary?.count??list.length} 笔 · 合计 ¥ ${money(summary?.amount??sumValues(list.map(r=>r.contributionCents??r.amountCents)))}</p><div class="category-detail-list">${list.map(r=>`<button type="button" class="category-detail-row" data-category-record="${r.id}">${ledgerIcon(r)}<span><b>${escapeText(r.direction==='TRANSFER'?'转账手续费':transferName(r))}</b><small>${recordDisplayTime(r)}</small></span><strong>${signedMoney(r.contributionCents??(r.direction==='TRANSFER'?r.transfer?.feeCents:r.amountCents),type==='income')}</strong><span class="chevron">›</span></button>`).join('')||'<p class="empty-state">暂无账单</p>'}</div>${more?'<button id="category-more" class="load-more-records">加载更多</button>':''}`);$('sheet-content').querySelectorAll('[data-category-record]').forEach(b=>b.onclick=()=>{const anchor=b.getBoundingClientRect();closeSheet();openRecord(Number(b.dataset.categoryRecord),false,anchor)});if($('category-more'))$('category-more').onclick=load}
  load();
 }
 document.querySelectorAll('#stats-type button').forEach(b=>b.onclick=()=>{statsType=b.dataset.type;if(statsType!=='all')rankingType=statsType;drawStats();remember()});document.querySelectorAll('#ranking-type button').forEach(b=>b.onclick=()=>{rankingType=b.dataset.type;drawStats();remember()});
