@@ -88,7 +88,8 @@
     "net.ankio.ledger.CompoundClassificationBridgeTest",
     "net.ankio.ledger.CategoryDeletionBridgeTest",
     "net.ankio.ledger.data.CategoryReplacementTest",
-    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest"
+    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
+    "net.ankio.ledger.data.ClassificationCapacityTest"
   ],
   "api34": [
     "net.ankio.ledger.ShakeWhitelistTest",
@@ -129,7 +130,8 @@
     "net.ankio.ledger.CompoundClassificationBridgeTest",
     "net.ankio.ledger.CategoryDeletionBridgeTest",
     "net.ankio.ledger.data.CategoryReplacementTest",
-    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest"
+    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
+    "net.ankio.ledger.data.ClassificationCapacityTest"
   ],
   "api36": [
     "net.ankio.ledger.widget.ExpenseWidgetTest",

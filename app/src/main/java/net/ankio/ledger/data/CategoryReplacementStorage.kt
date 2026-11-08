@@ -31,7 +31,7 @@ internal object CategoryReplacementStorage {
         }.also { require(it.map { entry -> entry.categoryId }.toSet().size==it.size) { "分类替代标识重复" } }
     }
     fun payload(db:SQLiteDatabase)=db.rawQuery("SELECT payload FROM classification_configuration WHERE singleton=1",null).use {
-        check(it.moveToFirst());JSONObject(it.getString(0))
+        check(it.moveToFirst());val json=it.getString(0);ClassificationCodec.requirePayloadFits(json);JSONObject(json)
     }
     fun entries(db:SQLiteDatabase)=decode(payload(db).optJSONArray("categoryReplacements"))
     fun resolve(id:String,entries:List<CategoryReplacement>):String {
