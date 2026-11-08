@@ -250,7 +250,9 @@ object LedgerBackup {
                     receipt=if(obj.isNull("receipt"))null else ReceiptEvidenceCodec.decode(obj.getJSONObject("receipt")),
                     categoryDecision=ClassificationCodec.readDecision(obj.optJSONObject("categoryDecision"))),
                 state = state, reason = text("reason"), note = text("note", 500),
-                identities=obj.optJSONArray("identities")?.let { TransactionIdentities.decode(it.toString()) } ?: emptyList())
+                identities=obj.optJSONArray("identities")?.let { TransactionIdentities.decode(it.toString()) } ?: emptyList()).also { record ->
+                record.bill.receipt?.time?.let { require(it.accountingAt==record.bill.occurredAt) { "凭证记账时间不一致" } }
+            }
         }
         val settings = root.getJSONObject("channels")
         val channels = ChannelSettings.Channel.entries.associateWith { channel ->

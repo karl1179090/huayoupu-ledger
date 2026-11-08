@@ -38,7 +38,7 @@ sealed class IngestResult {
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 13) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 14) {
     private val backupContext=context.applicationContext
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
@@ -88,10 +88,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         WalletAccounting.create(db)
         CategoryDirectory.create(db)
         ClassificationStorage.create(db)
+        AccountingDates.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..12 && newVersion == 13) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..13 && newVersion == 14) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -126,7 +127,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         if (oldVersion < 9) migrateWallets(db) else if (oldVersion < 10) WalletAccounting.migrateV10(db)
         if (oldVersion < 11) CategoryDirectory.create(db)
         if(oldVersion < 12)db.execSQL("ALTER TABLE records ADD COLUMN receipt_evidence TEXT")
-        ClassificationStorage.create(db)
+        if(oldVersion<13)ClassificationStorage.create(db)
+        AccountingDates.migrate(db)
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -261,7 +263,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val incoming=bill.receipt ?: return result
         val previous=result.bill.receipt
         val receipt=when {
-            previous==null -> incoming
+            previous==null -> incoming.copy(time=incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
             previous.blockId!=incoming.blockId -> previous
             else -> previous.copy(merchant=previous.merchant ?: incoming.merchant,
                 productDescription=previous.productDescription ?: incoming.productDescription,
@@ -269,10 +271,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 orderRemark=previous.orderRemark ?: incoming.orderRemark,
                 serviceProvider=previous.serviceProvider ?: incoming.serviceProvider,
                 receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
-                sourceApp=previous.sourceApp ?: incoming.sourceApp)
+                sourceApp=previous.sourceApp ?: incoming.sourceApp,
+                time=previous.time?.takeIf { it.accountingAt==result.bill.occurredAt }
+                    ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
         }
         if(receipt==previous)return result
-        check(db.update("records",ContentValues().apply { put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt)) },
+        check(db.update("records",ContentValues().apply {
+            put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt))
+            put("accounting_date",AccountingDates.dateOnly(result.bill.copy(receipt=receipt)))
+        },
             "id=?",arrayOf(result.id.toString()))==1)
         return result.copy(bill=result.bill.copy(receipt=receipt))
     }
@@ -893,9 +900,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 toSelectionSource=if(toChanged)"MANUAL" else details.toSelectionSource,
                 feeManualLocked=details.feeManualLocked || old==null || details.feeCents!=old.feeCents || details.feeMode!=old.feeMode)
         }
+        val originalTime=previous?.bill?.receipt?.time
+        val timeChanged=previous!=null && previous.bill.occurredAt!=record.bill.occurredAt
+        val receipt=record.bill.receipt?.let { evidence ->
+            if(originalTime==null)evidence else evidence.copy(time=if(timeChanged)originalTime.edited(record.bill.occurredAt) else originalTime)
+        }
         val posted = record.copy(identities=previous?.identities ?: record.identities,
             transfer=if(record.bill.direction==Direction.TRANSFER)manualTransfer else null,
-            bill = record.bill.copy(reliable = true, reason = provenance, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
+            bill = record.bill.copy(reliable = true, reason = provenance, receipt=receipt,
+                timeExplicit=if(timeChanged)true else record.bill.timeExplicit, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
                 if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || manualCategorySelected)
                     CategoryDecision(CategoryDirectory.ensure(db,record.bill.direction,record.bill.category)?.id,CategorySource.MANUAL,true,explanation="人工选择分类")
                 else previous.bill.categoryDecision),
@@ -1070,9 +1083,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         // selectionArgs are strings; CASE has no column affinity, so compare an integer parameter.
         return query("state='POSTED' AND direction='EXPENSE' AND "+
             "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND "+
-            "(occurred_at BETWEEN ? AND ? OR transaction_id=? OR EXISTS(SELECT 1 FROM record_identities i "+
+            "(occurred_at BETWEEN ? AND ? OR (source='OCR' AND received_at BETWEEN ? AND ?) OR transaction_id=? OR EXISTS(SELECT 1 FROM record_identities i "+
             "WHERE i.record_id=records.id AND i.scope=? AND i.value=?))",
             arrayOf(refund.originalAmountCents.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
+                (bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
                 bill.transactionId ?: "",refund.provider,bill.transactionId ?: ""))
     }
 
@@ -1085,10 +1099,17 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             (original.bill.transactionId.isNullOrBlank() || incoming.transactionId.isNullOrBlank() || refundIdentityMatches(original,incoming))
     }
 
+    /** Recognition fallback is accounting time; the native acquisition instant still corroborates a live payment. */
+    private fun automaticPaymentMatchAt(record:LedgerRecord):Long {
+        val time=record.bill.receipt?.time
+        return if(record.capture.source==Source.OCR && !record.bill.timeExplicit &&
+            record.reason.startsWith("已识别即时支付成功页") && time?.source=="RECOGNITION_FALLBACK" &&
+            time.accountingAt==record.bill.occurredAt)record.capture.receivedAt else record.bill.occurredAt
+    }
     private fun isAutomaticPayment(record:LedgerRecord):Boolean = record.state==RecordState.POSTED &&
         record.capture.source==Source.OCR && !record.bill.timeExplicit && record.bill.transactionId.isNullOrBlank() &&
         record.reason.startsWith("已识别即时支付成功页") &&
-        kotlin.math.abs(record.capture.receivedAt-record.bill.occurredAt)<=15_000
+        kotlin.math.abs(record.capture.receivedAt-automaticPaymentMatchAt(record))<=15_000
 
     /** Only a unique native live capture can gain identity from an explicitly timed order detail. */
     private fun uniqueAutomaticPayment(capture:Capture,bill:ParsedBill):LedgerRecord? {
@@ -1097,7 +1118,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 it.bill.transactionId==bill.transactionId })return null
         // Count even candidates with conflicting IDs; ambiguity must never pick an arbitrary payment.
         return automaticPaymentCandidates(capture,bill).singleOrNull()?.takeIf {
-            isAutomaticPayment(it) && it.bill.refund==null && it.bill.occurredAt-bill.occurredAt in -5_000L..120_000L
+            isAutomaticPayment(it) && it.bill.refund==null && automaticPaymentMatchAt(it)-bill.occurredAt in -5_000L..120_000L
         }
     }
 
@@ -1109,15 +1130,20 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val merchant=MerchantNames.key(bill.merchant) ?: return emptyList()
         val gross=bill.refund?.originalAmountCents ?: bill.amountCents ?: return emptyList()
         return query("state='POSTED' AND direction='EXPENSE' AND "+
-            "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND occurred_at BETWEEN ? AND ?",
-            arrayOf(gross.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString())).filter { old -> old.state==RecordState.POSTED && old.bill.direction==Direction.EXPENSE &&
+            "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND "+
+            "(occurred_at BETWEEN ? AND ? OR (source='OCR' AND received_at BETWEEN ? AND ?))",
+            arrayOf(gross.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
+                (bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString())).filter { old -> old.state==RecordState.POSTED && old.bill.direction==Direction.EXPENSE &&
             paymentProvider(old.capture)==provider && !identitiesConflict(old,capture,bill) && (old.bill.refund?.originalAmountCents ?: old.bill.amountCents)==gross &&
-            MerchantNames.key(old.bill.merchant)==merchant && kotlin.math.abs(old.bill.occurredAt-bill.occurredAt)<=120_000 }
+            MerchantNames.key(old.bill.merchant)==merchant && kotlin.math.abs(automaticPaymentMatchAt(old)-bill.occurredAt)<=120_000 }
     }
 
     private fun completePaymentIdentity(db:SQLiteDatabase,original:LedgerRecord,bill:ParsedBill):LedgerRecord {
+        val time=bill.receipt?.time?.takeIf { it.accountingAt==bill.occurredAt }
+            ?: original.bill.receipt?.time?.takeIf { it.accountingAt==bill.occurredAt }
+        val receipt=(original.bill.receipt ?: bill.receipt)?.copy(time=time)
         val completed=original.copy(bill=original.bill.copy(transactionId=bill.transactionId,
-            occurredAt=bill.occurredAt,timeExplicit=true,reason=""),reason="")
+            occurredAt=bill.occurredAt,timeExplicit=true,reason="",receipt=receipt),reason="")
         check(db.update("records",values(completed),"id=?",arrayOf(original.id.toString()))==1)
         persistIdentities(db,original.id,(original.identities+TransactionIdentities.from(original.capture,bill)).distinct())
         return requireNotNull(get(completed.id))
@@ -1129,7 +1155,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         return refundAmountCandidates(bill).filter { candidate -> compatibleRefund(candidate,bill) &&
             (refundIdentityMatches(candidate,bill) ||
                 merchant!=null && merchant==MerchantNames.key(candidate.bill.merchant) &&
-                    kotlin.math.abs(candidate.bill.occurredAt-bill.occurredAt)<=120_000) }
+                    kotlin.math.abs(automaticPaymentMatchAt(candidate)-bill.occurredAt)<=120_000) }
     }
 
     private fun standaloneRefundCandidates(capture:Capture,evidence:StandaloneRefundEvidence,exactOnly:Boolean):List<LedgerRecord> {
@@ -1922,6 +1948,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)
         put("note", r.note);put("standalone_refund",encodeStandaloneRefund(r.bill.standaloneRefund))
         put("receipt_evidence",ReceiptEvidenceCodec.encode(r.bill.receipt))
+        put("accounting_date",AccountingDates.dateOnly(r.bill))
         put("category_decision",r.bill.categoryDecision?.let { ClassificationCodec.decision(it.copy(categoryId=category?.id)).toString() })
         put("transaction_identities",TransactionIdentities.encode(identities(r)))
         put("refund_provider", r.bill.refund?.provider);put("refund_original", r.bill.refund?.originalAmountCents)

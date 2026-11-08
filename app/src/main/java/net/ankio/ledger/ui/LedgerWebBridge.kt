@@ -13,6 +13,7 @@ import net.ankio.ledger.core.Money
 import net.ankio.ledger.core.AccountMoney
 import net.ankio.ledger.core.BankCodes
 import net.ankio.ledger.core.ParsedBill
+import net.ankio.ledger.core.ReceiptEvidence
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.core.Source
 import net.ankio.ledger.core.PaymentApps
@@ -29,6 +30,7 @@ import net.ankio.ledger.data.CategoryDirectory
 import net.ankio.ledger.data.CategoryException
 import net.ankio.ledger.data.LedgerCategory
 import net.ankio.ledger.data.LedgerReadView
+import net.ankio.ledger.data.CalendarRecordPages
 import net.ankio.ledger.data.WalletReadModel
 import net.ankio.ledger.data.ReceiptEvidenceCodec
 import net.ankio.ledger.data.WalletException
@@ -49,33 +51,39 @@ class LedgerWebBridge(private val activity: MainActivity) {
     /** Production list entry: exactly one bounded page, with a revision for continuation. */
     @JavascriptInterface
     fun snapshotFirst(month:String,search:String,direction:String,known:String):String = synchronized(app.store) {
-        val revision=app.revision.value.toString()
-        snapshotViewData(month,search,200,direction,known).put("dataRevision",revision).toString()
+        val zone=java.time.ZoneId.systemDefault()
+        val revision=readRevision(month,search,direction,zone)
+        snapshotViewData(month,search,200,direction,known,zone).put("dataRevision",revision).toString()
     }
 
     /** A mutation invalidates the cursor rather than mixing two different ledger views. */
     @JavascriptInterface
     fun recordPage(month:String,search:String,direction:String,beforeAt:Long,beforeId:Long,expectedRevision:String):String = try {
         synchronized(app.store) {
-            val revision=app.revision.value.toString()
+            val zone=java.time.ZoneId.systemDefault()
+            val revision=readRevision(month,search,direction,zone)
             if(expectedRevision!=revision)JSONObject().put("ok",true).put("reset",true).toString()
             else {
-                val view=LedgerReadView(app.store).records(month,search,direction=direction,beforeAt=beforeAt,beforeId=beforeId)
+                val view=LedgerReadView(app.store,zone).records(month,search,direction=direction,beforeAt=beforeAt,beforeId=beforeId)
                     .put("summary",JSONObject()).put("month",month)
                 val result=buildSnapshot(view).put("dataRevision",revision)
-                if(app.revision.value.toString()!=revision)JSONObject().put("ok",true).put("reset",true).toString()
+                if(readRevision(month,search,direction,java.time.ZoneId.systemDefault())!=revision)JSONObject().put("ok",true).put("reset",true).toString()
                 else result.toString()
             }
         }
-    } catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
+    } catch(_:CalendarRecordPages.StaleCursor) { JSONObject().put("ok",true).put("reset",true).toString() }
+      catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun snapshotView(month:String,search:String,limit:Int,direction:String,known:String):String =
         synchronized(app.store) { snapshotViewData(month,search,limit,direction,known).toString() }
 
-    private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String):JSONObject = try {
-        val read=LedgerReadView(app.store)
-        val key="${app.revision.value}|$month|$search|$limit|$direction|${System.currentTimeMillis()/30_000}|${app.channels.permitted(ChannelSettings.Channel.OCR)}|${net.ankio.ledger.capture.CaptureRuntime.running}|${net.ankio.ledger.capture.ScreenCaptureService.current!=null}"
+    private fun readRevision(month:String,search:String,direction:String,zone:java.time.ZoneId):String =
+        "calendar-v3|$READ_SESSION|${app.revision.value}|${zone.id}|${month.length}:$month|${search.length}:$search|${direction.length}:$direction"
+
+    private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String,zone:java.time.ZoneId=java.time.ZoneId.systemDefault()):JSONObject = try {
+        val read=LedgerReadView(app.store,zone)
+        val key="${readRevision(month,search,direction,zone)}|$limit|${System.currentTimeMillis()/30_000}|${app.channels.permitted(ChannelSettings.Channel.OCR)}|${net.ankio.ledger.capture.CaptureRuntime.running}|${net.ankio.ledger.capture.ScreenCaptureService.current!=null}"
         if(known==key)JSONObject().put("ok",true).put("unchanged",true)
         else {
             val view=read.records(month,search,limit=200,direction=direction)
@@ -83,9 +91,11 @@ class LedgerWebBridge(private val activity: MainActivity) {
             val pages=limit.coerceIn(200,1_000_000)/200
             for(page in 1 until pages) {
                 if(!view.getBoolean("hasMore"))break
-                val next=read.records(month,search,page*200,200,direction)
+                val cursor=view.getJSONObject("nextCursor")
+                val next=read.records(month,search,limit=200,direction=direction,beforeAt=cursor.getLong("occurredAt"),beforeId=cursor.getLong("id"))
                 val rows=next.getJSONArray("records");repeat(rows.length()){view.getJSONArray("records").put(rows.getJSONObject(it))}
                 view.put("hasMore",next.getBoolean("hasMore"))
+                view.put("nextCursor",next.opt("nextCursor") ?: JSONObject.NULL)
             }
             view.put("summary",read.summary(month)).put("month",month)
             buildSnapshot(view).put("viewKey",key)
@@ -275,7 +285,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     @JavascriptInterface fun contributionRecords(period:String,category:String,direction:String,offset:Int):String=try {
         val range=net.ankio.ledger.core.ExpensePeriodBuckets.create(ExpensePeriod.valueOf(period),java.time.Instant.now(),java.time.ZoneId.systemDefault())
         LedgerReadView(app.store).records(java.time.YearMonth.now().toString(),offset=offset,direction=direction.also { checkInput(it in setOf("EXPENSE","INCOME"),"统计类型无效") },category=category,
-            contribution=true,rangeStart=range.startMillis,rangeEnd=range.endMillis).put("ok",true).toString()
+            contribution=true,calendarStart=range.startDate,calendarEnd=range.endDate).put("ok",true).toString()
     } catch(error:Exception) { structuredFailure(error,"开销明细读取失败").toString() }
 
     @JavascriptInterface
@@ -307,7 +317,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
         }
         val enteredMerchant = string(input, "merchant", 1024).trim()
         val categoryName = string(input, "category", 1024).trim().ifBlank { "其他" }
-        val occurredAt = integer(input, "occurredAt", 1, MAX_TIME)
+        val requestedOccurredAt = integer(input, "occurredAt", 1, MAX_TIME)
+        val timeEdited=if(input.has("timeEdited"))input.get("timeEdited") as? Boolean
+            ?: throw InvalidInput("时间修改参数无效") else null
         val note = string(input, "note", 500).trim()
         val confirmed = if (input.has("confirmDuplicate")) {
             input.get("confirmDuplicate") as? Boolean ?: throw InvalidInput("重复确认参数无效")
@@ -321,6 +333,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
             }
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
+            // A minute-only editor must not truncate the saved seconds/millis when the user did not edit time.
+            val occurredAt=if(original!=null && timeEdited==false)original.bill.occurredAt else requestedOccurredAt
             val merchant = enteredMerchant.ifBlank { if(original?.bill?.receipt!=null) "" else "未填写商户" }
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")
@@ -395,9 +409,14 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(id in 1..MAX_SAFE_INTEGER, "账单编号无效")
         val candidates = JSONArray()
         app.store.refundCandidates(id).forEach { record ->
-            candidates.put(JSONObject().put("id", record.id).put("merchant", record.bill.merchant)
+            val candidate=JSONObject().put("id", record.id).put("merchant", record.bill.merchant)
                 .put("occurredAt", record.bill.occurredAt).put("amountCents", record.bill.amountCents ?: JSONObject.NULL)
-                .put("originalAmountCents", record.bill.refund?.originalAmountCents ?: record.bill.amountCents ?: JSONObject.NULL))
+                .put("originalAmountCents", record.bill.refund?.originalAmountCents ?: record.bill.amountCents ?: JSONObject.NULL)
+            record.bill.receipt?.time?.let { time ->
+                val evidence=ReceiptEvidenceCodec.json(ReceiptEvidence(time=time)) as JSONObject
+                candidate.put("receipt",JSONObject().put("time",evidence.getJSONObject("time")))
+            }
+            candidates.put(candidate)
         }
         JSONObject().put("ok", true).put("candidates", candidates).toString()
     } catch (error: Exception) {
@@ -905,6 +924,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     private class InvalidInput(message: String) : IllegalArgumentException(message)
 
     private companion object {
+        val READ_SESSION=java.util.UUID.randomUUID().toString()
         const val MAX_INPUT_LENGTH = 16_384
         const val MAX_TIME = 4_102_444_800_000L
         // WebView's JavaScript numbers must represent record IDs without rounding.

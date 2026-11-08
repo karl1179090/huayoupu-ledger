@@ -229,7 +229,7 @@ class MerchantClassificationTest {
                 db.version=12
             }
             repeat(2) { LedgerStore(app,name).use { store ->
-                assertEquals(13,store.readableDatabase.version)
+                assertEquals(14,store.readableDatabase.version)
                 val original=store.get(1)!!
                 assertEquals("合成旧分类",original.bill.category);assertNull(original.bill.categoryDecision)
                 assertEquals("合成原商家",original.bill.receipt!!.merchant!!.value)

@@ -16,8 +16,13 @@ data class ExpenseBucket(
     val label: String,
     val current: Boolean,
     val future: Boolean,
+    val zoneId: String? = null,
 ) {
-    fun contains(occurredAt: Long): Boolean = occurredAt >= startMillis && occurredAt < endMillis
+    fun contains(occurredAt: Long): Boolean {
+        val zone=zoneId ?: return occurredAt>=startMillis && occurredAt<endMillis
+        val day=Instant.ofEpochMilli(occurredAt).atZone(ZoneId.of(zone)).toLocalDate()
+        return day>=startDate && day<endDate
+    }
 }
 
 data class ExpensePeriodRange(
@@ -29,7 +34,10 @@ data class ExpensePeriodRange(
     val endMillis: Long,
     val buckets: List<ExpenseBucket>,
 ) {
-    fun bucketIndex(occurredAt: Long): Int = buckets.indexOfFirst { it.contains(occurredAt) }
+    fun bucketIndex(occurredAt: Long): Int {
+        val date=Instant.ofEpochMilli(occurredAt).atZone(ZoneId.of(zoneId)).toLocalDate()
+        return buckets.indexOfFirst { date>=it.startDate && date<it.endDate }
+    }
 }
 
 data class ExpenseContribution(val occurredAt: Long, val expenseCents: Long)
@@ -74,7 +82,7 @@ object ExpensePeriodBuckets {
                     ExpensePeriod.YEAR -> "${cursor.monthValue}月"
                 }
                 add(ExpenseBucket(cursor, next, midnight(cursor, zone), midnight(next, zone), label,
-                    current = today >= cursor && today < next, future = today < cursor))
+                    current = today >= cursor && today < next, future = today < cursor,zoneId=zone.id))
                 cursor = next
             }
         }

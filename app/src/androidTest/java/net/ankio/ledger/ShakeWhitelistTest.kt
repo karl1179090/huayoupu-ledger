@@ -128,7 +128,7 @@ class ShakeWhitelistTest {
         try {
             RecognitionTasks(app,name).use { tasks ->
                 tasks.recoverInterrupted()
-                assertEquals(5,tasks.readableDatabase.version)
+                assertEquals(7,tasks.readableDatabase.version)
                 assertEquals("CANCELLED",tasks.status(1));assertEquals("QUEUED",tasks.status(2))
                 assertNull(tasks.shakeAuthorization(1))
                 assertEquals(listOf(2L to "payment_auto:com.tencent.mm"),tasks.pendingQueued())
