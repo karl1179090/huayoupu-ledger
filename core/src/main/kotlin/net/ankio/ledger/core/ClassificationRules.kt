@@ -20,6 +20,16 @@ data class ClassificationSnapshot(val version: String, val customRules: List<Cla
 data class ClassificationInput(val direction: Direction, val merchant: String?, val orderContent: List<String> = emptyList(),
     val captureSource: Source? = null, val sourcePackage: String? = null, val platform: String? = null) {
     companion object {
+        /** Source choices are explicit hypothetical evidence, never inferred from entered text. */
+        fun hypothetical(direction:Direction,merchant:String?,orderContent:List<String>,source:String?):ClassificationInput {
+            require(direction in listOf(Direction.EXPENSE,Direction.INCOME) && (merchant?.length ?: 0)<=2000 &&
+                orderContent.size<=3 && orderContent.all { it.length<=2000 } && ClassificationSources.valid(source)) { "测试输入无效或过长" }
+            return ClassificationInput(direction,merchant,orderContent,
+                when { source==null -> null;source.startsWith("LIVE") -> Source.OCR;else -> Source.IMAGE },
+                source?.takeIf { it.startsWith("LIVE:") }?.removePrefix("LIVE:"),
+                source?.takeIf { it.startsWith("IMAGE:") }?.removePrefix("IMAGE:"))
+        }
+
         fun from(bill: ParsedBill, capture: Capture? = null): ClassificationInput = ClassificationInput(
             requireNotNull(bill.direction), bill.merchant,
             listOfNotNull(bill.receipt?.productDescription?.value, bill.receipt?.transactionDescription?.value,
@@ -64,6 +74,12 @@ object ClassificationSources {
 data class CategoryDecision(val categoryId: String?, val source: CategorySource, val manual: Boolean = false,
     val ruleId: String? = null, val ruleVersion: String? = null, val explanation: String, val rule: ClassificationRule? = null)
 
+data class ClassificationConditionResult(val condition: ClassificationCondition, val matched: Boolean)
+data class ClassificationRuleResult(val rule: ClassificationRule, val source: CategorySource,
+    val directionMatches: Boolean, val sourceMatches: Boolean, val conditions: List<ClassificationConditionResult>,
+    val conditionsMatch: Boolean, val matched: Boolean, val selected: Boolean = false, val interceptedByRuleId: String? = null)
+data class ClassificationPreview(val input: ClassificationInput, val decision: CategoryDecision, val rules: List<ClassificationRuleResult>)
+
 /** Pure local matching. The original merchant and all financial fields remain caller owned. */
 object ClassificationEngine {
     fun normalized(value: String): String = Normalizer.normalize(value, Normalizer.Form.NFKC)
@@ -71,29 +87,54 @@ object ClassificationEngine {
 
     fun classify(snapshot: ClassificationSnapshot, input: ClassificationInput, manual: CategoryDecision? = null): CategoryDecision {
         manual?.takeIf { it.manual }?.let { return it }
-        fun matching(rules: List<ClassificationRule>) = rules.sortedWith(compareBy<ClassificationRule> { it.order }.thenBy { it.id })
-            .firstOrNull { rule -> rule.enabled && rule.direction == input.direction && ClassificationSources.matches(rule.source,input) && rule.conditions.isNotEmpty() && rule.conditions.map { condition ->
-                val actual = when(condition.field) {
-                    ClassificationField.MERCHANT -> listOfNotNull(input.merchant)
-                    ClassificationField.ORDER_CONTENT -> input.orderContent
-                }.map(::normalized).filter(String::isNotEmpty)
-                val expected = normalized(condition.value)
-                actual.isNotEmpty() && expected.isNotEmpty() && when(condition.operator) {
-                    ClassificationOperator.CONTAINS -> actual.any { it.contains(expected) }
-                    ClassificationOperator.EQUALS -> expected in actual
-                    ClassificationOperator.NOT_CONTAINS -> actual.none { it.contains(expected) }
-                }
-            }.let { results -> when(rule.matchMode) {
-                ClassificationMatchMode.ALL -> results.all { it }
-                ClassificationMatchMode.ANY -> results.any { it }
-            } } }
-        matching(snapshot.customRules)?.let { return CategoryDecision(it.categoryId, CategorySource.CUSTOM_RULE,
-            ruleId=it.id, ruleVersion=snapshot.version, explanation="命中规则：${it.name}",rule=it) }
-        matching(snapshot.builtinRules)?.let { return CategoryDecision(it.categoryId, CategorySource.BUILTIN_RULE,
-            ruleId=it.id, ruleVersion=snapshot.version, explanation="内置规则：${it.name}",rule=it) }
-        return CategoryDecision("cat:${input.direction.name.lowercase(Locale.ROOT)}:other", CategorySource.FALLBACK,
-            ruleVersion=snapshot.version, explanation="未命中规则，归入其他")
+        return decision(snapshot,input,ordered(snapshot).map { (rule,source) -> evaluate(rule,source,input) }.firstOrNull { it.matched })
     }
+
+    /** Hypothetical new recognition: existing manual decisions are intentionally not inputs. */
+    fun preview(snapshot: ClassificationSnapshot, input: ClassificationInput): ClassificationPreview {
+        val results=ordered(snapshot).map { (rule,source) -> evaluate(rule,source,input) }.toList()
+        val selected=results.indexOfFirst { it.matched }
+        val winner=results.getOrNull(selected)
+        return ClassificationPreview(input,decision(snapshot,input,winner),results.mapIndexed { index,result ->
+            result.copy(selected=index==selected,interceptedByRuleId=winner?.rule?.id?.takeIf { result.matched && index>selected })
+        })
+    }
+
+    private fun ordered(snapshot:ClassificationSnapshot):Sequence<Pair<ClassificationRule,CategorySource>> {
+        fun rules(values:List<ClassificationRule>,source:CategorySource)=values
+            .sortedWith(compareBy<ClassificationRule> { it.order }.thenBy { it.id }).asSequence().map { it to source }
+        return rules(snapshot.customRules,CategorySource.CUSTOM_RULE)+rules(snapshot.builtinRules,CategorySource.BUILTIN_RULE)
+    }
+
+    private fun evaluate(rule:ClassificationRule,source:CategorySource,input:ClassificationInput):ClassificationRuleResult {
+        val conditions=rule.conditions.map { condition ->
+            val raw=when(condition.field) {
+                ClassificationField.MERCHANT -> listOfNotNull(input.merchant)
+                ClassificationField.ORDER_CONTENT -> input.orderContent
+            }
+            val actual=raw.map(::normalized).filter(String::isNotEmpty)
+            val expected=normalized(condition.value)
+            ClassificationConditionResult(condition,actual.isNotEmpty() && expected.isNotEmpty() && when(condition.operator) {
+                ClassificationOperator.CONTAINS -> actual.any { it.contains(expected) }
+                ClassificationOperator.EQUALS -> expected in actual
+                ClassificationOperator.NOT_CONTAINS -> actual.none { it.contains(expected) }
+            })
+        }
+        val conditionsMatch=conditions.isNotEmpty() && when(rule.matchMode) {
+            ClassificationMatchMode.ALL -> conditions.all { it.matched }
+            ClassificationMatchMode.ANY -> conditions.any { it.matched }
+        }
+        val directionMatches=rule.direction==input.direction
+        val sourceMatches=ClassificationSources.matches(rule.source,input)
+        return ClassificationRuleResult(rule,source,directionMatches,sourceMatches,conditions,conditionsMatch,
+            rule.enabled && directionMatches && sourceMatches && conditionsMatch)
+    }
+
+    private fun decision(snapshot:ClassificationSnapshot,input:ClassificationInput,winner:ClassificationRuleResult?):CategoryDecision =
+        if(winner!=null)CategoryDecision(winner.rule.categoryId,winner.source,ruleId=winner.rule.id,ruleVersion=snapshot.version,
+            explanation=if(winner.source==CategorySource.CUSTOM_RULE)"命中规则：${winner.rule.name}" else "内置规则：${winner.rule.name}",rule=winner.rule)
+        else CategoryDecision("cat:${input.direction.name.lowercase(Locale.ROOT)}:other",CategorySource.FALLBACK,
+            ruleVersion=snapshot.version,explanation="未命中规则，归入其他")
 }
 
 /** Frozen upgrade baseline. Changing live config must never change this historical value. */

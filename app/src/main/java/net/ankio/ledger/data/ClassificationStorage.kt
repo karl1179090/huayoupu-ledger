@@ -36,7 +36,8 @@ internal object ClassificationStorage {
         try { CategoryDirectory.requireCategory(db,rule.categoryId,rule.direction) }
         catch(_:CategoryException) { throw ClassificationException("RULE_TARGET","请选择存在且收支方向一致的目标分类") }
     }
-    fun save(db:SQLiteDatabase,input:ClassificationRule):ClassificationRule {
+    /** Save and hypothetical drafts share identity, target, ordering and complete wire validation. */
+    fun prepared(db:SQLiteDatabase,input:ClassificationRule):Pair<ClassificationSnapshot,ClassificationRule> {
         ClassificationCodec.validateRule(input);target(db,input)
         val current=configuration(db)
         val old=input.id.takeIf(String::isNotBlank)?.let { id -> current.customRules.firstOrNull { it.id==id }
@@ -45,7 +46,14 @@ internal object ClassificationStorage {
             else (current.customRules.filter { it.direction==input.direction }.maxOfOrNull { it.order } ?: -1)+1,conflictReason=null)
         val rules=current.customRules.filterNot { it.id==rule.id }+rule
         if(rules.size>2_000)throw ClassificationException("RULE_INVALID","分类规则数量过多")
-        changed(db,current.copy(customRules=rules));return rule
+        // Validate the final UUID version too: a restored version can have a different byte length.
+        val snapshot=current.copy(version=UUID.randomUUID().toString(),customRules=rules)
+        ClassificationCodec.configuration(snapshot,CategoryReplacementStorage.entries(db))
+        return snapshot to rule
+    }
+    fun save(db:SQLiteDatabase,input:ClassificationRule):ClassificationRule {
+        val (snapshot,rule)=prepared(db,input)
+        write(db,snapshot);return rule
     }
     fun replaceTarget(db:SQLiteDatabase,id:String,replacementId:String) {
         val current=configuration(db)
