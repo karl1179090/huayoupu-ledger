@@ -381,3 +381,19 @@ dialog input,dialog select,.month-input{border-color:#E3DFF0;background:#FAF9FD}
 .receipt-evidence-meta b{color:#453F5E}
 .receipt-source-tag{background:var(--tint);color:var(--grape-deep)}
 .receipt-evidence-raw{color:#5C5575}
+.receipt-provenance-card{background:#FAF9FD;border-color:#ECE8F6}
+.receipt-route-badge.route-node{background:var(--tint);color:var(--grape-deep)}
+.receipt-route-badge.route-ocr{background:#E9F3FE;color:var(--blue-deep)}
+.receipt-provenance-badge{background:#fff;border-color:#DCD4F0;color:var(--ink)}
+.receipt-provenance-note{color:var(--muted)}
+.receipt-evidence-diagnostics{background:#FAF9FD;border-color:#ECE8F6}
+.receipt-diag-header{color:#453F5E}
+.receipt-diag-header small{color:var(--muted)}
+.receipt-diag-row dt{color:var(--muted)}
+.receipt-diag-row dd{color:var(--ink-strong)}
+.receipt-timings-section{border-top-color:#E9E5F2}
+.receipt-timings-title{color:#453F5E}
+.receipt-timing-pill{background:#fff;border-color:#E9E5F2}
+.receipt-timing-name{color:var(--muted)}
+.receipt-timing-ms{color:var(--grape-deep)}
+.receipt-timings-disclaimer{color:var(--muted-soft)}

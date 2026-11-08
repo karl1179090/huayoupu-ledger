@@ -129,4 +129,23 @@ class MixedReceiptPartitionerTest {
             assertEquals("wechat",resolved.accountUid)
         }
     }
+
+    @Test fun paymentScreenshotSheetWithMicroBankNotificationExcludesOuterDateAndTheUnlabelledFeed() {
+        val page=listOf(LocalOcrLine("付款截图 · 1 / 1",100,40,900,80),LocalOcrLine("服务号",400,200,680,240),
+            LocalOcrLine("1条通知",100,270,400,305),LocalOcrLine("招商银行微银行: 交易成功提醒",100,360,780,400),
+            LocalOcrLine("4分钟前",820,360,1000,400),LocalOcrLine("交易金额:",100,460,320,500),
+            LocalOcrLine("人民币23.45",500,460,900,500),LocalOcrLine("全部通知 >",100,580,600,620),
+            LocalOcrLine("2021/03/07 09:20",350,800,850,840),LocalOcrLine("贴图",100,1000,300,1040),
+            LocalOcrLine("推荐",700,1000,820,1040),LocalOcrLine("关注",850,1000,1000,1040),
+            LocalOcrLine("商户名称：合成推荐餐厅",100,1100,900,1140),LocalOcrLine("交易金额：777.00元",100,1160,900,1200),
+            LocalOcrLine("交易说明：地铁广告",100,1220,900,1260))
+        val candidate=TransactionPageParser.parse(page.reversed(),1080,1800,time,origin="image").single()
+        val bill=candidate.bill;val receipt=bill.receipt!!
+        assertEquals(2345L,bill.amountCents);assertNull(bill.direction);assertEquals("",bill.merchant)
+        assertEquals("招商银行",receipt.receiptIssuer!!.value);assertEquals("cmb",receipt.bank!!.bankCode)
+        assertNull(receipt.merchant);assertNull(receipt.transactionDescription)
+        assertEquals(time.recognitionAt,bill.occurredAt);assertEquals("RECOGNITION_FALLBACK",receipt.time!!.source)
+        assertFalse(bill.reliable);assertEquals("NESTED_BANK",receipt.blockOrigin!!.kind)
+        for(unrelated in listOf("2021","777","地铁","推荐","4分钟前","全部通知"))assertFalse(unrelated,candidate.rawText!!.contains(unrelated))
+    }
 }

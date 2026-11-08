@@ -188,7 +188,7 @@ class RecognitionTimeAcceptanceTest {
             }
             val expected=RecognitionTimeContext(Instant.parse("2027-01-01T04:00:00Z").toEpochMilli(),"America/New_York","2024-06-01")
             RecognitionTasks(app,taskName,classificationStore=ledger).use { migrated ->
-                assertEquals(7,migrated.readableDatabase.version)
+                assertEquals(8,migrated.readableDatabase.version)
                 assertNull(migrated.recognitionTime(1))
                 assertEquals(snapshot,migrated.classificationSnapshot(1))
                 assertEquals(expected,migrated.beginRecognition(1) { expected })

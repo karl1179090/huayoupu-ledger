@@ -45,9 +45,9 @@ object PaymentMethodParser {
         val platform = sourcePlatform ?: brands.singleOrNull()
         val statedDebits = if (role == "DEBIT") clean.mapNotNull { line ->
             val compact = line.text.filterNot(Char::isWhitespace)
-            actualDebit.matchEntire(compact)?.groupValues?.get(1)?.let { value ->
+            actualDebit.matchEntire(compact)?.groupValues?.get(1)?.takeUnless { preference.containsMatchIn(it) }?.let { value ->
                 // Executed “零钱” is explicit WeChat balance evidence even in an imported image.
-                decode("实际扣款",value,if(value=="零钱")"wechat" else platform,role)
+                decode("实际扣款",value,if(value=="零钱")"wechat" else platform,role).copy(executed=true)
             }
         } else emptyList()
         val fields = statedDebits + clean.mapIndexedNotNull { index, line ->
@@ -66,7 +66,7 @@ object PaymentMethodParser {
             if(fields.any { it.medium=="BANK_CARD" || it.bankCode!=null || it.cardLast4!=null })"BANK_CARD" else "UNKNOWN", role, platform = platform,
             rawLabel = fields.joinToString(" / ") { it.rawLabel }.take(80),
             rawValue = fields.joinToString(" / ") { it.rawValue }.take(160),
-            ambiguous = true, reason = "MULTIPLE_PAYMENT_METHODS",
+            ambiguous = true, reason = "MULTIPLE_PAYMENT_METHODS",executed=fields.any { it.executed },
         )
         return distinct.single()
     }

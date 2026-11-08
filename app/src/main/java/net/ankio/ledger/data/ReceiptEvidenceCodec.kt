@@ -29,6 +29,7 @@ object ReceiptEvidenceCodec {
             .also { json -> evidence.blockOrigin?.let { block -> json.put("blockOrigin",JSONObject().put("kind",block.kind)
                 .put("pageWidth",block.pageWidth).put("pageHeight",block.pageHeight).put("left",block.left)
                 .put("top",block.top).put("right",block.right).put("bottom",block.bottom)) } }
+            .also { json -> evidence.recognition?.let { json.put("recognition",RecognitionEvidenceCodec.json(it)) } }
             .put("time", evidence.time?.let { time -> JSONObject()
                 .put("rawText",time.rawText).put("accountingAt",time.accountingAt).put("localDate",time.localDate)
                 .put("zoneId",time.zoneId).put("precision",time.precision).put("source",time.source)
@@ -43,7 +44,7 @@ object ReceiptEvidenceCodec {
 
     fun decode(obj: JSONObject): ReceiptEvidence {
         require(obj.toString().toByteArray(Charsets.UTF_8).size <= MAX_BYTES)
-        require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId", "time") }) { "凭证字段不支持" }
+        require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId", "time", "recognition") }) { "凭证字段不支持" }
         require(obj.get("version") is Int && obj.getInt("version") == 1) { "凭证版本不支持" }
         fun text(value: JSONObject, key: String) = value.get(key) as? String ?: error("凭证字段类型错误：$key")
         fun field(key: String, parent: JSONObject = obj): ReceiptField? {
@@ -80,6 +81,7 @@ object ReceiptEvidenceCodec {
         return ReceiptEvidence(version=obj.getInt("version"), blockId=text(obj, "blockId"),
             merchant=field("merchant"), productDescription=field("productDescription"),
             transactionDescription=field("transactionDescription"), orderRemark=field("orderRemark"),
-            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time,blockOrigin=blockOrigin)
+            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time,blockOrigin=blockOrigin,
+            recognition=if(obj.isNull("recognition"))null else RecognitionEvidenceCodec.decode(obj.getJSONObject("recognition")))
     }
 }

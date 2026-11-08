@@ -370,4 +370,115 @@ class MixedReceiptAcceptanceTest {
         assertArrayEquals(bytes,app.store.screenshot(saved.id))
         pixelEvidence("nested",task,saved,bytes)
     }
+
+    private fun userLayoutImage(nested:Boolean):ByteArray {
+        val bitmap=android.graphics.Bitmap.createBitmap(1080,1800,android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas=android.graphics.Canvas(bitmap);canvas.drawColor(android.graphics.Color.WHITE)
+        val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        fun text(value:String,x:Float,y:Float,size:Float,color:Int=android.graphics.Color.BLACK,center:Boolean=false) {
+            paint.color=color;paint.textSize=size;paint.textAlign=if(center)android.graphics.Paint.Align.CENTER else android.graphics.Paint.Align.LEFT
+            canvas.drawText(value,x,y,paint)
+        }
+        if(nested) {
+            text("付款截图 · 1 / 1",540f,90f,40f,center=true)
+            paint.color=android.graphics.Color.rgb(35,38,43);canvas.drawRect(50f,260f,1030f,820f,paint)
+            val white=android.graphics.Color.WHITE
+            text("服务号",540f,320f,36f,white,true);text("1条通知",90f,375f,30f,white)
+            text("招商银行微银行: 交易成功提醒",90f,455f,36f,white)
+            text("4分钟前",850f,455f,28f,android.graphics.Color.LTGRAY)
+            text("交易金额:",90f,545f,36f,white);text("人民币23.45",500f,545f,42f,white)
+            text("全部通知 >",540f,705f,32f,white,true)
+            text("2021/03/07 09:20",540f,940f,30f,center=true)
+            text("贴图",90f,1120f,38f);text("推荐",740f,1120f,32f);text("关注",900f,1120f,32f)
+            text("商户名称：合成推荐餐厅",90f,1220f,36f);text("交易说明：地铁广告",90f,1290f,36f)
+            text("交易金额：777.00元",90f,1360f,36f)
+        } else {
+            text("「先享后付」服务使用通知",80f,110f,38f)
+            text("商户名称：合成上卡商家",90f,180f,32f);text("服务商：合成上卡服务",90f,240f,32f)
+            text("优先从零钱支付",90f,300f,32f);text("交易金额：888.00元",90f,360f,32f)
+            text("交易时间：2020-01-01 08:00",90f,420f,32f);text("交易已关闭",90f,480f,32f)
+            text("合成下卡咖啡",540f,690f,42f,center=true);text("通过零钱扣款",540f,780f,42f,center=true)
+            text("￥",355f,930f,48f);text("12.34",430f,930f,84f)
+            text("扣费服务",90f,1100f,36f);text("合成地铁服务方",490f,1100f,36f)
+            text("扣费内容",90f,1180f,36f);text("午餐套餐",490f,1180f,36f)
+            text("查看订单详情 >",540f,1300f,32f,center=true)
+        }
+        return java.io.ByteArrayOutputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it);bitmap.recycle();it.toByteArray() }
+    }
+
+    /** Intercepts only observability; the production LocalRecognitionClient still performs OCR and parsing. */
+    private suspend fun realUserLayout(name:String,bytes:ByteArray):Pair<Long,IngestResult> {
+        val directory=java.io.File(app.cacheDir,"synthetic-t11-evidence").apply { mkdirs() }
+        java.io.File(directory,"$name.png").writeBytes(bytes)
+        val task=app.tasks.create(Source.IMAGE,"image");tasks+=task
+        val local=LocalRecognitionClient(app)
+        var actual:RecognitionResult?=null
+        val backend=object:RecognitionBackend {
+            override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                livePaymentAt:Long?,policy:RecognitionPolicy,origin:String):RecognitionResult=error("frozen context required")
+            override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                livePaymentAt:Long?,policy:RecognitionPolicy,origin:String,recognitionTime:()->RecognitionTimeContext):RecognitionResult =
+                local.recognizePrepared(image,onPrepared=onPrepared,stillAllowed=stillAllowed,livePaymentAt=livePaymentAt,
+                    policy=policy,origin=origin,recognitionTime=recognitionTime).also { actual=it }
+        }
+        val result=CaptureProcessor(app,OcrClient(app,backend),recognitionClock={time}).processPrepared(bytes,Source.IMAGE,"image",task) { true }
+        java.io.File(directory,"$name-ocr.json").writeText(JSONObject().put("rawText",actual!!.rawText)
+            .put("candidateCount",actual!!.candidates.size).put("phaseTimingsMs",JSONObject(actual!!.phaseTimingsMs))
+            .put("taskEvidence",app.tasks.recognitionEvidence(task)).toString(2))
+        return task to result
+    }
+
+    @Test fun actualServiceUseNoticeAndTitlelessBalanceCardPixelKeepLowerMerchantProviderContentAndMoney()=runBlocking {
+        val rule=app.store.saveClassificationRule(ClassificationRule("","合成图三服务方隔离",true,Direction.EXPENSE,"cat:expense:transport",0,
+            listOf(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.CONTAINS,"地铁"))))
+        val bytes=userLayoutImage(false)
+        try {
+            val (task,result)=realUserLayout("user-image3",bytes)
+            val saved=record(result)
+            assertEquals(BatchCounts(1,0,0,0),(result as IngestResult.Batch).result.counts)
+            assertEquals(1,app.store.all().count { it.id !in baseline })
+            assertEquals(1234L,saved.bill.amountCents);assertEquals("合成下卡咖啡",saved.bill.merchant)
+            assertEquals("合成地铁服务方",saved.bill.receipt!!.serviceProvider!!.value)
+            assertEquals("午餐套餐",saved.bill.receipt!!.transactionDescription!!.value)
+            assertNull(saved.bill.receipt!!.receiptIssuer);assertNull(saved.bill.receipt!!.sourceApp)
+            assertEquals("MIXED_DEBIT",saved.bill.receipt!!.blockOrigin!!.kind)
+            assertTrue(saved.bill.paymentMethod!!.executed);assertEquals("WECHAT_BALANCE",saved.bill.paymentMethod!!.medium)
+            assertEquals("cat:expense:dining",saved.bill.categoryDecision!!.categoryId)
+            assertNotEquals(rule.id,saved.bill.categoryDecision!!.ruleId)
+            assertEquals(time.recognitionAt,saved.bill.occurredAt)
+            assertEquals(mapOf(wechat.uid to -1234L),saved.walletEffects)
+            assertEquals(48766L,app.store.getAccount(wechat.id)!!.amountCents);assertEquals(50000L,app.store.getAccount(cash.id)!!.amountCents)
+            for(unrelated in listOf("上卡","888","2020","查看订单详情"))assertFalse(unrelated,saved.capture.text.contains(unrelated))
+            assertTrue(app.tasks.recognitionEvidence(task)!!.getJSONObject("phaseTimingsMs").has("save"))
+            LedgerStore(app).use { assertEquals(saved,it.get(saved.id)) }
+            val name="synthetic-image3-roundtrip-${UUID.randomUUID()}.db"
+            try { LedgerStore(app,name).use { target ->
+                LedgerBackup.restore(target,LedgerBackup.decode(LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).byteInputStream()))
+                val restored=target.all().single { it.uid==saved.uid }
+                assertEquals(saved.bill.receipt,restored.bill.receipt);assertTrue(restored.bill.paymentMethod!!.executed)
+                assertEquals(saved.walletEffects,restored.walletEffects);assertEquals(48766L,target.getAccountByUid(wechat.uid)!!.amountCents)
+            } } finally { app.deleteDatabase(name) }
+            pixelEvidence("user-image3",task,saved,bytes)
+        } finally { app.store.deleteClassificationRule(rule.id) }
+    }
+
+    @Test fun paymentScreenshotSheetMicroBankPixelIgnoresOuterUnlabelledDateAndRecommendationFeed()=runBlocking {
+        val before=app.store.accounts().associate { it.uid to it.amountCents }
+        val bytes=userLayoutImage(true)
+        val (task,result)=realUserLayout("user-image1",bytes)
+        val saved=record(result)
+        assertEquals(BatchCounts(0,0,1,0),(result as IngestResult.Batch).result.counts)
+        assertEquals(1,app.store.all().count { it.id !in baseline })
+        assertEquals(2345L,saved.bill.amountCents);assertNull(saved.bill.direction);assertEquals("",saved.bill.merchant)
+        assertEquals("招商银行",saved.bill.receipt!!.receiptIssuer!!.value)
+        assertEquals("cmb",saved.bill.receipt!!.bank!!.bankCode);assertNull(saved.bill.receipt!!.bank!!.cardLast4)
+        assertNull(saved.bill.receipt!!.merchant);assertNull(saved.bill.receipt!!.transactionDescription)
+        assertEquals(time.recognitionAt,saved.bill.occurredAt);assertEquals("RECOGNITION_FALLBACK",saved.bill.receipt!!.time!!.source)
+        assertEquals("NESTED_BANK",saved.bill.receipt!!.blockOrigin!!.kind)
+        assertNull(saved.wallet!!.accountUid);assertTrue(saved.walletEffects.isEmpty())
+        assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
+        for(unrelated in listOf("2021","777","地铁","推荐","关注"))assertFalse(unrelated,saved.capture.text.contains(unrelated))
+        assertArrayEquals(bytes,app.store.screenshot(saved.id))
+        pixelEvidence("user-image1",task,saved,bytes)
+    }
 }

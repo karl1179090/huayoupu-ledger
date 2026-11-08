@@ -20,9 +20,9 @@ internal object WalletBackupCodec {
     fun evidenceJson(e:PaymentMethodEvidence):JSONObject=JSONObject().put("version",1).put("medium",e.medium).put("role",e.role)
         .put("bankCode",e.bankCode?:JSONObject.NULL).put("cardLast4",e.cardLast4?:JSONObject.NULL)
         .put("platform",e.platform?:JSONObject.NULL).put("rawLabel",e.rawLabel).put("rawValue",e.rawValue)
-        .put("ambiguous",e.ambiguous).put("reason",e.reason?:JSONObject.NULL)
+        .put("ambiguous",e.ambiguous).put("reason",e.reason?:JSONObject.NULL).also { if(e.executed)it.put("executed",true) }
     fun evidence(json:JSONObject):PaymentMethodEvidence {
-        BackupValues.keys(json,setOf("version","medium","role","bankCode","cardLast4","platform","rawLabel","rawValue","ambiguous","reason"))
+        BackupValues.keys(json,setOf("version","medium","role","bankCode","cardLast4","platform","rawLabel","rawValue","ambiguous","reason","executed"))
         require(number(json,"version")==1L)
         val medium=optional(json,"medium",32)!!;require(medium in setOf("BANK_CARD","WECHAT_BALANCE","ALIPAY_BALANCE","UNKNOWN","UNSUPPORTED","LIABILITY"))
         val role=optional(json,"role",16)!!;require(role in setOf("DEBIT","CREDIT","UNKNOWN"))
@@ -30,7 +30,7 @@ internal object WalletBackupCodec {
         val last=optional(json,"cardLast4",4);require(last==null || last.matches(Regex("[0-9]{4}")))
         val platform=optional(json,"platform",16);require(platform==null || platform in setOf("wechat","alipay"))
         return PaymentMethodEvidence(medium,role,bank,last,platform,optional(json,"rawLabel",80)!!,
-            optional(json,"rawValue",160)!!,bool(json,"ambiguous"),optional(json,"reason",160))
+            optional(json,"rawValue",160)!!,bool(json,"ambiguous"),optional(json,"reason",160),if(json.has("executed"))bool(json,"executed") else false)
     }
     fun standaloneJson(e:StandaloneRefundEvidence)=JSONObject().put("version",1).put("provider",e.provider)
         .put("refundedCents",e.refundedCents).put("refundId",e.refundId?:JSONObject.NULL)
@@ -149,7 +149,8 @@ internal object WalletBackupCodec {
                 link.selectionSource=="PAYMENT_METHOD" && !link.manualLocked && snapshot.effects[record.uid].orEmpty().isEmpty() &&
                 (payment?.medium=="BANK_CARD" && record.bill.receipt?.bank!=null &&
                     link.reviewCode in setOf("BANK_DIRECTION_REQUIRED","PAYMENT_METHOD_UNMATCHED","PAYMENT_METHOD_AMBIGUOUS","PAYMENT_EVIDENCE_CONFLICT") ||
-                    payment?.medium=="UNKNOWN" && payment.ambiguous && payment.reason=="ACTUAL_ACCOUNT_REQUIRED" && link.reviewCode=="ACTUAL_ACCOUNT_REQUIRED")
+                    payment?.medium=="UNKNOWN" && payment.ambiguous && payment.reason=="ACTUAL_ACCOUNT_REQUIRED" && link.reviewCode=="ACTUAL_ACCOUNT_REQUIRED" ||
+                    payment?.executed==true && payment.role=="DEBIT" && link.reviewCode=="ACTUAL_ACCOUNT_REQUIRED")
             require(link.accountUid!=null || link.selectionSource in setOf(null,"IMPORT") ||
                 link.eligibility!=WalletEligibility.ACTIVE && link.accountReference!=null || pendingPaymentAccount)
             require((link.selectionSource=="MANUAL")==link.manualLocked)
