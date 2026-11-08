@@ -1078,9 +1078,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         // selectionArgs are strings; CASE has no column affinity, so compare an integer parameter.
         return query("state='POSTED' AND direction='EXPENSE' AND "+
             "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND "+
-            "(occurred_at BETWEEN ? AND ? OR transaction_id=? OR EXISTS(SELECT 1 FROM record_identities i "+
+            "(occurred_at BETWEEN ? AND ? OR (source='OCR' AND received_at BETWEEN ? AND ?) OR transaction_id=? OR EXISTS(SELECT 1 FROM record_identities i "+
             "WHERE i.record_id=records.id AND i.scope=? AND i.value=?))",
             arrayOf(refund.originalAmountCents.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
+                (bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
                 bill.transactionId ?: "",refund.provider,bill.transactionId ?: ""))
     }
 
@@ -1093,10 +1094,17 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             (original.bill.transactionId.isNullOrBlank() || incoming.transactionId.isNullOrBlank() || refundIdentityMatches(original,incoming))
     }
 
+    /** Recognition fallback is accounting time; the native acquisition instant still corroborates a live payment. */
+    private fun automaticPaymentMatchAt(record:LedgerRecord):Long {
+        val time=record.bill.receipt?.time
+        return if(record.capture.source==Source.OCR && !record.bill.timeExplicit &&
+            record.reason.startsWith("已识别即时支付成功页") && time?.source=="RECOGNITION_FALLBACK" &&
+            time.accountingAt==record.bill.occurredAt)record.capture.receivedAt else record.bill.occurredAt
+    }
     private fun isAutomaticPayment(record:LedgerRecord):Boolean = record.state==RecordState.POSTED &&
         record.capture.source==Source.OCR && !record.bill.timeExplicit && record.bill.transactionId.isNullOrBlank() &&
         record.reason.startsWith("已识别即时支付成功页") &&
-        kotlin.math.abs(record.capture.receivedAt-record.bill.occurredAt)<=15_000
+        kotlin.math.abs(record.capture.receivedAt-automaticPaymentMatchAt(record))<=15_000
 
     /** Only a unique native live capture can gain identity from an explicitly timed order detail. */
     private fun uniqueAutomaticPayment(capture:Capture,bill:ParsedBill):LedgerRecord? {
@@ -1105,7 +1113,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 it.bill.transactionId==bill.transactionId })return null
         // Count even candidates with conflicting IDs; ambiguity must never pick an arbitrary payment.
         return automaticPaymentCandidates(capture,bill).singleOrNull()?.takeIf {
-            isAutomaticPayment(it) && it.bill.refund==null && it.bill.occurredAt-bill.occurredAt in -5_000L..120_000L
+            isAutomaticPayment(it) && it.bill.refund==null && automaticPaymentMatchAt(it)-bill.occurredAt in -5_000L..120_000L
         }
     }
 
@@ -1117,10 +1125,12 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val merchant=MerchantNames.key(bill.merchant) ?: return emptyList()
         val gross=bill.refund?.originalAmountCents ?: bill.amountCents ?: return emptyList()
         return query("state='POSTED' AND direction='EXPENSE' AND "+
-            "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND occurred_at BETWEEN ? AND ?",
-            arrayOf(gross.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString())).filter { old -> old.state==RecordState.POSTED && old.bill.direction==Direction.EXPENSE &&
+            "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND "+
+            "(occurred_at BETWEEN ? AND ? OR (source='OCR' AND received_at BETWEEN ? AND ?))",
+            arrayOf(gross.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
+                (bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString())).filter { old -> old.state==RecordState.POSTED && old.bill.direction==Direction.EXPENSE &&
             paymentProvider(old.capture)==provider && !identitiesConflict(old,capture,bill) && (old.bill.refund?.originalAmountCents ?: old.bill.amountCents)==gross &&
-            MerchantNames.key(old.bill.merchant)==merchant && kotlin.math.abs(old.bill.occurredAt-bill.occurredAt)<=120_000 }
+            MerchantNames.key(old.bill.merchant)==merchant && kotlin.math.abs(automaticPaymentMatchAt(old)-bill.occurredAt)<=120_000 }
     }
 
     private fun completePaymentIdentity(db:SQLiteDatabase,original:LedgerRecord,bill:ParsedBill):LedgerRecord {
@@ -1140,7 +1150,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         return refundAmountCandidates(bill).filter { candidate -> compatibleRefund(candidate,bill) &&
             (refundIdentityMatches(candidate,bill) ||
                 merchant!=null && merchant==MerchantNames.key(candidate.bill.merchant) &&
-                    kotlin.math.abs(candidate.bill.occurredAt-bill.occurredAt)<=120_000) }
+                    kotlin.math.abs(automaticPaymentMatchAt(candidate)-bill.occurredAt)<=120_000) }
     }
 
     private fun standaloneRefundCandidates(capture:Capture,evidence:StandaloneRefundEvidence,exactOnly:Boolean):List<LedgerRecord> {

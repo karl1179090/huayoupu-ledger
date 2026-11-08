@@ -24,6 +24,30 @@ class LedgerWebBridgeTest {
     @get:Rule val wallet = CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
 
+    @Test fun unchangedTimeFlagKeepsExactRecognizedTimeAndActualEditHasManualBasis() = withBridge { bridge ->
+        val at=java.time.Instant.parse("2026-12-31T16:01:23.456Z").toEpochMilli()
+        val context=net.ankio.ledger.core.RecognitionTimeContext(at,"Asia/Shanghai")
+        val raw="支付成功\n付款金额：12.00元"
+        val bill=net.ankio.ledger.core.LocalOcrBillParser.parse(raw.lines().map { net.ankio.ledger.core.LocalOcrLine(it) },
+            0,0,at,origin="image",timeContext=context)!!
+        val original=(app.store.ingest(Capture(Source.IMAGE,"image",raw,at),bill) as IngestResult.Saved).record
+        try {
+            val unchanged=input(original.id).put("amount","12.00").put("merchant",original.bill.merchant)
+                .put("category",original.bill.category).put("occurredAt",at-23456).put("timeEdited",false).put("note","合成备注")
+            val saved=JSONObject(bridge.save(unchanged.toString()));assertTrue(saved.toString(),saved.getBoolean("ok"))
+            val noteOnly=app.store.get(original.id)!!
+            assertEquals(at,noteOnly.bill.occurredAt)
+            assertEquals(original.bill.receipt,noteOnly.bill.receipt)
+            val editedAt=java.time.Instant.parse("2026-12-30T04:25:00Z").toEpochMilli()
+            val changed=input(original.id).put("amount","12.00").put("merchant",original.bill.merchant)
+                .put("category",original.bill.category).put("occurredAt",editedAt).put("timeEdited",true)
+            assertTrue(JSONObject(bridge.save(changed.toString())).getBoolean("ok"))
+            val edited=app.store.get(original.id)!!
+            assertEquals(editedAt,edited.bill.receipt!!.time!!.accountingAt)
+            assertEquals("MANUAL",edited.bill.receipt!!.time!!.source)
+        } finally { app.store.delete(original.id) }
+    }
+
     @Test fun saveEditSnapshotAndDeleteKeepTheRealRecordIdentity() = withBridge { bridge ->
         var id = 0L
         try {

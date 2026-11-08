@@ -103,4 +103,25 @@ class TransactionTimeParsingTest {
         assertEquals("交易时间\n2026-10-17 18:25",time.rawText)
     }
 
+    @Test fun ocrMayJoinAValidDateAndClockWithoutWhitespaceButCannotJoinAnOrderNumber() {
+        for (printed in listOf("2026-10-1713:11:55", "10月17日13:11:55")) {
+            val time=parse("付款时间",printed,"发货时间：2026-10-18 10:00:00").receipt!!.time!!
+            assertEquals(Instant.parse("2026-10-17T05:11:55Z").toEpochMilli(),time.accountingAt)
+            assertEquals("SECOND",time.precision)
+            assertEquals("付款时间\n$printed",time.rawText)
+        }
+        assertEquals(context.recognitionAt,parse("交易单号：202610171311552026").occurredAt)
+    }
+
+    @Test fun ambiguousJoinedSingleDigitDayOrHourFallsBackInsteadOfGuessingADifferentDate() {
+        for (printed in listOf("2026-10-112:55", "2026-10-12:55")) {
+            val time=parse("付款时间：$printed").receipt!!.time!!
+            assertEquals(context.recognitionAt,time.accountingAt)
+            assertEquals("RECOGNITION_FALLBACK",time.source)
+            assertEquals("付款时间：$printed",time.rawText)
+        }
+        val marked=parse("付款时间：2026年10月1日2:55").receipt!!.time!!
+        assertEquals(Instant.parse("2026-09-30T18:55:00Z").toEpochMilli(),marked.accountingAt)
+    }
+
 }
