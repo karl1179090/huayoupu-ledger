@@ -23,8 +23,12 @@ internal object ClassificationStorage {
     fun migrationBaseline(db:SQLiteDatabase):ClassificationSnapshot = db.rawQuery("SELECT migration_payload FROM classification_configuration WHERE singleton=1",null).use {
         check(it.moveToFirst());ClassificationCodec.readSnapshot(it.getString(0))
     }
+    internal fun writePayload(db:SQLiteDatabase,payload:org.json.JSONObject) {
+        ClassificationCodec.readSnapshot(payload.toString())
+        db.update("classification_configuration",ContentValues().apply { put("payload",payload.toString()) },"singleton=1",null)
+    }
     private fun write(db:SQLiteDatabase,snapshot:ClassificationSnapshot) {
-        db.update("classification_configuration",ContentValues().apply { put("payload",ClassificationCodec.snapshot(snapshot).toString()) },"singleton=1",null)
+        writePayload(db,ClassificationCodec.snapshot(snapshot).put("categoryReplacements",CategoryReplacementStorage.encode(CategoryReplacementStorage.entries(db))))
     }
     private fun changed(db:SQLiteDatabase,snapshot:ClassificationSnapshot) = write(db,snapshot.copy(version=UUID.randomUUID().toString()))
     private fun target(db:SQLiteDatabase,rule:ClassificationRule) {
@@ -41,6 +45,12 @@ internal object ClassificationStorage {
         val rules=current.customRules.filterNot { it.id==rule.id }+rule
         if(rules.size>2_000)throw ClassificationException("RULE_INVALID","分类规则数量过多")
         changed(db,current.copy(customRules=rules));return rule
+    }
+    fun replaceTarget(db:SQLiteDatabase,id:String,replacementId:String) {
+        val current=configuration(db)
+        fun replace(rule:ClassificationRule)=if(rule.categoryId==id)rule.copy(categoryId=replacementId) else rule
+        val updated=current.copy(customRules=current.customRules.map(::replace),builtinRules=current.builtinRules.map(::replace))
+        if(updated!=current)changed(db,updated)
     }
     fun delete(db:SQLiteDatabase,id:String) {
         val current=configuration(db)
@@ -76,21 +86,23 @@ internal object ClassificationStorage {
     fun release(db:SQLiteDatabase,key:String) { db.execSQL("UPDATE classification_snapshots SET active=0 WHERE operation_key=?",arrayOf(key)) }
     fun forget(db:SQLiteDatabase,key:String) { db.delete("classification_snapshots","operation_key=?",arrayOf(key)) }
     fun references(db:SQLiteDatabase,categoryId:String):Long {
-        fun count(snapshot:ClassificationSnapshot)=(snapshot.customRules+snapshot.builtinRules).count { it.categoryId==categoryId }.toLong()
-        return count(configuration(db))+db.rawQuery("SELECT payload FROM classification_snapshots WHERE active=1",null).use { c ->
+        val replacements=CategoryReplacementStorage.entries(db)
+        fun count(snapshot:ClassificationSnapshot)=(snapshot.customRules+snapshot.builtinRules).count { CategoryReplacementStorage.resolve(it.categoryId,replacements)==categoryId }.toLong()
+        return count(configuration(db))+replacements.count { CategoryReplacementStorage.resolve(it.categoryId,replacements)==categoryId }+db.rawQuery("SELECT payload FROM classification_snapshots WHERE active=1",null).use { c ->
             var result=0L;while(c.moveToNext())result+=count(ClassificationCodec.readSnapshot(c.getString(0)));result
         }
     }
     fun backup(db:SQLiteDatabase)=ClassificationBackup(configuration(db),db.rawQuery("SELECT operation_key,payload,active,task_database FROM classification_snapshots ORDER BY operation_key",null).use { c ->
         buildList { while(c.moveToNext())add(StoredClassificationSnapshot(c.getString(0),ClassificationCodec.readSnapshot(c.getString(1)),c.getInt(2)==1,if(c.isNull(3))null else c.getString(3))) }
-    })
+    },CategoryReplacementStorage.entries(db))
 
     fun validateBackup(backup:ClassificationBackup,categories:List<LedgerCategory>) {
+        CategoryReplacementStorage.validate(backup.replacements,categories)
         val targets=categories.associateBy { it.id }
         fun validate(snapshot:ClassificationSnapshot,requireTargets:Boolean) {
             (snapshot.customRules+snapshot.builtinRules).forEach { rule ->
                 ClassificationCodec.validateRule(rule,true)
-                if(requireTargets)require(targets[rule.categoryId]?.direction==rule.direction) { "规则目标分类不存在或方向不一致" }
+                if(requireTargets)require(targets[CategoryReplacementStorage.resolve(rule.categoryId,backup.replacements)]?.direction==rule.direction) { "规则目标分类不存在或方向不一致" }
             }
         }
         validate(backup.configuration,true);backup.snapshots.forEach { validate(it.snapshot,it.active) }
@@ -100,6 +112,7 @@ internal object ClassificationStorage {
     fun restore(db:SQLiteDatabase,backup:ClassificationBackup,mapping:Map<String,LedgerCategory>) {
         fun remap(snapshot:ClassificationSnapshot)=snapshot.copy(customRules=snapshot.customRules.map { it.copy(categoryId=mapping[it.categoryId]?.id ?: it.categoryId) },
             builtinRules=snapshot.builtinRules.map { it.copy(categoryId=mapping[it.categoryId]?.id ?: it.categoryId) })
+        CategoryReplacementStorage.restore(db,backup.replacements,mapping)
         val incoming=remap(backup.configuration);val current=configuration(db)
         if(current==migrationBaseline(db))write(db,incoming)
         else {
