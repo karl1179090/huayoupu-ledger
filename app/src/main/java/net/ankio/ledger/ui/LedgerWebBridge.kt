@@ -25,6 +25,7 @@ import net.ankio.ledger.data.CustomCategory
 import net.ankio.ledger.data.CategoryDeletionPreview
 import net.ankio.ledger.data.CategoryPreviewStale
 import net.ankio.ledger.data.ClassificationCodec
+import net.ankio.ledger.data.ClassificationPreviewCodec
 import net.ankio.ledger.data.ClassificationException
 import net.ankio.ledger.data.CategoryDirectory
 import net.ankio.ledger.data.CategoryException
@@ -604,6 +605,21 @@ class LedgerWebBridge(private val activity: MainActivity) {
     private fun ruleFailure(error:Exception)=failure(error.message ?: "分类规则操作失败，请重试",(error as? ClassificationException)?.code ?: "RULE_INVALID").toString()
     @JavascriptInterface fun classificationRules():String=try {
         synchronized(app.store) { classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun previewClassification(json:String):String=try {
+        val request=ClassificationPreviewCodec.readRequest(json)
+        synchronized(app.store) {
+            val result=request.recordId?.let { app.store.previewClassification(it,request.rule) }
+                ?: app.store.previewClassification(requireNotNull(request.input),request.rule)
+            JSONObject().put("ok",true).put("preview",ClassificationPreviewCodec.preview(result)).toString()
+        }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun classificationRuleDraftFromBill(recordId:Long):String=try {
+        synchronized(app.store) {
+            val draft=app.store.classificationRuleDraftFromBill(recordId)
+            JSONObject().put("ok",true).put("recordId",draft.recordId).put("input",ClassificationPreviewCodec.input(draft.input))
+                .put("rule",ClassificationCodec.rule(draft.rule).put("id",JSONObject.NULL)).toString()
+        }
     } catch(error:Exception) { ruleFailure(error) }
     @JavascriptInterface fun saveClassificationRule(json:String):String=try {
         checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
