@@ -353,7 +353,7 @@ function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory
  editor.classList.toggle('compact-record',!!(draft.id||draft.recognitionTaskId));
  const hero=editor.querySelector('.record-hero');hero.hidden=!draft.id;hero.innerHTML=draft.id?ledgerIcon(draft):'';
  const original=$('original-message');original.hidden=true;original.querySelector('p').textContent=draft.rawText||'';
-document.querySelector('#import .pending').textContent=draft.recognitionTaskId?(taskNames[draft.taskStatus]||'识别记录'):(posted?'已入账':'待确认');$('editor-title').textContent=captureName(draft)||'手动记账';$('delete-record').hidden=(!draft.id&&!draft.recognitionTaskId)||working;$('delete-record').textContent=draft.recognitionTaskId?'删除识别记录':'删除账单';$('raw-text-button').hidden=!draft.rawText;document.querySelector('.editor-tools').style.display=draft.rawText?'flex':'none';$('review-reason').hidden=posted||!draft.reason;$('review-reason').textContent=draft.reason||'';
+ document.querySelector('#import .pending').textContent=draft.recognitionTaskId?(taskNames[draft.taskStatus]||'识别记录'):(posted?'已入账':'待确认');$('editor-title').textContent=captureName(draft)||'手动记账';$('delete-record').hidden=(!draft.id&&!draft.recognitionTaskId)||working;$('delete-record').textContent=draft.recognitionTaskId?'删除识别记录':'删除账单';$('raw-text-button').hidden=!draft.rawText;const canCreateRule=!!(draft?.id&&draft.direction!=='TRANSFER');if($('create-rule-from-bill'))$('create-rule-from-bill').hidden=!canCreateRule;document.querySelector('.editor-tools').style.display=(draft.rawText||canCreateRule)?'flex':'none';$('review-reason').hidden=posted||!draft.reason;$('review-reason').textContent=draft.reason||'';
  const scanner=document.querySelector('.scanner');scanner.hidden=draft.source==='MANUAL'&&!!draft.id;const canPick=!working&&!draft.id&&!draft.recognitionTaskId,canView=!!previewUrl&&!working;scanner.setAttribute('aria-disabled',String(!canPick&&!canView));scanner.setAttribute('aria-label',canView?'查看原始截图':canPick?'选择支付截图':'暂无原始截图');scanner.tabIndex=canPick||canView?0:-1;scanner.classList.toggle('placeholder',!previewUrl);scanner.classList.toggle('has-preview',!!previewUrl);$('capture-preview').hidden=!previewUrl;if(previewUrl)$('capture-preview').src=previewUrl;
  document.querySelector('.scanning').textContent=working?(draft.taskStatus==='CAPTURING'?'正在获取账单截图…':draft.taskStatus==='QUEUED'?'已获取截图，等待识别…':'正在识别账单…'):importError||(previewUrl?'本次识别截图 · 请核对记账信息':draft.id?(draft.source==='OCR'||draft.source==='IMAGE'?'这笔历史记录未保存原始截图，可查看识别原文并核对字段':'此记录来自'+(captureName(draft)||'手动记账')+'，没有截图'):'点击上方选择支付截图，自动识别');
  document.querySelector('.scanner').classList.toggle('no-record-image',!!(draft.id||draft.recognitionTaskId)&&!previewUrl);
@@ -504,6 +504,24 @@ const cropReason={image_size:'截图大小不符合裁剪要求',image_dimension
 return record?.iconStatus==='crop_rejected'&&cropReason?cropReason:{cached:'已使用本机商家图标',saved:'已提取并保存',missing_field:'未找到图标位置',not_visible:'未找到明确的商家图标',invalid_metadata:'图标位置信息无效',wrong_kind:'区域内容不是商家图标',confidence_low:'图标位置不够明确',invalid_box_or_confidence:'图标坐标、单位或置信度无效',crop_rejected:'定位区域未通过图片校验'}[record?.iconStatus];
 }
 $('raw-text-button').onclick=()=>{const status=merchantIconExplanation(draft);showSheet('识别原文',`${status?`<p class="sheet-copy">商家图标：${escapeText(status)}</p>`:''}<div class="raw-text">${escapeText(draft?.rawText||'')}</div>`)};
+if($('create-rule-from-bill'))$('create-rule-from-bill').onclick=()=>{
+ if(!draft?.id||draft.direction==='TRANSFER')return;
+ if(!native?.classificationRuleDraftFromBill){notify('请在 Android 应用中创建分类规则');return}
+ try{
+  const res=JSON.parse(native.classificationRuleDraftFromBill(draft.id));
+  if(!res.ok){notify(res.error||'无法据此账单创建规则');return}
+  const prefillRule=res.rule;
+  prefillRule.fromBill=true;
+  prefillRule.recordId=draft.id;
+  const curDir=$('direction')?.dataset?.value||draft.direction;
+  const curCatId=$('category')?.dataset?.categoryId||draft.categoryId;
+  if(curDir===prefillRule.direction&&curCatId){
+   const matchCat=directoryItems(curDir).find(c=>c.id===curCatId);
+   if(matchCat)prefillRule.categoryId=matchCat.id;
+  }
+  openClassificationRules(prefillRule.direction,prefillRule);
+ }catch(_){notify('创建规则草稿失败，请重试')}
+};
 function requestDelete(id,task=false){
  if(!Number.isSafeInteger(id)||id<=0){notify('记录编号无效');return}
  const record=task?recognitionTasks.find(t=>t.id===id):records.find(r=>r.id===id);
@@ -870,8 +888,36 @@ function openCategoryManager(initialDirection){
  renderManager();
 }
 $('manage-category').onclick=()=>openCategoryManager(manualType);
-function openClassificationRules(initialDirection){
- let manageDir=String(initialDirection||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE',editingRule=null,formDir=manageDir,formName='',formEnabled=true,formCategoryId='',formMatchMode='ALL',formSource='',formConditions=[{field:'MERCHANT',operator:'CONTAINS',value:''}],internalMutation=false;
+function openClassificationRules(initialDirection,prefillRule=null){
+ let manageDir=String(prefillRule?.direction||initialDirection||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE';
+ let editingRule=prefillRule?{id:prefillRule.id||null,name:prefillRule.name||'',fromBill:!!prefillRule.fromBill,recordId:prefillRule.recordId||null}:null;
+ let formDir=manageDir,formName=prefillRule?.name||'',formEnabled=prefillRule?prefillRule.enabled!==false:true,formCategoryId=prefillRule?.categoryId||'';
+ let formMatchMode=prefillRule?.matchMode==='ANY'?'ANY':'ALL',formSource=prefillRule?.source||'';
+ let formConditions=Array.isArray(prefillRule?.conditions)&&prefillRule.conditions.length
+  ?prefillRule.conditions.map(c=>({field:String(c?.field||'MERCHANT').toUpperCase()==='ORDER_CONTENT'?'ORDER_CONTENT':'MERCHANT',operator:String(c?.operator||'CONTAINS').toUpperCase()==='EQUALS'?'EQUALS':String(c?.operator||'CONTAINS').toUpperCase()==='NOT_CONTAINS'?'NOT_CONTAINS':'CONTAINS',value:String(c?.value||'')}))
+  :(prefillRule?.fromBill?[]:[{field:'MERCHANT',operator:'CONTAINS',value:''}]);
+ let internalMutation=false;
+
+ // Rule tester state
+ let testMode='MANUAL',testDir=manageDir,selectedTestRecordId=prefillRule?.recordId||null,testResult=null,testError='',testingWithDraft=!!editingRule;
+ const initM=formConditions.find(c=>c.field==='MERCHANT');
+ let testMerchant=initM?initM.value:'';
+ const initO=formConditions.filter(c=>c.field==='ORDER_CONTENT');
+ let testOrderContents=initO.length?initO.map(c=>c.value):[];
+ let testSource=formSource||'';
+
+ function formatTrustedInputSource(input){
+  if(!input)return '不限 / 未知';
+  const parts=[];
+  if(input.platform==='wechat')parts.push('微信凭证');
+  else if(input.platform==='alipay')parts.push('支付宝凭证');
+  else if(input.sourcePackage)parts.push(knownReceiptApps[input.sourcePackage]||input.sourcePackage);
+  if(input.captureSource==='LIVE')parts.push('现场识别');
+  else if(input.captureSource==='IMAGE')parts.push('图片导入');
+  else if(input.captureSource)parts.push(input.captureSource);
+  return parts.length?parts.join(' · '):'不限 / 未知';
+ }
+
  const syncFromNative=()=>{
   if(native?.getCategoryDirectory){try{const res=JSON.parse(native.getCategoryDirectory());if(res.ok){if(res.categoryDirectory)categoryDirectory=res.categoryDirectory;if(res.categoryIconOptions)categoryIconOptions=res.categoryIconOptions}}catch(_){}}
   if(native?.classificationRules){try{const res=JSON.parse(native.classificationRules());if(res.ok&&res.classificationRules)applyClassificationRules(res.classificationRules)}catch(_){}}
@@ -880,6 +926,14 @@ function openClassificationRules(initialDirection){
   const list=directoryItems(dir),d=String(dir||'EXPENSE').toUpperCase()==='INCOME'?'INCOME':'EXPENSE';
   const matched=preferredId&&list.find(c=>c.id===preferredId&&c.direction===d);
   return matched?matched.id:(list[0]?.id||'');
+ };
+ const captureTestInputs=()=>{
+  if($('test-direction'))testDir=$('test-direction').value==='INCOME'?'INCOME':'EXPENSE';
+  if($('test-source'))testSource=$('test-source').value||'';
+  if($('test-merchant'))testMerchant=$('test-merchant').value||'';
+  const ordEls=document.querySelectorAll('#test-order-content-list [data-test-order-idx]');
+  if(ordEls.length)testOrderContents=Array.from(ordEls).map(el=>el.value);
+  if($('test-use-draft'))testingWithDraft=!!$('test-use-draft').checked;
  };
  const captureDraftInputs=()=>{
   if($('rule-name'))formName=$('rule-name').value;
@@ -904,6 +958,7 @@ function openClassificationRules(initialDirection){
    const val=$('rule-keyword')?.value||'';
    formConditions=[{field:f,operator,value:val}];
   }
+  captureTestInputs();
  };
  const applyRulesResult=res=>{
   if(res?.classificationRules)applyClassificationRules(res.classificationRules);
@@ -911,7 +966,7 @@ function openClassificationRules(initialDirection){
   try{viewKey='';dataRevision='';loadedScope='';refresh();drawSettings();remember()}finally{internalMutation=false}
  };
  syncFromNative();
- formCategoryId=ensureValidCategoryId(formDir,'');
+ formCategoryId=ensureValidCategoryId(formDir,formCategoryId);
  const renderRulesSheet=(focusSelector=null)=>{
   const expRules=customRulesByDirection('EXPENSE'),incRules=customRulesByDirection('INCOME'),rules=manageDir==='INCOME'?incRules:expRules;
   const builtinExpRules=builtinRulesByDirection('EXPENSE'),builtinIncRules=builtinRulesByDirection('INCOME'),builtinRules=manageDir==='INCOME'?builtinIncRules:builtinExpRules;
@@ -919,10 +974,15 @@ function openClassificationRules(initialDirection){
   const dirCategories=directoryItems(formDir);
   formCategoryId=ensureValidCategoryId(formDir,formCategoryId);
   const firstEnabledId=rules.find(r=>r.enabled!==false)?.id||null;
-  const editorTitle=editingRule?(editingRule.id?`编辑规则 · ${escapeText(editingRule.name)}`:`复制规则预填 · ${escapeText(formName)}`):`新增${formDirLabel}规则`;
+  const editorTitle=editingRule?(editingRule.id?`编辑规则 · ${escapeText(editingRule.name)}`:(editingRule.fromBill?`从账单创建规则 · ${escapeText(formName||'未命名规则')}`:`复制规则预填 · ${escapeText(formName)}`)):`新增${formDirLabel}规则`;
   const knownSources=['LIVE','IMAGE','LIVE:com.tencent.mm','LIVE:com.eg.android.AlipayGphone','IMAGE:wechat','IMAGE:alipay'];
   const customSourceOption=formSource&&!knownSources.includes(formSource)?`<option value="${escapeText(formSource)}" selected>${escapeText(formatRuleSource(formSource))}</option>`:'';
-  showSheet('自动分类规则',`<div class="category-manager-header"><div class="segmented" id="rule-manage-tabs" role="tablist" aria-label="自动分类规则方向"><button type="button" data-rule-dir="EXPENSE" class="${manageDir==='EXPENSE'?'active':''}" aria-pressed="${manageDir==='EXPENSE'}">支出规则 (${expRules.length})</button><button type="button" data-rule-dir="INCOME" class="${manageDir==='INCOME'?'active':''}" aria-pressed="${manageDir==='INCOME'}">收入规则 (${incRules.length})</button></div>${editingRule?'<button type="button" id="reset-rule-form" class="category-add-btn">+ 新增规则</button>':''}</div><p class="sheet-copy rule-scope-note" id="classification-rules-note">按列表从上到下匹配，<b>首条命中的启用规则生效</b>（自定义规则优先于内置规则）。修改、停用或删除规则仅影响后续新识别账单，不会修改已有账单。</p><div class="category-editor-card" id="rule-editor-card"><div class="rule-editor-top"><h4 id="rule-editor-title">${editorTitle}</h4><label class="rule-enable-control" for="rule-enabled"><input type="checkbox" id="rule-enabled" ${formEnabled?'checked':''}/><span>启用规则</span></label></div><label class="sheet-copy" for="rule-name">规则名称（必填，最多 80 字）</label><input class="month-input" id="rule-name" maxlength="80" value="${escapeText(formName)}" placeholder="例如：星巴克咖啡、平台外卖"/><div class="rule-form-grid"><div><label class="sheet-copy" for="rule-direction">适用方向</label><select class="month-input" id="rule-direction"><option value="EXPENSE" ${formDir==='EXPENSE'?'selected':''}>支出</option><option value="INCOME" ${formDir==='INCOME'?'selected':''}>收入</option></select></div><div><label class="sheet-copy" for="rule-category">目标分类</label><select class="month-input" id="rule-category">${dirCategories.map(c=>`<option value="${escapeText(c.id)}" ${c.id===formCategoryId?'selected':''}>${escapeText(c.name)}</option>`).join('')}</select></div></div><div class="rule-form-grid"><div><label class="sheet-copy" for="rule-match-mode">条件关系</label><select class="month-input" id="rule-match-mode"><option value="ALL" ${formMatchMode!=='ANY'?'selected':''}>全部满足</option><option value="ANY" ${formMatchMode==='ANY'?'selected':''}>任一满足</option></select></div><div><label class="sheet-copy" for="rule-source">来源限制（可选）</label><select class="month-input" id="rule-source"><option value="" ${!formSource?'selected':''}>不限来源</option><option value="LIVE" ${formSource==='LIVE'?'selected':''}>现场识别</option><option value="IMAGE" ${formSource==='IMAGE'?'selected':''}>图片导入</option><option value="LIVE:com.tencent.mm" ${formSource==='LIVE:com.tencent.mm'?'selected':''}>微信现场</option><option value="LIVE:com.eg.android.AlipayGphone" ${formSource==='LIVE:com.eg.android.AlipayGphone'?'selected':''}>支付宝现场</option><option value="IMAGE:wechat" ${formSource==='IMAGE:wechat'?'selected':''}>微信凭证图片</option><option value="IMAGE:alipay" ${formSource==='IMAGE:alipay'?'selected':''}>支付宝凭证图片</option>${customSourceOption}</select></div></div><div class="rule-conditions-header"><label class="sheet-copy"><b>匹配条件</b>（1～20 个）</label><button type="button" class="category-add-btn" id="add-rule-condition" ${formConditions.length>=20?'disabled':''}>+ 添加条件</button></div><p class="sheet-copy rule-hint-note">说明：订单内容包括商品说明、交易说明与订单备注；缺少某字段时不命中该字段的所有条件（包括“不包含”）。</p><div class="rule-conditions-list" id="rule-conditions-list">${formConditions.map((cond,idx)=>`<div class="rule-condition-row" data-condition-row="${idx}"><div class="rule-condition-controls"><div><label class="sheet-copy" for="${idx===0?'rule-field':`rule-field-${idx}`}">匹配字段</label><select class="month-input" data-condition-field="${idx}" id="${idx===0?'rule-field':`rule-field-${idx}`}"><option value="MERCHANT" ${cond.field!=='ORDER_CONTENT'?'selected':''}>商家</option><option value="ORDER_CONTENT" ${cond.field==='ORDER_CONTENT'?'selected':''}>订单内容</option></select></div><div><label class="sheet-copy" for="${idx===0?'rule-operator':`rule-operator-${idx}`}">匹配方式</label><select class="month-input" data-condition-operator="${idx}" id="${idx===0?'rule-operator':`rule-operator-${idx}`}"><option value="CONTAINS" ${cond.operator==='CONTAINS'?'selected':''}>包含</option><option value="EQUALS" ${cond.operator==='EQUALS'?'selected':''}>等于</option><option value="NOT_CONTAINS" ${cond.operator==='NOT_CONTAINS'?'selected':''}>不包含</option></select></div></div><div class="rule-condition-keyword-row"><div style="flex:1;min-width:0"><label class="sheet-copy" for="${idx===0?'rule-keyword':`rule-keyword-${idx}`}">关键词（必填，最多 200 字）</label><input class="month-input" data-condition-keyword="${idx}" id="${idx===0?'rule-keyword':`rule-keyword-${idx}`}" maxlength="200" value="${escapeText(cond.value)}" placeholder="${cond.field==='ORDER_CONTENT'?'例如：外卖、咖啡、打车':'例如：星巴克、瑞幸'}"/></div>${formConditions.length>1?`<button type="button" class="category-action-btn danger-btn rule-remove-condition-btn" data-remove-condition="${idx}" aria-label="删除第 ${idx+1} 个条件">删除</button>`:''}</div></div>`).join('')}</div><p class="category-field-error" id="rule-form-error" role="alert" hidden></p><div class="sheet-actions">${editingRule?'<button type="button" id="cancel-rule-edit">取消'+(editingRule.id?'编辑':'预填')+'</button>':'<button type="button" onclick="closeSheet()">关闭</button>'}<button type="button" class="primary" id="save-rule">${editingRule?.id?'保存修改':'保存规则'}</button></div></div><div class="category-manage-list" id="classification-rules-list">${rules.length?rules.map((rule,idx)=>{const targetCat=directoryItems(rule.direction).find(c=>c.id===rule.categoryId),targetName=targetCat?targetCat.name:'失效分类（请重新选择）',targetIcon=targetCat?targetCat.icon:'tag',condSummary=formatRuleConditionSummary(rule),isFirst=rule.enabled!==false&&rule.id===firstEnabledId;return `<div class="category-manage-row rule-manage-row${rule.enabled===false?' is-disabled':''}" data-rule-row="${escapeText(rule.id)}" data-rule-name="${escapeText(rule.name)}" data-rule-enabled="${rule.enabled!==false}"><div class="rule-manage-main">${categoryBadge(targetName,rule.direction,targetIcon)}<div class="category-manage-info"><b><span class="rule-row-name">${escapeText(rule.name)}</span><span class="rule-target-tag" data-rule-target-name="${escapeText(rule.id)}">→ ${escapeText(targetName)}</span>${isFirst?`<span class="rule-first-tag" data-rule-first-priority="${escapeText(rule.id)}">首条优先</span>`:''}${rule.enabled===false?'<span class="rule-disabled-tag">已停用</span>':''}</b><span class="category-manage-meta" data-rule-summary="${escapeText(rule.id)}">${escapeText(condSummary)}</span><span class="rule-priority-meta">优先级 #${idx+1}${isFirst?' · 首条命中优先':rule.enabled===false?' · 已停用不参与匹配':' · 按顺序依次匹配'}${rule.conflictReason?' · '+escapeText(rule.conflictReason):''}</span></div><button type="button" class="switch rule-row-switch" role="switch" data-toggle-rule="${escapeText(rule.id)}" aria-checked="${rule.enabled!==false}" aria-label="${rule.enabled!==false?'停用':'启用'}规则 ${escapeText(rule.name)}"></button></div><div class="rule-manage-bar"><span class="rule-priority-meta">目标分类：<b data-rule-category-label="${escapeText(rule.id)}">${escapeText(targetName)}</b></span><div class="category-manage-actions"><button type="button" class="category-action-btn" data-rule-up="${escapeText(rule.id)}" aria-label="上移规则 ${escapeText(rule.name)}" ${idx===0?'disabled':''}>↑</button><button type="button" class="category-action-btn" data-rule-down="${escapeText(rule.id)}" aria-label="下移规则 ${escapeText(rule.name)}" ${idx===rules.length-1?'disabled':''}>↓</button><button type="button" class="category-action-btn" data-edit-rule="${escapeText(rule.id)}" aria-label="编辑规则 ${escapeText(rule.name)}">编辑</button><button type="button" class="category-action-btn danger-btn" data-delete-rule="${escapeText(rule.id)}" aria-label="删除规则 ${escapeText(rule.name)}">删除</button></div></div></div>`}).join(''):`<div class="empty-state" id="classification-rules-empty">暂无${dirLabel}自动分类规则<br>在上方填写关键词与目标分类即可添加</div>`}</div><div class="builtin-rules-section" id="builtin-rules-section"><div class="builtin-rules-header"><h4 id="builtin-rules-title">内置${dirLabel}规则 (${builtinRules.length})</h4><span class="sheet-copy rule-priority-meta">自定义规则优先匹配；可单独启停或复制为自定义规则</span></div><div class="category-manage-list" id="builtin-rules-list">${builtinRules.length?builtinRules.map(rule=>{const targetCat=directoryItems(rule.direction).find(c=>c.id===rule.categoryId),targetName=targetCat?targetCat.name:'未知分类',targetIcon=targetCat?targetCat.icon:'tag',condSummary=formatRuleConditionSummary(rule);return `<div class="category-manage-row rule-manage-row builtin-rule-row${rule.enabled===false?' is-disabled':''}" data-builtin-rule-row="${escapeText(rule.id)}" data-builtin-rule-name="${escapeText(rule.name)}" data-builtin-rule-enabled="${rule.enabled!==false}"><div class="rule-manage-main">${categoryBadge(targetName,rule.direction,targetIcon)}<div class="category-manage-info"><b><span class="rule-row-name">${escapeText(rule.name)}</span><span class="rule-target-tag" data-builtin-target-name="${escapeText(rule.id)}">→ ${escapeText(targetName)}</span><span class="rule-builtin-tag">内置</span>${rule.enabled===false?'<span class="rule-disabled-tag">已停用</span>':''}</b><span class="category-manage-meta" data-builtin-summary="${escapeText(rule.id)}">${escapeText(condSummary)}</span><span class="rule-priority-meta">${rule.enabled===false?'已停用 · 不参与匹配':'启用中 · 自定义规则未命中时匹配'}</span></div><button type="button" class="switch rule-row-switch" role="switch" data-toggle-builtin-rule="${escapeText(rule.id)}" aria-checked="${rule.enabled!==false}" aria-label="${rule.enabled!==false?'停用':'启用'}内置规则 ${escapeText(rule.name)}"></button></div><div class="rule-manage-bar"><span class="rule-priority-meta">目标分类：<b data-builtin-category-label="${escapeText(rule.id)}">${escapeText(targetName)}</b></span><div class="category-manage-actions"><button type="button" class="category-action-btn" data-copy-builtin-rule="${escapeText(rule.id)}" aria-label="复制内置规则 ${escapeText(rule.name)}">复制为自定义</button></div></div></div>`}).join(''):`<div class="empty-state" id="builtin-rules-empty">暂无内置${dirLabel}规则</div>`}</div></div>`);
+  const availableBills=records.filter(r=>r.direction==='EXPENSE'||r.direction==='INCOME');
+
+  const testerCardHtml=`<div class="category-editor-card rule-tester-card" id="rule-tester-card"><div class="rule-editor-top"><h4 id="rule-tester-title">测试规则匹配</h4><label class="rule-enable-control" for="test-use-draft" id="test-draft-toggle-wrap"><input type="checkbox" id="test-use-draft" ${testingWithDraft?'checked':''}/><span>包含当前草稿</span></label></div><p class="rule-tester-scope" id="rule-tester-scope">${editingRule?(editingRule.id?'测试说明：当前规则草稿按原位替换测试，其它规则与内置规则正常参与。测试不会写入账单、账本或规则。':'测试说明：新规则草稿按保存后的追加位置（自定义规则末尾）测试，其它规则正常参与。测试不会写入账单、账本或规则。'):'测试说明：以当前已保存的规则配置进行只读测试，查看各条件是否满足及优先级匹配情况。测试不会写入账单、账本或规则。'}</p><div class="segmented" id="test-mode-tabs" role="tablist" aria-label="测试输入方式"><button type="button" id="test-mode-manual-btn" class="${testMode==='MANUAL'?'active':''}" data-test-mode="MANUAL" aria-pressed="${testMode==='MANUAL'}">手工输入</button><button type="button" id="test-mode-bill-btn" class="${testMode==='BILL'?'active':''}" data-test-mode="BILL" aria-pressed="${testMode==='BILL'}">选择已有账单 (${availableBills.length})</button></div>${testMode==='MANUAL'?`<div id="test-manual-section"><div class="rule-form-grid"><div><label class="sheet-copy" for="test-direction">测试收支方向</label><select class="month-input" id="test-direction"><option value="EXPENSE" ${testDir==='EXPENSE'?'selected':''}>支出</option><option value="INCOME" ${testDir==='INCOME'?'selected':''}>收入</option></select></div><div><label class="sheet-copy" for="test-source">识别来源（可选）</label><select class="month-input" id="test-source"><option value="" ${!testSource?'selected':''}>不限来源（未知）</option><option value="LIVE" ${testSource==='LIVE'?'selected':''}>现场识别</option><option value="IMAGE" ${testSource==='IMAGE'?'selected':''}>图片导入</option><option value="LIVE:com.tencent.mm" ${testSource==='LIVE:com.tencent.mm'?'selected':''}>微信现场</option><option value="LIVE:com.eg.android.AlipayGphone" ${testSource==='LIVE:com.eg.android.AlipayGphone'?'selected':''}>支付宝现场</option><option value="IMAGE:wechat" ${testSource==='IMAGE:wechat'?'selected':''}>微信凭证图片</option><option value="IMAGE:alipay" ${testSource==='IMAGE:alipay'?'selected':''}>支付宝凭证图片</option></select></div></div><label class="sheet-copy" for="test-merchant">测试商家名称（可选，最多 2000 字）</label><input class="month-input" id="test-merchant" maxlength="2000" value="${escapeText(testMerchant)}" placeholder="例如：合成平台、星巴克咖啡"/><div class="rule-conditions-header"><label class="sheet-copy"><b>订单内容</b>（0～3 项，商品说明 / 交易说明 / 订单备注）</label><button type="button" class="category-add-btn" id="add-test-order-content" ${testOrderContents.length>=3?'disabled':''}>+ 添加内容</button></div><p class="sheet-copy rule-tester-note">独立比较每个结构化字段，不会拼接；不包含手写记账备注或外围文字。空字段保持缺失。</p><div id="test-order-content-list">${testOrderContents.map((val,idx)=>`<div class="test-order-row" data-test-order-row="${idx}"><input class="month-input" data-test-order-idx="${idx}" id="test-order-${idx}" maxlength="2000" value="${escapeText(val)}" placeholder="例如：咖啡、到店消费"/><button type="button" class="category-action-btn danger-btn" data-remove-test-order="${idx}" aria-label="删除第 ${idx+1} 项订单内容">删除</button></div>`).join('')}</div></div>`:`<div id="test-bill-section"><label class="sheet-copy">选择一笔已有账单（只读测试，不修改账单）：</label>${availableBills.length?`<div class="test-bills-list" id="test-bills-list" role="radiogroup" aria-label="待测试账单列表">${availableBills.map(r=>`<div class="test-bill-item${selectedTestRecordId===r.id?' is-selected':''}" role="radio" aria-checked="${selectedTestRecordId===r.id}" data-test-record-id="${r.id}" tabindex="0"><div class="test-bill-main"><b>${escapeText(r.merchant||'未填写商户')}</b><span class="test-bill-amount">${r.direction==='INCOME'?'+':'-'}¥${money(r.amountCents)}</span></div><div class="test-bill-meta"><span>${localTime(r.occurredAt).replace('T',' ').slice(0,16)}</span><span class="test-bill-cat">${categoryBadge(r.category||'其他',r.direction,r.categoryIcon||'tag')}</span></div></div>`).join('')}</div>`:`<div class="empty-state" id="test-bills-empty">暂无可用收支账单</div>`}<div class="test-bill-pagination" id="test-bill-pagination"><span class="sheet-copy" id="test-bill-page-meta">${ledgerView?.hasMore?`已加载本月前 ${records.length} 笔账单`:`已显示本月全部可用账单（共 ${records.length} 笔）`}</span>${ledgerView?.hasMore?`<button type="button" class="category-action-btn" id="test-bill-load-more">加载更多账单</button>`:''}</div></div>`}<p class="category-field-error" id="rule-test-error" role="alert" tabindex="-1" ${testError?'':'hidden'}>${escapeText(testError)}</p><div class="sheet-actions"><button type="button" id="reset-rule-test">重置输入</button><button type="button" class="primary" id="run-rule-test-btn">开始测试</button></div>${testResult?`<div class="rule-test-result-box" id="rule-test-result" tabindex="-1"><div class="test-result-summary-card" id="test-result-summary" tabindex="-1"><div class="test-result-decision-row">${(()=>{const cat=testResult.category||directoryItems(testResult.input?.direction).find(c=>c.id===testResult.decision?.categoryId)||{id:"",name:"其他",icon:"ellipsis",direction:testResult.input?.direction||"EXPENSE"};return categoryBadge(cat.name,cat.direction,cat.icon)})()}<div class="test-decision-info"><b><span id="test-result-category-name">${escapeText(testResult.category?.name||(directoryItems(testResult.input?.direction).find(c=>c.id===testResult.decision?.categoryId)?.name)||"其他")}</span><span class="test-decision-source-tag ${testResult.decision.source==='CUSTOM_RULE'?'is-custom':testResult.decision.source==='BUILTIN_RULE'?'is-builtin':'is-fallback'}">${testResult.decision.source==='CUSTOM_RULE'?'自定义规则':testResult.decision.source==='BUILTIN_RULE'?'内置规则':'兜底分类'}</span></b><p class="test-result-explanation" id="test-decision-explanation">${escapeText(testResult.decision.explanation||'')}</p></div></div><div class="test-input-recap" id="test-input-recap"><div><b>收支方向：</b><span>${testResult.input.direction==='INCOME'?'收入':'支出'}</span></div><div><b>商家名称：</b><span>${testResult.input.merchant?escapeText(testResult.input.merchant):'（未提供）'}</span></div><div><b>订单内容：</b><span>${testResult.input.orderContent&&testResult.input.orderContent.length?testResult.input.orderContent.map(escapeText).join('、'):'（未提供）'}</span></div><div><b>识别来源：</b><span id="test-result-source">${escapeText(formatTrustedInputSource(testResult.input))}</span></div></div></div><div class="rule-traces-section"><div class="builtin-rules-header"><h4>规则匹配明细（按优先级自上而下匹配）</h4><span class="sheet-copy rule-priority-meta">首条命中的启用规则生效；后续规则不再重复生效</span></div><div class="rule-traces-list" id="rule-test-traces">${testResult.rules.map(trace=>{const isDraft=testResult.draftRuleId&&trace.rule.id===testResult.draftRuleId;const targetCat=directoryItems(trace.rule.direction).find(c=>c.id===trace.rule.categoryId);const targetName=targetCat?targetCat.name:'未知分类';let statusBadge='';if(trace.selected){statusBadge='<span class="rule-trace-badge is-selected" data-trace-status="selected">✓ 最终命中</span>';}else if(trace.interceptedByRuleId){statusBadge='<span class="rule-trace-badge is-intercepted" data-trace-status="intercepted">由排在前面的规则优先生效</span>';}else if(!trace.enabled){statusBadge='<span class="rule-trace-badge is-disabled" data-trace-status="disabled">已停用 · 不参与匹配</span>';}else if(!trace.directionMatches){statusBadge='<span class="rule-trace-badge is-mismatch" data-trace-status="direction-mismatch">收支方向不符</span>';}else if(!trace.sourceMatches){statusBadge='<span class="rule-trace-badge is-mismatch" data-trace-status="source-mismatch">来源限制不符</span>';}else if(!trace.conditionsMatch){statusBadge='<span class="rule-trace-badge is-mismatch" data-trace-status="conditions-mismatch">条件不满足</span>';}else{statusBadge='<span class="rule-trace-badge" data-trace-status="none">未选中</span>';}let interceptNote='';if(trace.interceptedByRuleId){const earlier=testResult.rules.find(r=>r.rule.id===trace.interceptedByRuleId);const earlierName=earlier?.rule?.name||'前置规则';interceptNote=`<p class="rule-trace-intercept-note" data-intercepted-by="${escapeText(trace.interceptedByRuleId)}">条件满足，但由排在前面的规则「${escapeText(earlierName)}」优先生效。</p>`;}return `<div class="rule-trace-card${trace.selected?' is-selected-rule':trace.interceptedByRuleId?' is-intercepted-rule':''}" data-trace-rule-id="${escapeText(trace.rule.id)}"><div class="rule-trace-top"><div class="rule-trace-title"><span>${escapeText(trace.rule.name)}</span>${isDraft?'<span class="rule-target-tag">测试草稿</span>':''}<span class="rule-target-tag">→ ${escapeText(targetName)}</span>${trace.source==='BUILTIN_RULE'?'<span class="rule-builtin-tag">内置</span>':''}</div>${statusBadge}</div>${interceptNote}<div class="rule-trace-conditions">${trace.conditions.map(c=>`<div class="rule-trace-cond-row"><span class="rule-trace-cond-text">${c.field==='ORDER_CONTENT'?'订单内容':'商家'} ${c.operator==='EQUALS'?'等于':c.operator==='NOT_CONTAINS'?'不包含':'包含'} 「${escapeText(c.value)}」</span><span class="condition-match-status ${c.matched?'is-pass':'is-fail'}">${c.matched?'✓ 满足':'✗ 不满足'}</span></div>`).join('')}</div></div>`}).join('')}${!testResult.rules.some(r=>r.selected)?`<div class="rule-test-fallback-banner" id="test-fallback-banner">所有自定义及内置规则均未命中，系统自动归入兜底「${escapeText(testResult.category.name)}」分类</div>`:''}</div></div></div>`:''}</div>`;
+
+  const prevScrollTop=$('sheet')?.open?($('sheet-content')?.scrollTop||0):0;
+  showSheet('自动分类规则',`<div class="category-manager-header"><div class="segmented" id="rule-manage-tabs" role="tablist" aria-label="自动分类规则方向"><button type="button" data-rule-dir="EXPENSE" class="${manageDir==='EXPENSE'?'active':''}" aria-pressed="${manageDir==='EXPENSE'}">支出规则 (${expRules.length})</button><button type="button" data-rule-dir="INCOME" class="${manageDir==='INCOME'?'active':''}" aria-pressed="${manageDir==='INCOME'}">收入规则 (${incRules.length})</button></div><div class="category-header-actions">${editingRule?'<button type="button" id="reset-rule-form" class="category-add-btn">+ 新增规则</button>':''}<button type="button" id="header-open-tester-btn" class="category-add-btn">测试规则</button></div></div><p class="sheet-copy rule-scope-note" id="classification-rules-note">按列表从上到下匹配，<b>首条命中的启用规则生效</b>（自定义规则优先于内置规则）。修改、停用或删除规则仅影响后续新识别账单，不会修改已有账单。</p><div class="category-editor-card" id="rule-editor-card"><div class="rule-editor-top"><h4 id="rule-editor-title">${editorTitle}</h4><label class="rule-enable-control" for="rule-enabled"><input type="checkbox" id="rule-enabled" ${formEnabled?'checked':''}/><span>启用规则</span></label></div><label class="sheet-copy" for="rule-name">规则名称（必填，最多 80 字）</label><input class="month-input" id="rule-name" maxlength="80" value="${escapeText(formName)}" placeholder="例如：星巴克咖啡、平台外卖"/><div class="rule-form-grid"><div><label class="sheet-copy" for="rule-direction">适用方向</label><select class="month-input" id="rule-direction"><option value="EXPENSE" ${formDir==='EXPENSE'?'selected':''}>支出</option><option value="INCOME" ${formDir==='INCOME'?'selected':''}>收入</option></select></div><div><label class="sheet-copy" for="rule-category">目标分类</label><select class="month-input" id="rule-category">${dirCategories.map(c=>`<option value="${escapeText(c.id)}" ${c.id===formCategoryId?'selected':''}>${escapeText(c.name)}</option>`).join('')}</select></div></div><div class="rule-form-grid"><div><label class="sheet-copy" for="rule-match-mode">条件关系</label><select class="month-input" id="rule-match-mode"><option value="ALL" ${formMatchMode!=='ANY'?'selected':''}>全部满足</option><option value="ANY" ${formMatchMode==='ANY'?'selected':''}>任一满足</option></select></div><div><label class="sheet-copy" for="rule-source">来源限制（可选）</label><select class="month-input" id="rule-source"><option value="" ${!formSource?'selected':''}>不限来源</option><option value="LIVE" ${formSource==='LIVE'?'selected':''}>现场识别</option><option value="IMAGE" ${formSource==='IMAGE'?'selected':''}>图片导入</option><option value="LIVE:com.tencent.mm" ${formSource==='LIVE:com.tencent.mm'?'selected':''}>微信现场</option><option value="LIVE:com.eg.android.AlipayGphone" ${formSource==='LIVE:com.eg.android.AlipayGphone'?'selected':''}>支付宝现场</option><option value="IMAGE:wechat" ${formSource==='IMAGE:wechat'?'selected':''}>微信凭证图片</option><option value="IMAGE:alipay" ${formSource==='IMAGE:alipay'?'selected':''}>支付宝凭证图片</option>${customSourceOption}</select></div></div><div class="rule-conditions-header"><label class="sheet-copy"><b>匹配条件</b>（1～20 个）</label><button type="button" class="category-add-btn" id="add-rule-condition" ${formConditions.length>=20?'disabled':''}>+ 添加条件</button></div><p class="sheet-copy rule-hint-note">说明：订单内容包括商品说明、交易说明与订单备注；缺少某字段时不命中该字段的所有条件（包括“不包含”）。</p><div class="rule-conditions-list" id="rule-conditions-list">${formConditions.map((cond,idx)=>`<div class="rule-condition-row" data-condition-row="${idx}"><div class="rule-condition-controls"><div><label class="sheet-copy" for="${idx===0?'rule-field':`rule-field-${idx}`}">匹配字段</label><select class="month-input" data-condition-field="${idx}" id="${idx===0?'rule-field':`rule-field-${idx}`}"><option value="MERCHANT" ${cond.field!=='ORDER_CONTENT'?'selected':''}>商家</option><option value="ORDER_CONTENT" ${cond.field==='ORDER_CONTENT'?'selected':''}>订单内容</option></select></div><div><label class="sheet-copy" for="${idx===0?'rule-operator':`rule-operator-${idx}`}">匹配方式</label><select class="month-input" data-condition-operator="${idx}" id="${idx===0?'rule-operator':`rule-operator-${idx}`}"><option value="CONTAINS" ${cond.operator==='CONTAINS'?'selected':''}>包含</option><option value="EQUALS" ${cond.operator==='EQUALS'?'selected':''}>等于</option><option value="NOT_CONTAINS" ${cond.operator==='NOT_CONTAINS'?'selected':''}>不包含</option></select></div></div><div class="rule-condition-keyword-row"><div style="flex:1;min-width:0"><label class="sheet-copy" for="${idx===0?'rule-keyword':`rule-keyword-${idx}`}">关键词（必填，最多 200 字）</label><input class="month-input" data-condition-keyword="${idx}" id="${idx===0?'rule-keyword':`rule-keyword-${idx}`}" maxlength="200" value="${escapeText(cond.value)}" placeholder="${cond.field==='ORDER_CONTENT'?'例如：外卖、咖啡、打车':'例如：星巴克、瑞幸'}"/></div>${formConditions.length>1?`<button type="button" class="category-action-btn danger-btn rule-remove-condition-btn" data-remove-condition="${idx}" aria-label="删除第 ${idx+1} 个条件">删除</button>`:''}</div></div>`).join('')}</div><p class="category-field-error" id="rule-form-error" role="alert" hidden></p><div class="sheet-actions">${editingRule?`<button type="button" id="cancel-rule-edit">取消${editingRule.id?'编辑':'预填'}</button>`:'<button type="button" onclick="closeSheet()">关闭</button>'}<button type="button" class="category-action-btn" id="open-tester-btn">测试规则</button><button type="button" class="primary" id="save-rule">${editingRule?.id?'保存修改':'保存规则'}</button></div></div>${testerCardHtml}<div class="category-manage-list" id="classification-rules-list">${rules.length?rules.map((rule,idx)=>{const targetCat=directoryItems(rule.direction).find(c=>c.id===rule.categoryId),targetName=targetCat?targetCat.name:'失效分类（请重新选择）',targetIcon=targetCat?targetCat.icon:'tag',condSummary=formatRuleConditionSummary(rule),isFirst=rule.enabled!==false&&rule.id===firstEnabledId;return `<div class="category-manage-row rule-manage-row${rule.enabled===false?' is-disabled':''}" data-rule-row="${escapeText(rule.id)}" data-rule-name="${escapeText(rule.name)}" data-rule-enabled="${rule.enabled!==false}"><div class="rule-manage-main">${categoryBadge(targetName,rule.direction,targetIcon)}<div class="category-manage-info"><b><span class="rule-row-name">${escapeText(rule.name)}</span><span class="rule-target-tag" data-rule-target-name="${escapeText(rule.id)}">→ ${escapeText(targetName)}</span>${isFirst?`<span class="rule-first-tag" data-rule-first-priority="${escapeText(rule.id)}">首条优先</span>`:''}${rule.enabled===false?'<span class="rule-disabled-tag">已停用</span>':''}</b><span class="category-manage-meta" data-rule-summary="${escapeText(rule.id)}">${escapeText(condSummary)}</span><span class="rule-priority-meta">优先级 #${idx+1}${isFirst?' · 首条命中优先':rule.enabled===false?' · 已停用不参与匹配':' · 按顺序依次匹配'}${rule.conflictReason?' · '+escapeText(rule.conflictReason):''}</span></div><button type="button" class="switch rule-row-switch" role="switch" data-toggle-rule="${escapeText(rule.id)}" aria-checked="${rule.enabled!==false}" aria-label="${rule.enabled!==false?'停用':'启用'}规则 ${escapeText(rule.name)}"></button></div><div class="rule-manage-bar"><span class="rule-priority-meta">目标分类：<b data-rule-category-label="${escapeText(rule.id)}">${escapeText(targetName)}</b></span><div class="category-manage-actions"><button type="button" class="category-action-btn" data-rule-up="${escapeText(rule.id)}" aria-label="上移规则 ${escapeText(rule.name)}" ${idx===0?'disabled':''}>↑</button><button type="button" class="category-action-btn" data-rule-down="${escapeText(rule.id)}" aria-label="下移规则 ${escapeText(rule.name)}" ${idx===rules.length-1?'disabled':''}>↓</button><button type="button" class="category-action-btn" data-edit-rule="${escapeText(rule.id)}" aria-label="编辑规则 ${escapeText(rule.name)}">编辑</button><button type="button" class="category-action-btn danger-btn" data-delete-rule="${escapeText(rule.id)}" aria-label="删除规则 ${escapeText(rule.name)}">删除</button></div></div></div>`}).join(''):`<div class="empty-state" id="classification-rules-empty">暂无${dirLabel}自动分类规则<br>在上方填写关键词与目标分类即可添加</div>`}</div><div class="builtin-rules-section" id="builtin-rules-section"><div class="builtin-rules-header"><h4 id="builtin-rules-title">内置${dirLabel}规则 (${builtinRules.length})</h4><span class="sheet-copy rule-priority-meta">自定义规则优先匹配；可单独启停或复制为自定义规则</span></div><div class="category-manage-list" id="builtin-rules-list">${builtinRules.length?builtinRules.map(rule=>{const targetCat=directoryItems(rule.direction).find(c=>c.id===rule.categoryId),targetName=targetCat?targetCat.name:'未知分类',targetIcon=targetCat?targetCat.icon:'tag',condSummary=formatRuleConditionSummary(rule);return `<div class="category-manage-row rule-manage-row builtin-rule-row${rule.enabled===false?' is-disabled':''}" data-builtin-rule-row="${escapeText(rule.id)}" data-builtin-rule-name="${escapeText(rule.name)}" data-builtin-rule-enabled="${rule.enabled!==false}"><div class="rule-manage-main">${categoryBadge(targetName,rule.direction,targetIcon)}<div class="category-manage-info"><b><span class="rule-row-name">${escapeText(rule.name)}</span><span class="rule-target-tag" data-builtin-target-name="${escapeText(rule.id)}">→ ${escapeText(targetName)}</span><span class="rule-builtin-tag">内置</span>${rule.enabled===false?'<span class="rule-disabled-tag">已停用</span>':''}</b><span class="category-manage-meta" data-builtin-summary="${escapeText(rule.id)}">${escapeText(condSummary)}</span><span class="rule-priority-meta">${rule.enabled===false?'已停用 · 不参与匹配':'启用中 · 自定义规则未命中时匹配'}</span></div><button type="button" class="switch rule-row-switch" role="switch" data-toggle-builtin-rule="${escapeText(rule.id)}" aria-checked="${rule.enabled!==false}" aria-label="${rule.enabled!==false?'停用':'启用'}内置规则 ${escapeText(rule.name)}"></button></div><div class="rule-manage-bar"><span class="rule-priority-meta">目标分类：<b data-builtin-category-label="${escapeText(rule.id)}">${escapeText(targetName)}</b></span><div class="category-manage-actions"><button type="button" class="category-action-btn" data-copy-builtin-rule="${escapeText(rule.id)}" aria-label="复制内置规则 ${escapeText(rule.name)}">复制为自定义</button></div></div></div>`}).join(''):`<div class="empty-state" id="builtin-rules-empty">暂无内置${dirLabel}规则</div>`}</div></div>`);
   const clearInvalid=()=>{
    ['rule-name','rule-category','rule-direction','rule-match-mode','rule-source'].forEach(id=>$(id)?.removeAttribute('aria-invalid'));
    document.querySelectorAll('#rule-conditions-list input, #rule-conditions-list select').forEach(el=>el.removeAttribute('aria-invalid'));
@@ -942,7 +1002,7 @@ function openClassificationRules(initialDirection){
   });
   document.querySelectorAll('[data-rule-dir]').forEach(b=>b.onclick=()=>{
    const nextDir=b.dataset.ruleDir==='INCOME'?'INCOME':'EXPENSE';
-   manageDir=nextDir;editingRule=null;formDir=nextDir;formName='';formConditions=[{field:'MERCHANT',operator:'CONTAINS',value:''}];formMatchMode='ALL';formSource='';formEnabled=true;formCategoryId=ensureValidCategoryId(nextDir,'');
+   manageDir=nextDir;editingRule=null;formDir=nextDir;formName='';formConditions=[{field:'MERCHANT',operator:'CONTAINS',value:''}];formMatchMode='ALL';formSource='';formEnabled=true;formCategoryId=ensureValidCategoryId(nextDir,'');testDir=nextDir;testResult=null;testError='';
    syncFromNative();renderRulesSheet(`[data-rule-dir="${nextDir}"]`);
   });
   $('rule-direction').onchange=()=>{
@@ -1000,6 +1060,7 @@ function openClassificationRules(initialDirection){
    }
    if(!native?.saveClassificationRule){showError('请在 Android 应用中保存自动分类规则');return}
    try{
+    const wasFromBill=!!editingRule?.fromBill;
     const wasEditing=!!(editingRule&&editingRule.id);
     const dirRules=customRulesByDirection(dir);
     const order=wasEditing&&editingRule.direction===dir?editingRule.order:dirRules.length;
@@ -1017,7 +1078,7 @@ function openClassificationRules(initialDirection){
     const result=JSON.parse(native.saveClassificationRule(JSON.stringify(payload)));
     if(!result.ok){if(result.code==='RULE_TARGET')syncFromNative();showError(result.error||'规则保存失败');return}
     editingRule=null;manageDir=dir;formDir=dir;formName='';formConditions=[{field:'MERCHANT',operator:'CONTAINS',value:''}];formMatchMode='ALL';formSource='';formEnabled=true;formCategoryId=validCat.id;
-    applyRulesResult(result);renderRulesSheet('#rule-name');notify(wasEditing?'规则已更新':'规则已保存');
+    applyRulesResult(result);renderRulesSheet('#rule-name');notify(wasFromBill?'规则已保存，仅影响后续新识别任务':wasEditing?'规则已更新':'规则已保存');
    }catch(_){showError('规则保存失败，请重试')}
   };
   document.querySelectorAll('[data-edit-rule]').forEach(b=>b.onclick=()=>{
@@ -1106,11 +1167,199 @@ function openClassificationRules(initialDirection){
     }catch(_){showError('复制内置规则失败，请重试')}
    };
   });
-  if(focusSelector){const target=$('sheet-content')?.querySelector(focusSelector);if(target&&!target.disabled)target.focus({preventScroll:true});else $('rule-name')?.focus({preventScroll:true})}
+
+  // --- Rule tester event handlers ---
+  document.querySelectorAll('[data-test-mode]').forEach(b=>{
+   b.onclick=()=>{
+    captureDraftInputs();
+    const nextMode=b.dataset.testMode==='BILL'?'BILL':'MANUAL';
+    if(testMode!==nextMode){
+     testMode=nextMode;
+     renderRulesSheet(`[data-test-mode="${nextMode}"]`);
+    }
+   };
+  });
+  if($('add-test-order-content')){
+   $('add-test-order-content').onclick=()=>{
+    captureDraftInputs();
+    if(testOrderContents.length>=3){notify('订单内容最多添加 3 项');return}
+    testOrderContents.push('');
+    renderRulesSheet(`[data-test-order-idx="${testOrderContents.length-1}"]`);
+   };
+  }
+  document.querySelectorAll('[data-remove-test-order]').forEach(b=>{
+   b.onclick=()=>{
+    captureDraftInputs();
+    const idx=Number(b.dataset.removeTestOrder);
+    if(idx>=0&&idx<testOrderContents.length){
+     testOrderContents.splice(idx,1);
+     renderRulesSheet('#add-test-order-content');
+    }
+   };
+  });
+  document.querySelectorAll('[data-test-record-id]').forEach(card=>{
+   card.onclick=()=>{
+    captureDraftInputs();
+    selectedTestRecordId=Number(card.dataset.testRecordId);
+    renderRulesSheet(`[data-test-record-id="${selectedTestRecordId}"]`);
+   };
+  });
+  if($('test-bill-load-more')){
+   $('test-bill-load-more').onclick=()=>{
+    captureDraftInputs();
+    loadMoreRecords();
+    renderRulesSheet('#test-bill-load-more');
+   };
+  }
+  if($('open-tester-btn')){
+   $('open-tester-btn').onclick=()=>{
+    $('rule-tester-card')?.scrollIntoView({behavior:'smooth'});
+    $('run-rule-test-btn')?.focus();
+   };
+  }
+  if($('header-open-tester-btn')){
+   $('header-open-tester-btn').onclick=()=>{
+    $('rule-tester-card')?.scrollIntoView({behavior:'smooth'});
+    $('run-rule-test-btn')?.focus();
+   };
+  }
+  if($('reset-rule-test')){
+   $('reset-rule-test').onclick=()=>{
+    testMerchant='';
+    testOrderContents=[];
+    testSource='';
+    selectedTestRecordId=null;
+    testResult=null;
+    testError='';
+    renderRulesSheet('#reset-rule-test');
+    notify('已重置测试输入');
+   };
+  }
+  if($('run-rule-test-btn')){
+   $('run-rule-test-btn').onclick=()=>{
+    captureDraftInputs();
+    showError('');
+    const showTestError=msg=>{
+     testError=msg;testResult=null;
+     renderRulesSheet('#rule-test-error');
+     notify(msg);
+    };
+
+    let request=null;
+    if(testMode==='BILL'){
+     if(!selectedTestRecordId){
+      showTestError('请选择一笔已有账单进行测试');
+      return;
+     }
+     const bill=records.find(r=>r.id===selectedTestRecordId);
+     if(bill&&bill.direction==='TRANSFER'){
+      showTestError('转账记录不支持分类规则测试，请选择收入或支出账单');
+      return;
+     }
+     request={recordId:selectedTestRecordId,rule:null};
+    }else{
+     if(!['EXPENSE','INCOME'].includes(testDir)){
+      showTestError('请选择测试收支方向');
+      return;
+     }
+     const cleanMerchant=testMerchant.trim();
+     if(cleanMerchant.length>2000){
+      showTestError('测试商家名称不能超过 2000 字');
+      return;
+     }
+     const cleanOrders=testOrderContents.map(s=>s.trim()).filter(Boolean);
+     if(cleanOrders.length>3){
+      showTestError('订单内容不能超过 3 项');
+      return;
+     }
+     for(const ord of cleanOrders){
+      if(ord.length>2000){
+       showTestError('订单内容单项不能超过 2000 字');
+       return;
+      }
+     }
+     request={
+      input:{
+       direction:testDir,
+       merchant:cleanMerchant?cleanMerchant:null,
+       orderContent:cleanOrders,
+       source:testSource?testSource:null
+      },
+      rule:null
+     };
+    }
+
+    if(testingWithDraft){
+     const validDraftConds=formConditions.filter(c=>c&&c.value&&c.value.trim());
+     if(editingRule||(formName.trim()&&validDraftConds.length>0)){
+      const rawName=formName.trim()||editingRule?.name||'测试草稿';
+      const dir=formDir;
+      const catId=formCategoryId;
+      const dirRules=customRulesByDirection(dir);
+      const order=(editingRule?.id&&editingRule.direction===dir)?editingRule.order:dirRules.length;
+      const condsToUse=validDraftConds.length>0?validDraftConds:(editingRule?.conditions||[]);
+      if(condsToUse.length>0){
+       request.rule={
+        id:editingRule?.id||null,
+        name:rawName,
+        enabled:formEnabled,
+        direction:dir,
+        categoryId:catId,
+        order,
+        matchMode:formMatchMode==='ANY'?'ANY':'ALL',
+        source:formSource?formSource:null,
+        conditions:condsToUse.map(c=>({field:c.field,operator:c.operator,value:c.value.trim()}))
+       };
+      }
+     }
+    }
+
+    if(!native?.previewClassification){
+     showTestError('请在 Android 应用中进行规则测试');
+     return;
+    }
+
+    try{
+     const resRaw=native.previewClassification(JSON.stringify(request));
+     const res=JSON.parse(resRaw);
+     if(!res.ok){
+      testResult=null;
+      testError=res.error||'测试失败，请核对测试输入';
+      renderRulesSheet('#rule-test-error');
+      notify(testError);
+      return;
+     }
+     testError='';
+     testResult=res.preview;
+     renderRulesSheet('#rule-test-result');
+     notify('测试完成');
+    }catch(_){
+     showTestError('测试失败，请重试');
+    }
+   };
+  }
+
+  if(focusSelector){
+   const target=$('sheet-content')?.querySelector(focusSelector);
+   if(target){
+    if(focusSelector==='#rule-test-result'||focusSelector==='#test-result-summary'){
+     const summaryTarget=$('test-result-summary')||target;
+     summaryTarget.scrollIntoView({behavior:'auto',block:'start'});
+    }else if(focusSelector==='#rule-test-error'){
+     target.scrollIntoView({behavior:'auto',block:'nearest'});
+    }else{
+     target.scrollIntoView({behavior:'auto',block:'nearest'});
+    }
+    if(!target.disabled&&typeof target.focus==='function'&&target.tabIndex>=0)target.focus({preventScroll:true});
+   }else if($('rule-name')){$('rule-name').focus({preventScroll:true})}
+  }else if($('sheet-content')&&prevScrollTop){
+   $('sheet-content').scrollTop=prevScrollTop;
+  }
  };
  activeRulesSheetRefresh=(pullNative=false)=>{if(internalMutation)return;if(!$('sheet')?.open||!$('classification-rules-list')){activeRulesSheetRefresh=null;return}captureDraftInputs();if(pullNative)syncFromNative();formCategoryId=ensureValidCategoryId(formDir,formCategoryId);renderRulesSheet()};
  renderRulesSheet('#rule-name');
 }
+
 const categoryAliases=[
  [/停车|泊车/,'square-parking'],[/高速|路桥|过路|通行/,'road'],[/母婴|亲子|育儿|奶粉|宝宝/,'baby'],[/宠物/,'paw'],
  [/咖啡|茶饮|奶茶/,'mug-saucer'],[/餐|美食|饮食|食品|外卖|零食|吃饭/,'utensils'],[/交通|打车|公交|地铁|出行|车费/,'bus'],
