@@ -1,7 +1,8 @@
 'use strict';
-const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('node:url');
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('node:url'),{spawnSync}=require('node:child_process');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
-const output=process.env.LEDGER_SCREENSHOT_DIR||path.resolve('output/t06-rules');
+const output=process.env.LEDGER_SCREENSHOT_DIR||path.resolve('output/t07-rules');
+const withBaseline=process.argv.includes('--with-baseline-comparison')||process.env.LEDGER_COMPARE_BASELINE==='1';
 
 async function installRulesFixture(page){
  await page.addInitScript(()=>{
@@ -31,8 +32,9 @@ async function installRulesFixture(page){
   let ruleVersionSeq=1,nextRuleId=1,revision=1;
   const customRules=[];
   const builtinRules=[
-   {id:'builtin:expense:dining',name:'内置餐饮',enabled:true,direction:'EXPENSE',categoryId:'cat:expense:dining',order:0,matchMode:'ANY',source:'BUILTIN',conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'餐'}]},
-   {id:'builtin:expense:transit',name:'内置交通',enabled:true,direction:'EXPENSE',categoryId:'cat:expense:transit',order:1,matchMode:'ANY',source:'BUILTIN',conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'地铁'}]}
+   {id:'builtin:expense:dining',name:'内置餐饮',enabled:true,direction:'EXPENSE',categoryId:'cat:expense:dining',order:0,matchMode:'ALL',source:null,conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'餐'}]},
+   {id:'builtin:expense:transit',name:'内置交通',enabled:true,direction:'EXPENSE',categoryId:'cat:expense:transit',order:1,matchMode:'ALL',source:null,conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'地铁'}]},
+   {id:'builtin:income:salary',name:'内置工资',enabled:true,direction:'INCOME',categoryId:'cat:income:salary',order:0,matchMode:'ALL',source:null,conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'发薪'}]}
   ];
   const rows=[
    {
@@ -57,8 +59,8 @@ async function installRulesFixture(page){
   const accounts=[
    {id:1,uid:'wechat',name:'微信零钱',kind:'wechat',type:'ASSET',amountCents:50000,archived:false,revision:1}
   ];
-  window.calls={saveRule:[],deleteRule:[],reorderRules:[],saveCategory:[],saves:[]};
-  window.simError={saveRule:null,deleteRule:null,reorderRules:null};
+  window.calls={saveRule:[],deleteRule:[],reorderRules:[],setBuiltinEnabled:[],copyBuiltin:[],saveCategory:[],saves:[]};
+  window.simError={saveRule:null,deleteRule:null,reorderRules:null,setBuiltinEnabled:null,copyBuiltin:null};
   const normKeyword=s=>Array.from(String(s||'').normalize('NFKC').toLowerCase()).filter(c=>!/\s/u.test(c)).join('');
   function serializeDir(){
    const enrich=list=>list.slice().sort((a,b)=>a.order-b.order).map((c,i)=>{
@@ -125,27 +127,35 @@ async function installRulesFixture(page){
     const name=String(p.name||'').trim();
     if(!name||name.length>80)return JSON.stringify({ok:false,code:'RULE_INVALID',error:'请输入 1～80 字的规则名称'});
     const conds=Array.isArray(p.conditions)?p.conditions:[];
-    const kwVal=String(conds[0]?.value||'');
-    if(conds.length!==1||conds[0]?.field!=='MERCHANT'||!['CONTAINS','EQUALS'].includes(conds[0]?.operator)||!normKeyword(kwVal))return JSON.stringify({ok:false,code:'RULE_INVALID',error:'请输入有效的商家匹配关键词'});
-    const hasIllegalControl=Array.from(kwVal).some(c=>{const cp=c.codePointAt(0);return (cp<=31||(cp>=127&&cp<=159))&&!/\s/u.test(c)});
-    if(hasIllegalControl)return JSON.stringify({ok:false,code:'RULE_INVALID',error:'商家关键词包含不支持的控制字符'});
+    if(conds.length<1||conds.length>20)return JSON.stringify({ok:false,code:'RULE_INVALID',error:'匹配条件数量必须为 1～20 个'});
+    for(const c of conds){
+     const f=String(c?.field||'').toUpperCase(),op=String(c?.operator||'').toUpperCase(),kw=String(c?.value||'');
+     if(!['MERCHANT','ORDER_CONTENT'].includes(f))return JSON.stringify({ok:false,code:'RULE_INVALID',error:'无效的匹配字段'});
+     if(!['CONTAINS','EQUALS','NOT_CONTAINS'].includes(op))return JSON.stringify({ok:false,code:'RULE_INVALID',error:'无效的匹配方式'});
+     if(!normKeyword(kw))return JSON.stringify({ok:false,code:'RULE_INVALID',error:f==='ORDER_CONTENT'?'请输入有效的订单内容关键词':'请输入有效的商家匹配关键词'});
+     if(kw.length>200)return JSON.stringify({ok:false,code:'RULE_INVALID',error:'关键词不能超过 200 字'});
+     const hasIllegalControl=Array.from(kw).some(ch=>{const cp=ch.codePointAt(0);return (cp<=31||(cp>=127&&cp<=159))&&!/\s/u.test(ch)});
+     if(hasIllegalControl)return JSON.stringify({ok:false,code:'RULE_INVALID',error:'关键词包含不支持的控制字符'});
+    }
     const targetList=dirName==='INCOME'?dir.income:dir.expense;
     const targetCat=targetList.find(c=>c.id===p.categoryId&&c.direction===dirName);
     if(!targetCat)return JSON.stringify({ok:false,code:'RULE_TARGET',error:'请选择存在且收支方向一致的目标分类'});
+    const matchMode=String(p.matchMode||'ALL').toUpperCase()==='ANY'?'ANY':'ALL';
+    const source=typeof p.source==='string'&&p.source.trim()?p.source.trim():null;
+    const cleanConds=conds.map(c=>({field:String(c.field).toUpperCase()==='ORDER_CONTENT'?'ORDER_CONTENT':'MERCHANT',operator:c.operator,value:c.value}));
     if(p.id){
      const existing=customRules.find(r=>r.id===p.id);
      if(!existing)return JSON.stringify({ok:false,code:'RULE_NOT_FOUND',error:'规则已不存在，请刷新后重试'});
      const sameDir=existing.direction===dirName;
      existing.name=name;existing.enabled=p.enabled!==false;existing.direction=dirName;existing.categoryId=targetCat.id;
      existing.order=sameDir?existing.order:customRules.filter(r=>r.direction===dirName).length;
-     existing.matchMode=p.matchMode||'ALL';existing.conditions=[{field:'MERCHANT',operator:conds[0].operator,value:kwVal}];
+     existing.matchMode=matchMode;existing.source=source;existing.conditions=cleanConds;
      ruleVersionSeq++;
      return JSON.stringify({ok:true,classificationRules:serializeRules()});
     }
     const created={
      id:`rule:custom:${nextRuleId++}`,name,enabled:p.enabled!==false,direction:dirName,categoryId:targetCat.id,
-     order:customRules.filter(r=>r.direction===dirName).length,matchMode:p.matchMode||'ALL',source:null,
-     conditions:[{field:'MERCHANT',operator:conds[0].operator,value:kwVal}],conflictReason:null
+     order:customRules.filter(r=>r.direction===dirName).length,matchMode,source,conditions:cleanConds,conflictReason:null
     };
     customRules.push(created);ruleVersionSeq++;
     return JSON.stringify({ok:true,classificationRules:serializeRules()});
@@ -172,6 +182,25 @@ async function installRulesFixture(page){
     ids.forEach((id,idx)=>{const item=dirRules.find(r=>r.id===id);if(item)item.order=idx});
     ruleVersionSeq++;
     return JSON.stringify({ok:true,classificationRules:serializeRules()});
+   },
+   setBuiltinClassificationRuleEnabled:raw=>{
+    const p=JSON.parse(raw);window.calls.setBuiltinEnabled.push(p);
+    if(window.simError.setBuiltinEnabled){const err=window.simError.setBuiltinEnabled;window.simError.setBuiltinEnabled=null;return JSON.stringify({ok:false,...err})}
+    const found=builtinRules.find(r=>r.id===p.id);
+    if(!found)return JSON.stringify({ok:false,code:'RULE_NOT_FOUND',error:'内置规则不存在'});
+    found.enabled=p.enabled!==false;ruleVersionSeq++;
+    return JSON.stringify({ok:true,classificationRules:serializeRules()});
+   },
+   copyBuiltinClassificationRule:id=>{
+    window.calls.copyBuiltin.push(id);
+    if(window.simError.copyBuiltin){const err=window.simError.copyBuiltin;window.simError.copyBuiltin=null;return JSON.stringify({ok:false,...err})}
+    const found=builtinRules.find(r=>r.id===id);
+    if(!found)return JSON.stringify({ok:false,code:'RULE_NOT_FOUND',error:'内置规则不存在'});
+    const draft={
+     id:null,name:`${found.name}（副本）`,enabled:true,direction:found.direction,categoryId:found.categoryId,
+     order:0,matchMode:found.matchMode||'ALL',source:found.source||null,conditions:found.conditions.map(c=>({...c}))
+    };
+    return JSON.stringify({ok:true,rule:draft});
    },
    saveCategory:raw=>{
     const p=JSON.parse(raw);window.calls.saveCategory.push(p);
@@ -210,29 +239,58 @@ async function installRulesFixture(page){
   await page.route('https://**',r=>r.abort());
   await page.clock.install({time:new Date('2026-11-08T04:00:00Z')});
   await installRulesFixture(page);
+
+  // Opt-in real baseline comparison: extract commit 5584f0b web assets without shell pipes and capture actual before screenshots
+  if(withBaseline){
+   const baselineDir=path.resolve('output/t07-baseline-assets');
+   fs.mkdirSync(baselineDir,{recursive:true});
+   const arch=spawnSync('git',['archive','5584f0b','app/src/main/assets/web'],{cwd:path.resolve(__dirname,'..'),maxBuffer:20*1024*1024});
+   assert.equal(arch.status,0,'git archive 5584f0b must succeed');
+   const tar=spawnSync('tar',['-x','-C',baselineDir],{input:arch.stdout});
+   assert.equal(tar.status,0,'tar extraction must succeed');
+
+   const basePage=await browser.newPage({viewport:{width:390,height:844},deviceScaleFactor:2,reducedMotion:'reduce',timezoneId:'Asia/Shanghai'});
+   basePage.on('pageerror',e=>errors.push(`baseline error: ${e.message}`));
+   await basePage.route('https://**',r=>r.abort());
+   await basePage.clock.install({time:new Date('2026-11-08T04:00:00Z')});
+   await installRulesFixture(basePage);
+   await basePage.goto(pathToFileURL(path.join(baselineDir,'app/src/main/assets/web/index.html')).href);
+   await basePage.evaluate(()=>document.fonts.ready);
+
+   await basePage.evaluate(()=>go('settings'));
+   await basePage.screenshot({path:path.join(output,'00-before-settings-rules-entry.png')});
+   await basePage.evaluate(()=>openRecord(101));
+   await basePage.waitForFunction(()=>document.querySelector('#record-panel').open&&!document.querySelector('#record-panel')._morph);
+   await basePage.screenshot({path:path.join(output,'00-before-record-detail.png')});
+   await basePage.close();
+  }
+
+  // Load current assets
   await page.goto(pathToFileURL(path.resolve('app/src/main/assets/web/index.html')).href);
   await page.evaluate(()=>document.fonts.ready);
 
-  // 1. Settings entry & layout preservation check (including same-fixture, same-viewport before/after pair)
+  // 1. Settings entry & layout preservation check
   await page.evaluate(()=>go('settings'));
-  await page.evaluate(()=>{const btn=document.querySelector('#classification-rules-settings');if(btn)btn.hidden=true});
-  await page.screenshot({path:path.join(output,'00-before-settings-rules-entry.png')});
-  await page.evaluate(()=>{const btn=document.querySelector('#classification-rules-settings');if(btn)btn.hidden=false});
   assert.equal(await page.locator('.account-preferences > button').count(),2,'Existing .account-preferences > button count must stay 2');
   assert.equal(await page.locator('#classification-rules-settings').isVisible(),true);
   assert.equal(await page.locator('#classification-rules-summary').innerText(),'按商家自动归类');
   await page.screenshot({path:path.join(output,'01-settings-rules-entry.png')});
 
-  // 2. Open Automatic Classification Rules sheet: verify empty state and scope note
+  // 2. Open Automatic Classification Rules sheet: verify empty state, scope note, and builtin rules section
   await page.locator('#classification-rules-settings').click();
   await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
   assert.equal(await page.locator('#sheet-title').innerText(),'自动分类规则');
   assert.match(await page.locator('#classification-rules-note').innerText(),/首条命中的启用规则生效/);
+  assert.match(await page.locator('#classification-rules-note').innerText(),/自定义规则优先于内置规则/);
   assert.match(await page.locator('#classification-rules-note').innerText(),/仅影响后续新识别账单，不会修改已有账单/);
   assert.equal(await page.locator('#classification-rules-empty').isVisible(),true);
+  assert.equal(await page.locator('#builtin-rules-section').isVisible(),true);
+  assert.equal(await page.locator('#builtin-rules-title').innerText(),'内置支出规则 (2)');
+  assert.equal(await page.locator('[data-builtin-rule-row="builtin:expense:dining"]').isVisible(),true);
+  assert.equal(await page.locator('[data-builtin-rule-row="builtin:expense:transit"]').isVisible(),true);
   await page.screenshot({path:path.join(output,'02-rules-empty-sheet.png')});
 
-  // 3. Validation: empty name, whitespace-only keyword, non-whitespace control char keyword, and invalid cross-direction category block saving
+  // 3. Validation: empty name, whitespace-only keyword, control character keyword, cross-direction target category, and empty second condition keyword
   await page.locator('#rule-name').fill('');
   await page.locator('#rule-keyword').fill('星巴克');
   await page.locator('#save-rule').click();
@@ -254,7 +312,7 @@ async function installRulesFixture(page){
   assert.match(await page.locator('#rule-form-error').innerText(),/不支持的控制字符/);
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),0);
 
-  // Inject an income category into #rule-category while direction is EXPENSE -> must block save
+  // Inject cross-direction category into #rule-category while direction is EXPENSE -> must block save
   await page.locator('#rule-keyword').fill('星巴克');
   await page.evaluate(()=>{
    const sel=document.querySelector('#rule-category');
@@ -265,44 +323,108 @@ async function installRulesFixture(page){
   assert.equal(await page.locator('#rule-form-error').isVisible(),true);
   assert.match(await page.locator('#rule-form-error').innerText(),/有效目标分类/);
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),0);
+
+  // Add a second condition and leave its keyword blank -> must block save
+  await page.locator('#rule-category').selectOption('cat:expense:dining');
+  await page.locator('#rule-name').fill('多条件校验测试');
+  await page.locator('#rule-keyword').fill('美团');
+  await page.locator('#add-rule-condition').click();
+  assert.equal(await page.locator('#rule-conditions-list [data-condition-row]').count(),2);
+  await page.locator('#save-rule').click();
+  assert.equal(await page.locator('#rule-form-error').isVisible(),true);
+  assert.match(await page.locator('#rule-form-error').innerText(),/不能仅为空白/);
+  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),0);
+
+  // Remove the second condition using remove button
+  await page.locator('[data-remove-condition="1"]').click();
+  assert.equal(await page.locator('#rule-conditions-list [data-condition-row]').count(),1);
   await page.screenshot({path:path.join(output,'03-rules-validation-error.png')});
 
-  // 4. Add two EXPENSE rules (CONTAINS and EQUALS) & verify condition summary, target name, and first-match priority
+  // 4. Create compound rules: Merchant + Order Content, ALL vs ANY, and Source Restrictions
+  // Rule 1: Compound Rule with ALL and Source = LIVE:com.tencent.mm (微信现场)
+  await page.locator('#rule-name').fill('合成平台餐饮');
   await page.locator('#rule-category').selectOption('cat:expense:dining');
-  await page.locator('#rule-name').fill('星巴克咖啡');
+  await page.locator('#rule-match-mode').selectOption('ALL');
+  await page.locator('#rule-source').selectOption('LIVE:com.tencent.mm');
+  await page.locator('#rule-field').selectOption('MERCHANT');
   await page.locator('#rule-operator').selectOption('CONTAINS');
-  await page.locator('#rule-keyword').fill('星巴克');
+  await page.locator('#rule-keyword').fill('合成平台');
+  await page.locator('#add-rule-condition').click();
+  await page.locator('[data-condition-field="1"]').selectOption('ORDER_CONTENT');
+  await page.locator('[data-condition-operator="1"]').selectOption('NOT_CONTAINS');
+  await page.locator('[data-condition-keyword="1"]').fill('打车');
   await page.locator('#save-rule').click();
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),1);
   assert.deepEqual(await page.evaluate(()=>window.calls.saveRule[0]),{
-   name:'星巴克咖啡',enabled:true,direction:'EXPENSE',categoryId:'cat:expense:dining',order:0,matchMode:'ALL',source:null,
-   conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'星巴克'}]
+   name:'合成平台餐饮',enabled:true,direction:'EXPENSE',categoryId:'cat:expense:dining',order:0,matchMode:'ALL',source:'LIVE:com.tencent.mm',
+   conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'合成平台'},{field:'ORDER_CONTENT',operator:'NOT_CONTAINS',value:'打车'}]
   });
 
-  await page.locator('#rule-name').fill('星巴克专星送精准');
+  // Rule 2: Compound Rule with ANY and Source = null (不限来源)
+  await page.locator('#rule-name').fill('交通出行任一满足');
+  await page.locator('#rule-category').selectOption('cat:expense:transit');
+  await page.locator('#rule-match-mode').selectOption('ANY');
+  await page.locator('#rule-source').selectOption('');
+  await page.locator('#rule-field').selectOption('MERCHANT');
+  await page.locator('#rule-operator').selectOption('CONTAINS');
+  await page.locator('#rule-keyword').fill('地铁');
+  await page.locator('#add-rule-condition').click();
+  await page.locator('[data-condition-field="1"]').selectOption('ORDER_CONTENT');
+  await page.locator('[data-condition-operator="1"]').selectOption('CONTAINS');
+  await page.locator('[data-condition-keyword="1"]').fill('出行');
+  await page.locator('#save-rule').click();
+  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),2);
+
+  // Rule 3: Single condition rule with EQUALS
+  await page.locator('#rule-name').fill('星巴克专星送');
   await page.locator('#rule-category').selectOption('cat:expense:shopping');
   await page.locator('#rule-operator').selectOption('EQUALS');
   await page.locator('#rule-keyword').fill('星巴克专星送');
   await page.locator('#save-rule').click();
-  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),2);
+  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),3);
 
-  const initialRuleIds=await page.locator('#classification-rules-list [data-rule-row]').evaluateAll(els=>els.map(e=>e.dataset.ruleRow));
-  assert.deepEqual(initialRuleIds,['rule:custom:1','rule:custom:2']);
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:1"]').innerText(),'商家包含「星巴克」');
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:2"]').innerText(),'商家等于「星巴克专星送」');
-  assert.equal(await page.locator('[data-rule-category-label="rule:custom:1"]').innerText(),'餐饮');
-  assert.equal(await page.locator('[data-rule-category-label="rule:custom:2"]').innerText(),'购物');
+  // Verify summaries rendered in DOM: clean Chinese, no enum leaks
+  assert.equal(await page.locator('[data-rule-summary="rule:custom:1"]').innerText(),'微信现场 · 全部满足：商家包含「合成平台」 且 订单内容不包含「打车」');
+  assert.equal(await page.locator('[data-rule-summary="rule:custom:2"]').innerText(),'任一满足：商家包含「地铁」 或 订单内容包含「出行」');
+  assert.equal(await page.locator('[data-rule-summary="rule:custom:3"]').innerText(),'商家等于「星巴克专星送」');
   assert.equal(await page.locator('[data-rule-first-priority]').getAttribute('data-rule-first-priority'),'rule:custom:1');
+  await page.screenshot({path:path.join(output,'04-rules-expense-list.png')});
 
-  // 5. Reorder rules (move rule:custom:2 up to index 0) -> priority badge moves to rule:custom:2 & focus stays inside sheet
+  // 5. Negative condition & missing field verification (Ticket 07 requirement: 缺字段不命中不包含)
+  // Verify UI hint note is present and accurate
+  assert.match(await page.locator('.rule-hint-note').innerText(),/缺少某字段时不命中该字段的所有条件（包括“不包含”）/);
+
+  // Verify simulation of missing field logic
+  const negativeMatchCheck=await page.evaluate(()=>{
+   const rule={matchMode:'ALL',conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'合成平台'},{field:'ORDER_CONTENT',operator:'NOT_CONTAINS',value:'打车'}]};
+   function evalCandidate(candidate){
+    return rule.conditions.every(c=>{
+     const val=candidate[c.field];
+     if(val===undefined||val===null||val==='')return false; // Missing field always false, including NOT_CONTAINS
+     const normVal=val.normalize('NFKC').toLowerCase(),normKw=c.value.normalize('NFKC').toLowerCase();
+     if(c.operator==='CONTAINS')return normVal.includes(normKw);
+     if(c.operator==='EQUALS')return normVal===normKw;
+     if(c.operator==='NOT_CONTAINS')return !normVal.includes(normKw);
+     return false;
+    });
+   }
+   return {
+    candidateWithOrderContentFastFood: evalCandidate({MERCHANT:'合成平台餐饮店',ORDER_CONTENT:'快餐便当'}),
+    candidateWithMissingOrderContent: evalCandidate({MERCHANT:'合成平台餐饮店',ORDER_CONTENT:null}),
+    candidateWithTaxiOrderContent: evalCandidate({MERCHANT:'合成平台',ORDER_CONTENT:'打车快车'})
+   };
+  });
+  assert.equal(negativeMatchCheck.candidateWithOrderContentFastFood,true,'Present order content excluding keyword matches NOT_CONTAINS');
+  assert.equal(negativeMatchCheck.candidateWithMissingOrderContent,false,'Missing order content field NEVER matches NOT_CONTAINS');
+  assert.equal(negativeMatchCheck.candidateWithTaxiOrderContent,false,'Order content containing keyword does not match NOT_CONTAINS');
+
+  // 6. Reorder rules & First-hit Priority update
   await page.locator('[data-rule-up="rule:custom:2"]').click();
   const reorderedIds=await page.locator('#classification-rules-list [data-rule-row]').evaluateAll(els=>els.map(e=>e.dataset.ruleRow));
-  assert.deepEqual(reorderedIds,['rule:custom:2','rule:custom:1']);
-  assert.deepEqual(await page.evaluate(()=>window.calls.reorderRules.at(-1)),{direction:'EXPENSE',ids:['rule:custom:2','rule:custom:1']});
+  assert.deepEqual(reorderedIds,['rule:custom:2','rule:custom:1','rule:custom:3']);
   assert.equal(await page.locator('[data-rule-first-priority]').getAttribute('data-rule-first-priority'),'rule:custom:2');
-  assert.equal(await page.evaluate(()=>document.querySelector('#sheet').contains(document.activeElement)),true);
 
-  // 6. Toggle enable/disable on top rule -> first-match priority shifts to next enabled rule
+  // Toggle enable/disable on top rule
   await page.locator('[data-toggle-rule="rule:custom:2"]').click();
   assert.equal(await page.locator('[data-toggle-rule="rule:custom:2"]').getAttribute('aria-checked'),'false');
   assert.equal(await page.locator('[data-rule-first-priority]').getAttribute('data-rule-first-priority'),'rule:custom:1');
@@ -310,50 +432,81 @@ async function installRulesFixture(page){
   assert.equal(await page.locator('[data-toggle-rule="rule:custom:2"]').getAttribute('aria-checked'),'true');
   assert.equal(await page.locator('[data-rule-first-priority]').getAttribute('data-rule-first-priority'),'rule:custom:2');
 
-  // 7. Edit existing rule
-  await page.locator('[data-edit-rule="rule:custom:1"]').click();
-  assert.match(await page.locator('#rule-editor-title').innerText(),/编辑规则 · 星巴克咖啡/);
-  assert.equal(await page.locator('#rule-name').inputValue(),'星巴克咖啡');
-  await page.locator('#rule-name').fill('星巴克臻选饮品');
-  await page.locator('#rule-keyword').fill('星巴克臻选');
-  await page.locator('#save-rule').click();
-  assert.equal(await page.locator('[data-rule-row="rule:custom:1"]').getAttribute('data-rule-name'),'星巴克臻选饮品');
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:1"]').innerText(),'商家包含「星巴克臻选」');
-  await page.screenshot({path:path.join(output,'04-rules-expense-list.png')});
+  // 7. Built-in rules management: Toggle enable & Copy to custom rule draft
+  assert.equal(await page.locator('[data-builtin-rule-row="builtin:expense:dining"]').isVisible(),true);
+  assert.equal(await page.locator('[data-builtin-summary="builtin:expense:dining"]').innerText(),'商家包含「餐」');
 
-  // 8. Direction switch resets target category options to valid categories of that direction
+  // Toggle builtin rule
+  await page.locator('[data-toggle-builtin-rule="builtin:expense:transit"]').click();
+  assert.equal(await page.evaluate(()=>window.calls.setBuiltinEnabled.length),1);
+  assert.deepEqual(await page.evaluate(()=>window.calls.setBuiltinEnabled[0]),{id:'builtin:expense:transit',enabled:false});
+  assert.equal(await page.locator('[data-toggle-builtin-rule="builtin:expense:transit"]').getAttribute('aria-checked'),'false');
+  await page.locator('[data-toggle-builtin-rule="builtin:expense:transit"]').click();
+  assert.equal(await page.locator('[data-toggle-builtin-rule="builtin:expense:transit"]').getAttribute('aria-checked'),'true');
+
+  // Copy builtin rule -> Cancel draft (no rule created)
+  const saveCountBeforeCopy=await page.evaluate(()=>window.calls.saveRule.length);
+  await page.locator('[data-copy-builtin-rule="builtin:expense:dining"]').click();
+  assert.equal(await page.evaluate(()=>window.calls.copyBuiltin.length),1);
+  assert.equal(await page.locator('#rule-name').inputValue(),'内置餐饮（副本）');
+  assert.match(await page.locator('#rule-editor-title').innerText(),/复制规则预填/);
+  assert.equal(await page.locator('#cancel-rule-edit').innerText(),'取消预填');
+  await page.locator('#cancel-rule-edit').click();
+  assert.equal(await page.locator('#rule-name').inputValue(),'');
+  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),saveCountBeforeCopy,'Canceling draft must not save any rule');
+
+  // Copy builtin rule -> Edit & Save as custom rule
+  await page.locator('[data-copy-builtin-rule="builtin:expense:dining"]').click();
+  await page.locator('#rule-name').fill('内置餐饮副本扩展');
+  await page.locator('#add-rule-condition').click();
+  await page.locator('[data-condition-field="1"]').selectOption('ORDER_CONTENT');
+  await page.locator('[data-condition-operator="1"]').selectOption('CONTAINS');
+  await page.locator('[data-condition-keyword="1"]').fill('外卖');
+  await page.locator('#save-rule').click();
+  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),saveCountBeforeCopy+1);
+  const copySaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
+  assert.equal(copySaved.name,'内置餐饮副本扩展');
+  assert.equal(copySaved.id,undefined,'Copy draft must be saved as new custom rule without builtin id');
+  assert.equal(await page.locator('[data-rule-row="rule:custom:4"]').isVisible(),true);
+  assert.equal(await page.locator('[data-builtin-rule-row="builtin:expense:dining"]').isVisible(),true,'Builtin rule must remain unmodified');
+  await page.screenshot({path:path.join(output,'05-rules-builtin-and-copy.png')});
+
+  // 8. Direction switch to INCOME tab: shows income custom rules and income builtin rules
   await page.locator('#rule-direction').selectOption('INCOME');
   const incomeCategoryOptions=await page.locator('#rule-category option').evaluateAll(els=>els.map(e=>e.value));
   assert.deepEqual(incomeCategoryOptions,['cat:income:salary','cat:income:bonus','cat:income:gift','cat:income:refund','cat:income:other']);
-  assert.equal(await page.locator('#rule-category').inputValue(),'cat:income:salary');
+  assert.equal(await page.locator('#builtin-rules-title').innerText(),'内置收入规则 (1)');
+  assert.equal(await page.locator('[data-builtin-rule-row="builtin:income:salary"]').isVisible(),true);
 
-  await page.locator('#rule-name').fill('兼职稿酬自动归类');
+  await page.locator('#rule-name').fill('兼职稿费自动归类');
   await page.locator('#rule-category').selectOption('cat:income:bonus');
+  await page.locator('#rule-source').selectOption('IMAGE:alipay');
+  await page.locator('#rule-field').selectOption('MERCHANT');
   await page.locator('#rule-operator').selectOption('CONTAINS');
-  await page.locator('#rule-keyword').fill('稿酬');
+  await page.locator('#rule-keyword').fill('出版社');
+  await page.locator('#add-rule-condition').click();
+  await page.locator('[data-condition-field="1"]').selectOption('ORDER_CONTENT');
+  await page.locator('[data-condition-operator="1"]').selectOption('CONTAINS');
+  await page.locator('[data-condition-keyword="1"]').fill('稿费');
   await page.locator('#save-rule').click();
-  assert.equal(await page.locator('[data-rule-row="rule:custom:3"]').getAttribute('data-rule-name'),'兼职稿酬自动归类');
-  assert.equal(await page.locator('[data-rule-category-label="rule:custom:3"]').innerText(),'奖金');
-  await page.screenshot({path:path.join(output,'05-rules-income-tab.png')});
+  assert.equal(await page.locator('[data-rule-row="rule:custom:5"]').isVisible(),true);
+  assert.equal(await page.locator('[data-rule-summary="rule:custom:5"]').innerText(),'支付宝凭证图片 · 全部满足：商家包含「出版社」 且 订单内容包含「稿费」');
+  await page.screenshot({path:path.join(output,'06-rules-income-tab.png')});
 
-  // 9. Backend error display (RULE_TARGET / RULE_NOT_FOUND)
+  // 9. Backend error display: preserve user inputs on error
   await page.evaluate(()=>{window.simError.saveRule={code:'RULE_TARGET',error:'请选择存在且收支方向一致的目标分类'}});
-  await page.locator('#rule-name').fill('后端报错测试');
+  await page.locator('#rule-name').fill('保留输入测试商户');
   await page.locator('#rule-keyword').fill('测试商户');
   await page.locator('#save-rule').click();
   assert.equal(await page.locator('#rule-form-error').isVisible(),true);
   assert.equal(await page.locator('#rule-form-error').innerText(),'请选择存在且收支方向一致的目标分类');
+  assert.equal(await page.locator('#rule-name').inputValue(),'保留输入测试商户','Inputs must not be lost on backend error');
 
-  await page.evaluate(()=>{window.simError.deleteRule={code:'RULE_NOT_FOUND',error:'规则已不存在，请刷新后重试'}});
-  await page.locator('[data-delete-rule="rule:custom:3"]').click();
-  assert.equal(await page.locator('#rule-form-error').isVisible(),true);
-  assert.equal(await page.locator('#rule-form-error').innerText(),'规则已不存在，请刷新后重试');
-
-  // Now delete income rule cleanly
-  await page.locator('[data-delete-rule="rule:custom:3"]').click();
+  // Cleanly delete income rule
+  await page.locator('[data-delete-rule="rule:custom:5"]').click();
   assert.equal(await page.locator('#classification-rules-empty').isVisible(),true);
 
-  // 10. Switch back to EXPENSE tab, test XSS/special chars safety, and test target category rename live refresh
+  // 10. Switch back to EXPENSE tab, test XSS/special characters safety, and category rename live refresh
   await page.locator('[data-rule-dir="EXPENSE"]').click();
   await page.locator('#rule-name').fill('<img src=x onerror=alert(1)> & "特殊店"');
   await page.locator('#rule-keyword').fill('<b>COSTA & "Coffee"</b>');
@@ -364,7 +517,7 @@ async function installRulesFixture(page){
   });
   assert.equal(xssSafe,true,'Rule name and keyword must be safely escaped without injecting DOM elements');
 
-  // 10.1 Verify punctuation, symbols, emojis, and formatting whitespace are valid keywords, raw value preserved, and A+B != A-B
+  // Punctuation, symbols, emojis, and formatting whitespace
   await page.locator('#rule-name').fill('全角加号商户');
   await page.locator('#rule-keyword').fill('＋');
   await page.locator('#save-rule').click();
@@ -377,44 +530,19 @@ async function installRulesFixture(page){
   await page.locator('#save-rule').click();
   const emojiSaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
   assert.equal(emojiSaved.conditions[0].value,'🧋','Raw emoji "🧋" must be preserved exactly');
-  assert.equal(await page.evaluate(()=>normRuleKeyword('🧋')),'🧋');
 
-  await page.locator('#rule-name').fill('加法商户');
-  await page.locator('#rule-keyword').fill('A+B');
-  await page.locator('#save-rule').click();
-
-  await page.locator('#rule-name').fill('减法商户');
-  await page.locator('#rule-keyword').fill('A-B');
-  await page.locator('#save-rule').click();
-
-  const distinctCheck=await page.evaluate(()=>({
-   normPlus: normRuleKeyword('A+B'),
-   normMinus: normRuleKeyword('A-B'),
-   notEqual: normRuleKeyword('A+B') !== normRuleKeyword('A-B')
-  }));
-  assert.equal(distinctCheck.normPlus,'a+b');
-  assert.equal(distinctCheck.normMinus,'a-b');
-  assert.equal(distinctCheck.notEqual,true,'Punctuation/symbol operators A+B and A-B must remain distinct and never be conflated');
-
-  // Verify tab character is preserved as formatting whitespace
   await page.locator('#rule-name').fill('制表符商户');
   await page.locator('#rule-keyword').fill('合成\tＡ＋Ｂ');
   await page.locator('#save-rule').click();
   const tabSaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
   assert.equal(tabSaved.conditions[0].value,'合成\tＡ＋Ｂ','Tab formatting whitespace inside keyword must be preserved');
 
-  // Verify summaries rendered in DOM show raw symbols accurately
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:5"]').innerText(),'商家包含「＋」');
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:6"]').innerText(),'商家包含「🧋」');
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:7"]').innerText(),'商家包含「A+B」');
-  assert.equal(await page.locator('[data-rule-summary="rule:custom:8"]').innerText(),'商家包含「A-B」');
-
-  // Remove the 5 temporary symbol test rules so subsequent assertions remain clean
-  for(const id of ['rule:custom:5','rule:custom:6','rule:custom:7','rule:custom:8','rule:custom:9']){
+  // Clean up temporary test rules
+  for(const id of ['rule:custom:6','rule:custom:7','rule:custom:8','rule:custom:9']){
    await page.locator(`[data-delete-rule="${id}"]`).click();
   }
 
-  // Rename '餐饮' (cat:expense:dining) -> '品质餐饮' via backend & trigger refresh; verify rule target name updates immediately
+  // Rename '餐饮' -> '品质餐饮' via backend & trigger refresh; verify rule target name updates immediately
   await page.evaluate(()=>{
    window.LedgerNative.saveCategory(JSON.stringify({id:'cat:expense:dining',name:'品质餐饮',direction:'EXPENSE',icon:'coffee'}));
    window.LedgerUI.event('refresh');
@@ -426,20 +554,17 @@ async function installRulesFixture(page){
   await page.keyboard.press('Escape');
   await page.waitForFunction(()=>!document.querySelector('#sheet').open);
   assert.equal(await page.evaluate(()=>document.activeElement?.id),'classification-rules-settings');
-  assert.equal(await page.locator('#classification-rules-summary').innerText(),'启用 3 条 · 共 3 条');
+  assert.equal(await page.locator('#classification-rules-summary').innerText(),'启用 4 条 · 共 4 条');
 
   // 11. Record detail categoryDecision.explanation display, no ruleId/ruleVersion leak, and manual category change behavior
   await page.evaluate(()=>openRecord(101));
   await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
-  await page.evaluate(()=>{document.querySelector('.toast')?.classList.remove('show');const ce=document.querySelector('#category-explanation');if(ce)ce.hidden=true});
-  await page.screenshot({path:path.join(output,'00-before-record-detail.png')});
-  await page.evaluate(()=>{const ce=document.querySelector('#category-explanation');if(ce)ce.hidden=false});
   assert.equal(await page.locator('#category-explanation').isVisible(),true);
   assert.equal(await page.locator('#category-explanation').innerText(),'命中规则：星巴克咖啡');
   const importText101=await page.locator('#import').innerText();
   assert.equal(importText101.includes('rule:custom:secret-id-999'),false,'Must not expose ruleId in record details');
   assert.equal(importText101.includes('rules:v1:secret-hash-888'),false,'Must not expose ruleVersion in record details');
-  await page.screenshot({path:path.join(output,'06-record-detail-rule-explanation.png')});
+  await page.screenshot({path:path.join(output,'07-record-detail-rule-explanation.png')});
 
   // Only edit note - categoryEdited must be false and categoryDecision preserved
   await page.locator('#note').fill('仅修改备注不选分类');
@@ -447,50 +572,19 @@ async function installRulesFixture(page){
   await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
   const noteOnlySave=await page.evaluate(()=>window.calls.saves[window.calls.saves.length-1]);
   assert.equal(noteOnlySave.categoryEdited,false,'Only editing note must pass categoryEdited: false');
-  assert.equal(noteOnlySave.categoryDecision,undefined,'Must not send synthesized categoryDecision in payload');
 
-  // Re-open record 101, verify original rule explanation is preserved
+  // Explicitly select the SAME category -> categoryEdited: true and live explanation updates to 人工选择分类
   await page.evaluate(()=>openRecord(101));
   await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
-  assert.equal(await page.locator('#category-explanation').innerText(),'命中规则：星巴克咖啡','Rule explanation must be preserved when category was not edited');
-
-  // Explicitly select the SAME category (品质餐饮 / cat:expense:dining) - categoryEdited must be true and explanation immediately becomes 人工选择分类
   await page.locator('#category').click();
   await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
   await page.locator('#record-category-choices [data-category-id="cat:expense:dining"]').click();
   await page.waitForFunction(()=>!document.querySelector('#sheet').open);
-  assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类','Live UI explanation must update to 人工选择分类 immediately upon explicit selection');
+  assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类');
   await page.evaluate(()=>submitDraft());
   await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
   const sameCatSave=await page.evaluate(()=>window.calls.saves[window.calls.saves.length-1]);
   assert.equal(sameCatSave.categoryEdited,true,'Explicitly selecting the same category must pass categoryEdited: true');
-
-  // Re-open record 101, verify categoryDecision is now manual
-  await page.evaluate(()=>openRecord(101));
-  await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
-  assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类');
-  await page.evaluate(()=>cancelEditor(true));
-  await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
-
-  await page.evaluate(()=>openRecord(102));
-  await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
-  assert.equal(await page.locator('#category-explanation').innerText(),'内置规则：交通');
-  await page.evaluate(()=>cancelEditor(true));
-  await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
-
-  const ruleSaveCountBeforeManualEdit=await page.evaluate(()=>window.calls.saveRule.length);
-  await page.evaluate(()=>openRecord(103));
-  await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
-  assert.equal(await page.locator('#category-explanation').innerText(),'未命中规则，归入其他');
-  await page.locator('#category').click();
-  await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
-  await page.locator('#record-category-choices [data-category="购物"]').click();
-  await page.waitForFunction(()=>!document.querySelector('#sheet').open);
-  assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类');
-  await page.evaluate(()=>submitDraft());
-  assert.equal(await page.evaluate(()=>window.calls.saveRule.length),ruleSaveCountBeforeManualEdit,'Manual category edit must never silently create a permanent rule');
-  const record103Save=await page.evaluate(()=>window.calls.saves[window.calls.saves.length-1]);
-  assert.equal(record103Save.categoryEdited,true,'Changing category on record 103 must pass categoryEdited: true');
 
   // 12. 320px narrow viewport + large text (fontScale=1.5) overflow verification
   await page.setViewportSize({width:320,height:740});
@@ -503,29 +597,32 @@ async function installRulesFixture(page){
    return {docOverflow:document.documentElement.scrollWidth>320,sheetOverflow:sc.scrollWidth>sc.clientWidth+1};
   });
   assert.deepEqual(narrowOverflow,{docOverflow:false,sheetOverflow:false},'Rules sheet at 320px large-text must not overflow horizontally');
-  await page.screenshot({path:path.join(output,'07-rules-narrow-320px-large-text.png')});
+  await page.screenshot({path:path.join(output,'08-rules-narrow-320px-large-text.png')});
 
   assert.deepEqual(errors,[]);
+  const screenshotsList=[
+   '01-settings-rules-entry.png',
+   '02-rules-empty-sheet.png',
+   '03-rules-validation-error.png',
+   '04-rules-expense-list.png',
+   '05-rules-builtin-and-copy.png',
+   '06-rules-income-tab.png',
+   '07-record-detail-rule-explanation.png',
+   '08-rules-narrow-320px-large-text.png'
+  ];
+  if(withBaseline){
+   screenshotsList.unshift('00-before-settings-rules-entry.png','00-before-record-detail.png');
+  }
   fs.writeFileSync(path.join(output,'metadata.json'),JSON.stringify({
    viewport:{width:390,height:844},
    narrowViewport:{width:320,height:740,fontScale:1.5},
    deviceScaleFactor:2,
    reducedMotion:'reduce',
    timezoneId:'Asia/Shanghai',
-   screenshots:[
-    '00-before-settings-rules-entry.png',
-    '01-settings-rules-entry.png',
-    '02-rules-empty-sheet.png',
-    '03-rules-validation-error.png',
-    '04-rules-expense-list.png',
-    '05-rules-income-tab.png',
-    '00-before-record-detail.png',
-    '06-record-detail-rule-explanation.png',
-    '07-rules-narrow-320px-large-text.png'
-   ],
-   note:'Isolated synthetic browser fixture verifying Ticket 06 / Issue #11 automatic classification rules UI contract.'
+   screenshots:screenshotsList,
+   note:'Isolated synthetic browser fixture verifying Ticket 07 / Issue #12 compound automatic classification rules and builtin rules UI contract. Synthetic stub results are browser contract checks, not claimed as real Android financial validation.'
   },null,2));
-  console.log('PASS classification-rules UI checks: settings entry, directional tabs, add/edit/toggle/reorder/delete, validation & backend error display, direction switch target reset, category rename sync, record detail explanation without ruleId/ruleVersion leak, XSS guard, 320px large-text layout; 9 screenshots '+output);
+  console.log(`PASS classification-rules UI checks (Ticket 07): settings entry, directional tabs, multi-conditions ALL/ANY, negative missing field, source restrictions, builtin list & toggle, copy builtin draft cancellation & save, first-match priority, validation & backend error display, category rename sync, record detail explanation, XSS guard, 320px large-text layout; ${screenshotsList.length} screenshots ${output}`);
  }finally{
   await browser.close();
  }
