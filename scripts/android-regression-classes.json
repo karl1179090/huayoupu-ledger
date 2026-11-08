@@ -85,7 +85,10 @@
     "net.ankio.ledger.data.RecognitionTimeProcessRestartTest",
     "net.ankio.ledger.DateOnlyCalendarBridgeTest",
     "net.ankio.ledger.data.CompoundClassificationTest",
-    "net.ankio.ledger.CompoundClassificationBridgeTest"
+    "net.ankio.ledger.CompoundClassificationBridgeTest",
+    "net.ankio.ledger.CategoryDeletionBridgeTest",
+    "net.ankio.ledger.data.CategoryReplacementTest",
+    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest"
   ],
   "api34": [
     "net.ankio.ledger.ShakeWhitelistTest",
@@ -123,7 +126,10 @@
     "net.ankio.ledger.data.RecognitionTimeProcessRestartTest",
     "net.ankio.ledger.DateOnlyCalendarBridgeTest",
     "net.ankio.ledger.data.CompoundClassificationTest",
-    "net.ankio.ledger.CompoundClassificationBridgeTest"
+    "net.ankio.ledger.CompoundClassificationBridgeTest",
+    "net.ankio.ledger.CategoryDeletionBridgeTest",
+    "net.ankio.ledger.data.CategoryReplacementTest",
+    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest"
   ],
   "api36": [
     "net.ankio.ledger.widget.ExpenseWidgetTest",
