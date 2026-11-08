@@ -74,7 +74,9 @@
     "net.ankio.ledger.data.HistoricalMigrationFlowTest",
     "net.ankio.ledger.data.CategoryDirectoryTest",
     "net.ankio.ledger.CategoryManagementBridgeTest",
-    "net.ankio.ledger.data.CategoryMigrationTest"
+    "net.ankio.ledger.data.CategoryMigrationTest",
+    "net.ankio.ledger.ReceiptEvidenceAcceptanceTest",
+    "net.ankio.ledger.data.ReceiptEvidencePersistenceTest"
   ],
   "api34": [
     "net.ankio.ledger.ShakeWhitelistTest",
@@ -101,7 +103,9 @@
     "net.ankio.ledger.data.HistoricalMigrationFlowTest",
     "net.ankio.ledger.data.CategoryDirectoryTest",
     "net.ankio.ledger.CategoryManagementBridgeTest",
-    "net.ankio.ledger.data.CategoryMigrationTest"
+    "net.ankio.ledger.data.CategoryMigrationTest",
+    "net.ankio.ledger.ReceiptEvidenceAcceptanceTest",
+    "net.ankio.ledger.data.ReceiptEvidencePersistenceTest"
   ],
   "api36": [
     "net.ankio.ledger.widget.ExpenseWidgetTest",

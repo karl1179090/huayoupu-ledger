@@ -147,6 +147,7 @@ object LedgerBackup {
             put("identities",JSONArray(TransactionIdentities.encode(r.identities)))
             r.bill.paymentMethod?.let { put("paymentMethod",WalletBackupCodec.evidenceJson(it)) }
             r.bill.standaloneRefund?.let { put("standaloneRefund",WalletBackupCodec.standaloneJson(it)) }
+            r.bill.receipt?.let { put("receipt",ReceiptEvidenceCodec.json(it)) }
             r.bill.refund?.let { refund -> put("refund",JSONObject().put("provider",refund.provider)
                 .put("originalAmountCents",refund.originalAmountCents).put("refundedCents",refund.refundedCents)
                 .put("mode",refund.mode).put("refundId",refund.refundId?:JSONObject.NULL)) }
@@ -179,7 +180,7 @@ object LedgerBackup {
             toReference=d.toReference ?: d.toAccountUid?.let { WalletFileReference(it).json() },
             recognitionEvidence=d.recognitionEvidence ?: record.bill.transfer?.let(TransferEvidenceCodec::encode)) } },records.associate { it.uid to emptyMap() })
         WalletBackupCodec.validate(records,accounts,snapshot)
-        return JSONObject().put("format", "simple-ledger").put("version", 6).put("wallets",WalletBackupCodec.encode(snapshot))
+        return JSONObject().put("format", "simple-ledger").put("version", 7).put("wallets",WalletBackupCodec.encode(snapshot))
             .put("channels", settings).put("records", array).put("accounts", accountArray)
             .put("categoryDirectory",JSONArray().apply { categoryDirectory.forEach { put(JSONObject().put("id",it.id).put("name",it.name)
                 .put("direction",it.direction.name).put("icon",it.icon).put("order",it.order).put("isFallback",it.isFallback)) } })
@@ -202,7 +203,7 @@ object LedgerBackup {
     /** Reuse the legacy schema validation for ZIP metadata, whose image bytes live separately. */
     internal fun decodeMetadata(root: JSONObject): ValidatedBackup {
         val version = root.get("version")
-        require(root.get("format") == "simple-ledger" && version is Int && version in 1..6) { "备份格式或版本不支持" }
+        require(root.get("format") == "simple-ledger" && version is Int && version in 1..7) { "备份格式或版本不支持" }
         val array = root.getJSONArray("records")
         require(array.length() <= 100_000) { "备份记录过多" }
         val uids = mutableSetOf<String>()
@@ -242,7 +243,8 @@ object LedgerBackup {
                 bill = ParsedBill(amount, direction, text("merchant"), text("category"), positiveTime("occurredAt"),
                     if (obj.isNull("transactionId")) null else text("transactionId"), bool("reliable"), text("reason"), bool("timeExplicit"),refund,
                     if(obj.isNull("paymentMethod"))null else WalletBackupCodec.evidence(obj.getJSONObject("paymentMethod")),
-                    if(obj.isNull("standaloneRefund"))null else WalletBackupCodec.standalone(obj.getJSONObject("standaloneRefund"))),
+                    if(obj.isNull("standaloneRefund"))null else WalletBackupCodec.standalone(obj.getJSONObject("standaloneRefund")),
+                    receipt=if(obj.isNull("receipt"))null else ReceiptEvidenceCodec.decode(obj.getJSONObject("receipt"))),
                 state = state, reason = text("reason"), note = text("note", 500),
                 identities=obj.optJSONArray("identities")?.let { TransactionIdentities.decode(it.toString()) } ?: emptyList())
         }

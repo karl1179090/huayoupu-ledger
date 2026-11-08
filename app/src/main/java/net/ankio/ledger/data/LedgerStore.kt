@@ -38,7 +38,7 @@ sealed class IngestResult {
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 11) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 12) {
     private val backupContext=context.applicationContext
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
@@ -75,7 +75,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             received_at INTEGER NOT NULL, amount INTEGER, direction TEXT,
             merchant TEXT NOT NULL, category TEXT NOT NULL, occurred_at INTEGER NOT NULL,
             transaction_id TEXT, reliable INTEGER NOT NULL, time_explicit INTEGER NOT NULL,
-            state TEXT NOT NULL, reason TEXT NOT NULL, duplicate_id INTEGER, note TEXT NOT NULL, standalone_refund TEXT)""")
+            state TEXT NOT NULL, reason TEXT NOT NULL, duplicate_id INTEGER, note TEXT NOT NULL, standalone_refund TEXT, receipt_evidence TEXT)""")
         db.execSQL("CREATE INDEX records_time ON records(occurred_at)")
         db.execSQL("CREATE INDEX records_transaction ON records(transaction_id)")
         db.execSQL("CREATE INDEX records_received ON records(received_at)")
@@ -90,7 +90,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..10 && newVersion == 11) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..11 && newVersion == 12) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -123,7 +123,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         } }
         }
         if (oldVersion < 9) migrateWallets(db) else if (oldVersion < 10) WalletAccounting.migrateV10(db)
-        CategoryDirectory.create(db)
+        if (oldVersion < 11) CategoryDirectory.create(db)
+        db.execSQL("ALTER TABLE records ADD COLUMN receipt_evidence TEXT")
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -255,7 +256,23 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             original.copy(bill=original.bill.copy(merchant=bill.merchant))
         }else original
         if(sameName)linkMerchantIcon(db,original.id,original.bill.merchant,image)
-        return result
+        val incoming=bill.receipt ?: return result
+        val previous=result.bill.receipt
+        val receipt=when {
+            previous==null -> incoming
+            previous.blockId!=incoming.blockId -> previous
+            else -> previous.copy(merchant=previous.merchant ?: incoming.merchant,
+                productDescription=previous.productDescription ?: incoming.productDescription,
+                transactionDescription=previous.transactionDescription ?: incoming.transactionDescription,
+                orderRemark=previous.orderRemark ?: incoming.orderRemark,
+                serviceProvider=previous.serviceProvider ?: incoming.serviceProvider,
+                receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
+                sourceApp=previous.sourceApp ?: incoming.sourceApp)
+        }
+        if(receipt==previous)return result
+        check(db.update("records",ContentValues().apply { put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt)) },
+            "id=?",arrayOf(result.id.toString()))==1)
+        return result.copy(bill=result.bill.copy(receipt=receipt))
     }
 
     /** Internal pre-release v4 used one PNG per record; preserve these when upgrading a preview. */
@@ -1857,6 +1874,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         put("reliable", if (r.bill.reliable) 1 else 0); put("time_explicit", if (r.bill.timeExplicit) 1 else 0)
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)
         put("note", r.note);put("standalone_refund",encodeStandaloneRefund(r.bill.standaloneRefund))
+        put("receipt_evidence",ReceiptEvidenceCodec.encode(r.bill.receipt))
         put("transaction_identities",TransactionIdentities.encode(identities(r)))
         put("refund_provider", r.bill.refund?.provider);put("refund_original", r.bill.refund?.originalAmountCents)
         put("refund_amount", r.bill.refund?.refundedCents);put("refund_mode",r.bill.refund?.mode);put("refund_id",r.bill.refund?.refundId)
@@ -1873,7 +1891,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 text("merchant"), text("category"), number("occurred_at"), optionalText("transaction_id"),
                 number("reliable") == 1L, text("reason"), number("time_explicit") == 1L,
                 optionalText("refund_provider")?.let { RefundInfo(it,number("refund_original"),number("refund_amount"),text("refund_mode"),optionalText("refund_id")) },
-                standaloneRefund=c.getColumnIndex("standalone_refund").takeIf { it>=0 && !c.isNull(it) }?.let { decodeStandaloneRefund(c.getString(it)) }),
+                standaloneRefund=c.getColumnIndex("standalone_refund").takeIf { it>=0 && !c.isNull(it) }?.let { decodeStandaloneRefund(c.getString(it)) },
+                receipt=c.getColumnIndex("receipt_evidence").takeIf { it>=0 && !c.isNull(it) }?.let { ReceiptEvidenceCodec.decode(c.getString(it)) }),
             RecordState.valueOf(text("state")), text("reason"), optionalNumber("duplicate_id"), text("note"),
             TransactionIdentities.decode(text("transaction_identities")))
     }
