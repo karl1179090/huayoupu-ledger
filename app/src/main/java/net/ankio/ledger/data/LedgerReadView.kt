@@ -47,14 +47,18 @@ class LedgerReadView(private val store:LedgerStore) {
             t.from_selection_source tf_from_source,t.to_selection_source tf_to_source,t.from_manual_locked tf_from_locked,
             t.to_manual_locked tf_to_locked,t.fee_manual_locked tf_fee_locked,t.review_code tf_review,
             t.from_reference tf_from_reference,t.to_reference tf_to_reference,fa.name tf_from_name,ta.name tf_to_name,
-            fa.archived tf_from_archived,ta.archived tf_to_archived,w.account_reference wallet_reference
+            fa.archived tf_from_archived,ta.archived tf_to_archived,w.account_reference wallet_reference,
+            r.category_id category_id,cat.icon category_icon
             FROM records r LEFT JOIN merchant_icons i ON i.record_id=r.id LEFT JOIN merchant_icon_assets a ON a.merchant_key=i.merchant_key
             LEFT JOIN record_wallet_links w ON w.record_uid=r.uid LEFT JOIN accounts wa ON wa.uid=w.account_uid
             LEFT JOIN record_transfer_details t ON t.record_uid=r.uid LEFT JOIN accounts fa ON fa.uid=t.from_account_uid
             LEFT JOIN accounts ta ON ta.uid=t.to_account_uid
+            LEFT JOIN category_directory cat ON cat.id=r.category_id
             WHERE $where ORDER BY r.occurred_at DESC,r.id DESC LIMIT ${limit+1} OFFSET $offset""",args.toTypedArray()).use { c ->
             while(c.moveToNext())rows.put(JSONObject().apply {
                 put("id",c.getLong(0));put("uid",c.getString(1));put("merchant",c.getString(2));put("category",c.getString(3));put("note",c.getString(4))
+                put("categoryId",c.getColumnIndexOrThrow("category_id").let { if(c.isNull(it))JSONObject.NULL else c.getString(it) })
+                put("categoryIcon",c.getColumnIndexOrThrow("category_icon").let { if(c.isNull(it))"tag" else c.getString(it) })
                 put("amountCents",if(c.isNull(5))JSONObject.NULL else c.getLong(5));put("direction",if(c.isNull(6))JSONObject.NULL else c.getString(6))
                 put("occurredAt",c.getLong(7));put("state",c.getString(8));put("source",c.getString(9));put("reason",c.getString(10))
                 put("duplicateId",if(c.isNull(11))JSONObject.NULL else c.getLong(11))

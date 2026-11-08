@@ -330,7 +330,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="image/*"; addCategory(Intent.CATEGORY_OPENABLE) }, IMAGE_REQUEST)
     }
     fun exportBackup() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-v5-${java.time.LocalDate.now()}.zip")
+        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-v6-${java.time.LocalDate.now()}.zip")
     }, EXPORT_REQUEST) }
     fun exportBills(format:String) = fileImports.exportBills(format)
     fun importBills() = fileImports.importBills()

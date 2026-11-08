@@ -320,7 +320,7 @@ class TransferRecognitionTest {
         } finally { db.endTransaction() }
         repeat(3) {
             store.close(); store = LedgerStore(app, name)
-            assertEquals(10, store.readableDatabase.version)
+            assertEquals(11, store.readableDatabase.version)
             assertEquals(accounts, store.accounts()); assertEquals(wallet.links, store.walletSnapshot().links)
             assertEquals(wallet.effects, store.walletSnapshot().effects); assertEquals(wallet.movements, store.walletSnapshot().movements)
             assertEquals(details, store.get(original.id)!!.transfer)
