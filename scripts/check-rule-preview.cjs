@@ -46,7 +46,7 @@ async function installRulePreviewFixture(page){
    }
   ];
 
-  const rows=[
+  const specialRows=[
    {
     id:101,uid:'rec-101',merchant:'星巴克咖啡（静安寺店）',categoryId:'cat:expense:dining',category:'餐饮',categoryIcon:'utensils',
     amountCents:3600,direction:'EXPENSE',occurredAt:now-3600_000,state:'POSTED',source:'OCR',note:'美式咖啡',orderContent:['美式咖啡'],
@@ -126,6 +126,30 @@ async function installRulePreviewFixture(page){
    }
   ];
 
+  const fillerPage1=[];
+  for(let i=1;i<=192;i++){
+   fillerPage1.push({
+    id:1000+i,uid:`rec-filler-${i}`,merchant:`普通消费商户${i}`,categoryId:'cat:expense:shopping',category:'购物',categoryIcon:'bag-shopping',
+    amountCents:1000+i,direction:'EXPENSE',occurredAt:now-(100_000_000+i*10_000),state:'POSTED',source:'MANUAL',note:'',orderContent:[],
+    sourceObj:{captureSource:'MANUAL',platform:null,sourcePackage:null},
+    categoryDecision:{categoryId:'cat:expense:shopping',source:'FALLBACK',manual:false,ruleId:null,explanation:'兜底'},
+    wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-(1000+i),eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
+   });
+  }
+
+  const page2Records=[];
+  for(let i=1;i<=3;i++){
+   page2Records.push({
+    id:2000+i,uid:`rec-tail-${i}`,merchant:`末页追加账单${i}`,categoryId:'cat:expense:dining',category:'餐饮',categoryIcon:'utensils',
+    amountCents:2000+i,direction:'EXPENSE',occurredAt:now-(200_000_000+i*10_000),state:'POSTED',source:'OCR',note:'',orderContent:[],
+    sourceObj:{captureSource:'OCR',platform:'wechat',sourcePackage:'com.tencent.mm'},
+    categoryDecision:{categoryId:'cat:expense:dining',source:'CUSTOM_RULE',manual:false,ruleId:'rule:custom:1',explanation:'命中规则'},
+    wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-(2000+i),eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
+   });
+  }
+
+  const rows=[...specialRows,...fillerPage1,...page2Records];
+
   const accounts=[
    {id:1,uid:'wechat',name:'微信零钱',kind:'wechat',type:'ASSET',amountCents:500000,archived:false,revision:1}
   ];
@@ -138,6 +162,7 @@ async function installRulePreviewFixture(page){
    saveRule:null,deleteRule:null,reorderRules:null,setBuiltinEnabled:null,copyBuiltin:null,
    previewClassification:null,classificationRuleDraftFromBill:null
   };
+  window.simTransferTailPage=false;
 
   const normKeyword=s=>Array.from(String(s||'').normalize('NFKC').toLowerCase()).filter(c=>!/\s/u.test(c)).join('');
   function serializeDir(){
@@ -179,10 +204,11 @@ async function installRulePreviewFixture(page){
   }
   function buildSnapshot(){
    const summary=buildSummary(),snapDir=serializeDir(),rulesSnap=serializeRules();
+   const initialRecords=rows.slice(0,200);
    return {
     ok:true,dataRevision:'rev-'+(revision++),viewKey:'vk-'+revision,
-    records:rows.slice(0,3).map(r=>({...r,categoryDecision:r.categoryDecision?{...r.categoryDecision}:null})),
-    ledgerView:{hasMore:true,nextCursor:{occurredAt:rows[2].occurredAt,id:rows[2].id},summary},
+    records:initialRecords.map(r=>({...r,categoryDecision:r.categoryDecision?{...r.categoryDecision}:null})),
+    ledgerView:{hasMore:true,nextCursor:{occurredAt:initialRecords[initialRecords.length-1].occurredAt,id:initialRecords[initialRecords.length-1].id},summary},
     recognitionTasks:[],channels:{ocr:{enabled:false,permitted:false},sms:{enabled:false,permitted:false},notification:{enabled:false,permitted:false}},
     accounts,bankOptions:[],bankCodeOptions:[],
     customCategories:{expense:snapDir.expense.map(c=>c.name),income:snapDir.income.map(c=>c.name)},
@@ -205,7 +231,18 @@ async function installRulePreviewFixture(page){
    classificationRules:()=>JSON.stringify({ok:true,classificationRules:serializeRules()}),
    recordPage:(month,search,direction,beforeAt,beforeId,expectedRevision)=>{
     window.calls.recordPage.push({month,search,direction,beforeAt,beforeId,expectedRevision});
-    const remaining=rows.slice(3).filter(r=>r.direction!=='TRANSFER');
+    if(window.simTransferTailPage){
+     return JSON.stringify({
+      ok:true,
+      records:[
+       {id:9001,uid:'rec-transfer-1',merchant:'转账到零钱通',categoryId:'',category:'',categoryIcon:'',amountCents:10000,direction:'TRANSFER',occurredAt:1000,state:'POSTED',source:'MANUAL',note:'',orderContent:[]},
+       {id:9002,uid:'rec-transfer-2',merchant:'还款账户',categoryId:'',category:'',categoryIcon:'',amountCents:20000,direction:'TRANSFER',occurredAt:900,state:'POSTED',source:'MANUAL',note:'',orderContent:[]},
+       {id:9003,uid:'rec-transfer-3',merchant:'内部转账',categoryId:'',category:'',categoryIcon:'',amountCents:30000,direction:'TRANSFER',occurredAt:800,state:'POSTED',source:'MANUAL',note:'',orderContent:[]}
+      ],
+      ledgerView:{hasMore:false,nextCursor:null}
+     });
+    }
+    const remaining=rows.slice(200).filter(r=>r.direction!=='TRANSFER');
     return JSON.stringify({
      ok:true,
      records:remaining.map(r=>({...r,categoryDecision:r.categoryDecision?{...r.categoryDecision}:null})),
@@ -676,14 +713,69 @@ async function installRulePreviewFixture(page){
   await page.locator('#test-mode-bill-btn').click();
   await page.waitForSelector('#test-bill-section');
 
-  // Check pagination info: initial records loaded
-  assert.match(await page.locator('#test-bill-page-meta').innerText(),/已加载本月前 3 笔账单/);
-  assert.equal(await page.locator('.test-bill-item').count(),3);
+  // Check pagination info: initial records loaded (200 records loaded, 199 non-transfer)
+  assert.match(await page.locator('#test-bill-page-meta').innerText(),/已加载本月前 200 笔账单/);
+  assert.equal(await page.locator('.test-bill-item').count(),199);
 
-  // Click '加载更多账单'
+  // Click '加载更多账单' to load final page (200 -> 203)
+  const prevRecordPageCalls=await page.evaluate(()=>window.calls.recordPage.length);
+  const prevPreviewCallsBeforePagination=await page.evaluate(()=>window.calls.previewClassification.length);
   await page.locator('#test-bill-load-more').click();
-  await page.waitForFunction(()=>document.querySelectorAll('.test-bill-item').length===7);
-  assert.match(await page.locator('#test-bill-page-meta').innerText(),/已显示本月全部可用账单（共 7 笔）/);
+  await page.waitForFunction(()=>document.querySelectorAll('.test-bill-item').length===202);
+  assert.match(await page.locator('#test-bill-page-meta').innerText(),/已显示本月全部可用账单（共 203 笔）/);
+
+  // Assert '加载更多' button has disappeared on final page
+  assert.equal(await page.locator('#test-bill-load-more').count(),0,'Load more button must disappear on final page');
+
+  // Assert bill list remains visible
+  assert.equal(await page.locator('#test-bills-list').isVisible(),true,'Bill list must remain visible on final page');
+
+  // Assert document.activeElement is NOT #rule-name or any text input / textarea
+  const activeElementInfo=await page.evaluate(()=>{
+   const el=document.activeElement;
+   return {
+    id:el?.id||null,
+    tagName:el?.tagName||null,
+    isTextInput:el?['INPUT','TEXTAREA'].includes(el.tagName):false,
+    isRuleName:el?.id==='rule-name'
+   };
+  });
+  assert.equal(activeElementInfo.isRuleName,false,'activeElement must not be rule-name');
+  assert.equal(activeElementInfo.isTextInput,false,'activeElement must not be any text input/textarea');
+
+  // Assert no duplicate recordPage or preview calls
+  const newRecordPageCalls=await page.evaluate(()=>window.calls.recordPage.length);
+  const newPreviewCallsAfterPagination=await page.evaluate(()=>window.calls.previewClassification.length);
+  assert.equal(newRecordPageCalls,prevRecordPageCalls+1,'recordPage must be called exactly once for pagination');
+  assert.equal(newPreviewCallsAfterPagination,prevPreviewCallsBeforePagination,'Pagination must not trigger previewClassification calls');
+
+  // Narrow assertion: tail page with 3 TRANSFER records (no new selectable items)
+  await page.evaluate(()=>{
+   window.simTransferTailPage=true;
+   ledgerView.hasMore=true;
+   ledgerView.nextCursor={occurredAt:500,id:888};
+   activeRulesSheetRefresh();
+  });
+  assert.equal(await page.locator('#test-bill-load-more').count(),1,'Load more button should be rendered for simulated tail page');
+  await page.locator('#test-bill-load-more').click();
+  await page.waitForFunction(()=>!document.querySelector('#test-bill-load-more'));
+
+  assert.equal(await page.locator('#test-bills-list').isVisible(),true,'Bill list must remain visible when tail has no selectable items');
+
+  const transferTailActive=await page.evaluate(()=>{
+   const el=document.activeElement;
+   return {
+    id:el?.id||null,
+    tagName:el?.tagName||null,
+    tabIndex:el?.tabIndex,
+    isPageMeta:el?.id==='test-bill-page-meta',
+    isRuleName:el?.id==='rule-name',
+    isTextInput:el?['INPUT','TEXTAREA'].includes(el.tagName):false
+   };
+  });
+  assert.equal(transferTailActive.isPageMeta,true,'activeElement must be test-bill-page-meta when tail page has only TRANSFER records');
+  assert.equal(transferTailActive.isRuleName,false,'activeElement must not be rule-name');
+  assert.equal(transferTailActive.isTextInput,false,'activeElement must not be any text input/textarea');
 
   // Verify trusted 04 DATE bill (107) shows recordDisplayTime format: YYYY-MM-DD 仅日期 without HH:mm
   const r107TimeText=await page.locator('[data-test-record-id="107"] .test-bill-meta span').first().innerText();
