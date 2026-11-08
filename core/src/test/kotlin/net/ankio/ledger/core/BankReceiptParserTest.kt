@@ -2,12 +2,28 @@ package net.ankio.ledger.core
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.time.Instant
 
 class BankReceiptParserTest {
     private val now = 1_798_776_000_000L
     private fun parse(vararg fields: String, policy: RecognitionPolicy = RecognitionPolicy.USER_INITIATED) =
         LocalOcrBillParser.parse((listOf("招商银行", "交易成功提醒") + fields).map(::LocalOcrLine),
             0, 0, now, policy=policy, origin="shake:com.tencent.mm")
+
+    @Test fun bankTimeUsesTheFrozenRecognitionContextOrItsOwnExplicitTransactionDate() {
+        val at=Instant.parse("2026-11-08T04:00:00Z").toEpochMilli()
+        val context=RecognitionTimeContext(at,"Asia/Shanghai")
+        val lines=listOf("招商银行","交易成功提醒","交易类型：网上快捷支付","交易金额：12.00元","交易卡号：尾号0007")
+        val fallback=LocalOcrBillParser.parse(lines.map(::LocalOcrLine),0,0,at-172800000,origin="image",timeContext=context)!!
+        assertEquals(at,fallback.occurredAt)
+        assertEquals("RECOGNITION_FALLBACK",fallback.receipt!!.time!!.source)
+        assertEquals("交易类型：网上快捷支付",fallback.receipt!!.bank!!.transactionType!!.rawText)
+        val dated=LocalOcrBillParser.parse((lines+"交易时间：2026-11-07 09:10"+"通知时间：2026-11-08 12:00").map(::LocalOcrLine),
+            0,0,at-172800000,origin="image",timeContext=context)!!
+        assertEquals(Instant.parse("2026-11-07T01:10:00Z").toEpochMilli(),dated.occurredAt)
+        assertEquals("2026-11-07",dated.receipt!!.time!!.localDate)
+        assertTrue(dated.timeExplicit)
+    }
 
     @Test fun unknownOrMissingBankIssuerCannotBorrowAnotherBanksTailOrAssumeExpense() {
         val lines = listOf("合成银行", "交易成功提醒", "交易类型：网上快捷支付", "交易金额：12.00元", "交易卡号：尾号0007")

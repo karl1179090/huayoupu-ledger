@@ -7,6 +7,15 @@ class PaymentMethodParserTest {
     private fun parse(vararg text: String, income: Boolean = false, origin: String = PaymentApps.WECHAT) =
         PaymentMethodParser.parse(text.map { LocalOcrLine(it) }, if (income) Direction.INCOME else Direction.EXPENSE, origin)
 
+    @Test fun conflictingActualDebitStatementsKeepBankEvidenceUnresolvedInsteadOfChoosingBalance() {
+        val evidence=parse("扣款账户：招商银行(0007)","通过零钱扣款")!!
+        assertTrue(evidence.ambiguous)
+        val result=WalletResolver.resolve(listOf(WalletCandidate("card",kind="bank",bankCode="cmb",cardLast4="0007"),
+            WalletCandidate("wechat",kind="wechat")),PaymentApps.WECHAT,evidence,defaultAccountUid="wechat")
+        assertNull(result.accountUid)
+        assertEquals("PAYMENT_METHOD_AMBIGUOUS",result.reviewCode)
+    }
+
     @Test fun actualDebitEvidencePrecedesAStatedPaymentPreference() {
         val bank = PaymentMethodParser.parse(listOf(LocalOcrLine("付款方式：优先使用零钱"),
             LocalOcrLine("扣款账户：招商银行(0007)")), Direction.EXPENSE, PaymentApps.WECHAT)!!

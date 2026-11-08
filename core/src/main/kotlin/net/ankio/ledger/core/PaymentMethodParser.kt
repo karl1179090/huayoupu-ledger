@@ -47,22 +47,22 @@ object PaymentMethodParser {
             val compact = line.text.filterNot(Char::isWhitespace)
             actualDebit.matchEntire(compact)?.groupValues?.get(1)?.let { decode("实际扣款", it, platform, role) }
         } else emptyList()
-        val fields = statedDebits.ifEmpty { clean.mapIndexedNotNull { index, line ->
+        val fields = statedDebits + clean.mapIndexedNotNull { index, line ->
             val compact = line.text.filterNot(Char::isWhitespace)
             val match = label.find(compact) ?: return@mapIndexedNotNull null
             val inline = compact.substring(match.range.last + 1).trim(':', '：')
             val value = if (inline.isNotBlank()) inline else associatedValue(clean, index)
             if (value.isBlank() || preference.containsMatchIn(value)) return@mapIndexedNotNull null
             decode(match.groupValues[1], value, platform, role)
-        } }
+        }
         if (fields.isEmpty()) return platform?.let {
             PaymentMethodEvidence("UNKNOWN", role, platform = it, reason = "PAYMENT_METHOD_MISSING")
         }
         val distinct = fields.distinctBy { listOf(it.medium, it.bankCode, it.cardLast4, it.platform, it.ambiguous) }
         if (distinct.size > 1 || fields.any { it.ambiguous }) return PaymentMethodEvidence(
-            "UNKNOWN", role, platform = platform,
+            if(fields.any { it.medium=="BANK_CARD" || it.bankCode!=null || it.cardLast4!=null })"BANK_CARD" else "UNKNOWN", role, platform = platform,
             rawLabel = fields.joinToString(" / ") { it.rawLabel }.take(80),
-            rawValue = fields.joinToString(" / ") { it.rawValue }.take(240),
+            rawValue = fields.joinToString(" / ") { it.rawValue }.take(160),
             ambiguous = true, reason = "MULTIPLE_PAYMENT_METHODS",
         )
         return distinct.single()
@@ -107,7 +107,7 @@ object PaymentMethodParser {
         val methodCount = (if (isCard) 1 else 0) + (if (wechat) 1 else 0) + (if (alipay) 1 else 0)
         val ambiguous = banks.size > 1 || tails.size > 1 || methodCount > 1 || combined.containsMatchIn(value)
         val medium = when {
-            ambiguous -> "UNKNOWN"
+            ambiguous -> if(isCard)"BANK_CARD" else "UNKNOWN"
             unsupported.containsMatchIn(value) -> "UNSUPPORTED"
             isCard -> "BANK_CARD"
             wechat && (context == "wechat" || value.contains("微信零钱")) -> "WECHAT_BALANCE"
@@ -120,7 +120,7 @@ object PaymentMethodParser {
             else -> context
         }
         return PaymentMethodEvidence(medium, role, banks.singleOrNull(), tails.singleOrNull(), explicitPlatform,
-            label.take(80), raw.take(240), ambiguous, when {
+            label.take(80), raw.take(160), ambiguous, when {
                 ambiguous -> "MULTIPLE_PAYMENT_METHODS"
                 medium == "UNSUPPORTED" -> "UNSUPPORTED_PAYMENT_METHOD"
                 medium == "UNKNOWN" -> "INSUFFICIENT_PAYMENT_METHOD"

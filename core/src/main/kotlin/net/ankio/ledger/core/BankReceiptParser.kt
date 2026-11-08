@@ -15,13 +15,14 @@ object BankReceiptParser {
         heading.matches(text) || BankCodes.find(text).isNotEmpty() && heading.containsMatchIn(text)
     }
 
-    fun parse(lines: List<LocalOcrLine>, capturedAt: Long, origin: String): ParsedBill? {
+    fun parse(lines: List<LocalOcrLine>, capturedAt: Long, origin: String,
+        timeContext: RecognitionTimeContext = RecognitionTimeContext(capturedAt, java.time.ZoneId.systemDefault().id)): ParsedBill? {
         val scoped = ReceiptEvidenceParser.businessLines(lines)
         val text=scoped.joinToString("\n") { it.text }
         if(TransactionRejection.reason(text)!=null || Regex("待付款|待支付|支付中|付款中|交易处理中").containsMatchIn(text))return null
         val boundary=Regex("^(?:交易(?:卡号|账号|账户|金额|类型|方式|时间|日期|单号|成功提醒)|扣款账户|付款账户|卡号|账号|账户|余额|尾号|商户名称|商家名称|服务商|优惠|优先|返回|完成)")
         fun fields(label: Regex) = scoped.mapIndexedNotNull { index, line ->
-            val text = line.text.trim()
+            val text = normalize(line.text).trim()
             val match = label.find(text) ?: return@mapIndexedNotNull null
             val inline = text.substring(match.range.last + 1).trim(':', '：', ' ')
             val associated=if(inline.isNotBlank())emptyList() else if(line.bottom>line.top && line.right>line.left) {
@@ -35,7 +36,7 @@ object BankReceiptParser {
             val raw=(listOf(line)+associated).joinToString("\n") { it.text }
             if(value.isBlank() || value.length>512 || raw.length>2048)null else ReceiptField(value,raw)
         }.distinctBy { it.value }
-        fun values(label: Regex)=fields(label).map { it.value.filterNot(Char::isWhitespace) }
+        fun values(label: Regex)=fields(label).map { normalize(it.value).filterNot(Char::isWhitespace) }
         val amounts = values(amountLabel).mapNotNull(Money::parseCents).filter { it in 1..Money.MAX_CENTS }.distinct()
         if (amounts.isEmpty()) return null
         val accounts = values(accountLabel)
@@ -69,8 +70,9 @@ object BankReceiptParser {
             receiptIssuer=issuer?.let { line -> BankCodes.entries.firstOrNull { it.code==bankCode }?.label?.let { ReceiptField(it,line.text.take(2048)) } }
                 ?: base.receiptIssuer ?: unknownIssuer?.let { ReceiptField(it.text.trim(),it.text) },
             bank=BankReceiptEvidence(bankCode, tails.singleOrNull(), fields(typeLabel).singleOrNull(), direction, ambiguous))
-        return ParsedBill(amounts.singleOrNull(), direction, merchant, "其他", capturedAt,
+        val time=TransactionTimeResolver.resolve(scoped,timeContext)
+        return ParsedBill(amounts.singleOrNull(), direction, merchant, "其他", time.accountingAt,
             LocalOcrBillParser.transactionId(scoped), reasons.isEmpty(), reasons.joinToString("；"),
-            paymentMethod=evidence, receipt=receipt)
+            timeExplicit=time.explicit, paymentMethod=evidence, receipt=receipt.copy(time=time))
     }
 }

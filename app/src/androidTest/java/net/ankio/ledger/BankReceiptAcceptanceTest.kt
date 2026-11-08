@@ -42,13 +42,25 @@ class BankReceiptAcceptanceTest {
         val source = if(origin=="image")Source.IMAGE else Source.OCR
         val task = app.tasks.create(source, origin); tasks += task
         val raw = ((if(bankReceipt)listOf(issuer, "交易成功提醒") else listOf("支付成功")) + listOf("交易金额：12.00元", "交易单号：$id") + fields).joinToString("\n")
-        val backend = RecognitionBackend { bytes, prepared, _, _, policy, actualOrigin ->
-            prepared(bytes)
-            RecognitionResult(raw, LocalOcrBillParser.parse(raw.lines().map(::LocalOcrLine), 0, 0,
-                System.currentTimeMillis(), policy=policy, origin=actualOrigin))
+        val backend = object : RecognitionBackend {
+            override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                livePaymentAt:Long?,policy:RecognitionPolicy,origin:String):RecognitionResult=error("frozen context required")
+            override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                livePaymentAt:Long?,policy:RecognitionPolicy,origin:String,recognitionTime:()->RecognitionTimeContext):RecognitionResult {
+                onPrepared(image)
+                val time=recognitionTime()
+                return RecognitionResult(raw,LocalOcrBillParser.parse(raw.lines().map(::LocalOcrLine),0,0,
+                    time.recognitionAt,policy=policy,origin=origin,timeContext=time))
+            }
         }
         return CaptureProcessor(app, OcrClient(app, backend)).processPrepared("synthetic-bank".toByteArray(),
-            source, origin, task) { true }.also { if(it is IngestResult.Saved)records += it.record.id }
+            source, origin, task) { true }.also { if(it is IngestResult.Saved) {
+                if(records.add(it.record.id)) {
+                    assertEquals(app.tasks.recognitionTime(task)!!.recognitionAt,it.record.capture.receivedAt)
+                    if(it.record.bill.receipt?.time?.source=="RECOGNITION_FALLBACK")
+                        assertEquals(app.tasks.recognitionTime(task)!!.recognitionAt,it.record.bill.receipt!!.time!!.recognitionAt)
+                }
+            } }
     }
     @After fun clean() {
         records.forEach(app.store::delete)
@@ -256,6 +268,12 @@ class BankReceiptAcceptanceTest {
         val saved=(recognize("交易卡号：尾号0007","账户余额：1234.56元") as IngestResult.Saved).record
         assertEquals(RecordState.REVIEW,saved.state)
         assertEquals(before,balances())
+        val task=tasks.last()
+        val noOcr=RecognitionBackend { _,_,_,_,_,_->error("committed bank review must recover without OCR") }
+        assertEquals(IngestResult.DuplicateSkipped,CaptureProcessor(app,OcrClient(app,noOcr)).processPrepared(
+            "synthetic-bank-recovery".toByteArray(),Source.OCR,"shake:com.tencent.mm",task) { true })
+        assertEquals("REVIEW",app.tasks.status(task))
+        assertEquals(before,balances())
         val channels=ChannelSettings(app)
         val json=LedgerBackup.encode(app.store,channels).toByteArray()
         val zip=ByteArrayOutputStream().also { LedgerArchive.write(app.store,channels,it) }.toByteArray()
@@ -304,6 +322,27 @@ class BankReceiptAcceptanceTest {
         val confirmed=app.store.saveEdited(repeated.copy(bill=repeated.bill.copy(direction=Direction.INCOME)),card.uid,true)
         assertEquals(mapOf(card.uid to 1200L),confirmed.walletEffects)
         assertEquals(before+(card.uid to 11200L),balances())
+    }
+
+    @Test fun malformedBankBackupEvidenceIsRejectedBeforeAnyMoneyOrRecordIsRestored() = runBlocking {
+        app.taskRecovery.await()
+        account("bank","0007")
+        val saved=(recognize("交易类型：网上快捷支付","交易卡号：尾号0007") as IngestResult.Saved).record
+        val original=LedgerBackup.encode(app.store,ChannelSettings(app))
+        val mutations=listOf<(JSONObject)->Unit>({ it.put("cardLast4","007") },{ it.put("bankCode","unknown-bank") },
+            { it.put("direction","TRANSFER") },{ it.put("ambiguous",1) },{ it.put("extra",true) },
+            { it.getJSONObject("transactionType").put("blockId","other") })
+        val name="invalid-bank-backup-${UUID.randomUUID()}.db"
+        try { LedgerStore(app,name).use { target ->
+            for(mutation in mutations) {
+                val json=JSONObject(original);val rows=json.getJSONArray("records")
+                val row=(0 until rows.length()).map(rows::getJSONObject).single { it.getString("uid")==saved.uid }
+                mutation(row.getJSONObject("receipt").getJSONObject("bank"))
+                assertTrue(runCatching { LedgerBackup.restore(target,LedgerBackup.decode(json.toString().byteInputStream())) }.isFailure)
+                assertTrue(target.all().isEmpty())
+                assertTrue(target.accounts().isEmpty())
+            }
+        } } finally { app.deleteDatabase(name) }
     }
 
     @Test fun explicitTailMismatchKeepsEveryBalanceUntouchedUntilOneManualConfirmation() = runBlocking {
