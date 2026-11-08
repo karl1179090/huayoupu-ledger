@@ -194,6 +194,11 @@ class MainActivity : Activity() {
                     IngestResult.DuplicateSkipped -> { dispatch("importStatus", "{\"working\":false}"); message("识别完成，请查看账本") }
                     IngestResult.Ignored -> { dispatch("importStatus", "{\"working\":false}"); message("没有识别到账单文字，可换图或手动记账") }
                     is IngestResult.Skipped -> { dispatch("importStatus", "{\"working\":false}");message(result.message) }
+                    is IngestResult.Batch -> {
+                        dispatch("importStatus", "{\"working\":false}")
+                        dispatch("recognitionBatch",result.result.json().toString())
+                        message(result.result.message)
+                    }
                 }
             }
             is ImageImportState.Failed -> {

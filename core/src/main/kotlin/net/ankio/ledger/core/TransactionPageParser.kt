@@ -19,6 +19,9 @@ object TransactionPageParser {
     }
     fun parse(lines:List<LocalOcrLine>,width:Int,height:Int,time:RecognitionTimeContext,
         livePaymentAt:Long?=null,policy:RecognitionPolicy=RecognitionPolicy.USER_INITIATED,origin:String=""):List<TransactionCandidate> {
+        MixedReceiptPartitioner.partition(lines,width,height)?.let { blocks ->
+            return parseBlocks(blocks,width,height,time,livePaymentAt,policy,origin)
+        }
         val blocks=bankBlocks(lines)
         if(blocks.isEmpty())return LocalOcrBillParser.parse(lines,width,height,time.recognitionAt,livePaymentAt,policy,origin,time)
             ?.let { listOf(TransactionCandidate(CandidateId.SINGLE,it)) }.orEmpty()

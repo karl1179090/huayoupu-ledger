@@ -7,6 +7,7 @@
     "net.ankio.ledger.data.LedgerCandidateOptimizationTest",
     "net.ankio.ledger.data.RecognitionRecoveryOptimizationTest",
     "net.ankio.ledger.data.RecognitionCommitRecoveryTest",
+    "net.ankio.ledger.data.MultiCandidateAcceptanceTest",
     "net.ankio.ledger.data.LedgerQuery056Test",
     "net.ankio.ledger.data.AutomaticSupplementTest",
     "net.ankio.ledger.data.RefundPersistenceTest",
@@ -93,6 +94,7 @@
     "net.ankio.ledger.CompoundClassificationBridgeTest"
   ],
   "api34": [
+    "net.ankio.ledger.data.MultiCandidateAcceptanceTest",
     "net.ankio.ledger.ShakeWhitelistTest",
     "net.ankio.ledger.ShakeWhitelistWindowTest",
     "net.ankio.ledger.ShakeWhitelistQueueTest",
