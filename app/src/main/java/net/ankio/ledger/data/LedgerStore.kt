@@ -345,13 +345,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             put("version",1);put("medium",it.medium);put("role",it.role);put("bankCode",it.bankCode)
             put("cardLast4",it.cardLast4);put("platform",it.platform);put("rawLabel",it.rawLabel.take(80))
             put("rawValue",it.rawValue.take(160));put("ambiguous",it.ambiguous);put("reason",it.reason)
+            if(it.executed)put("executed",true)
         }.toString()
     }
     private fun decodePaymentEvidence(value: String?): PaymentMethodEvidence? = value?.let {
         val json=org.json.JSONObject(it)
         fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotEmpty)
         PaymentMethodEvidence(json.getString("medium"),json.getString("role"),optional("bankCode"),optional("cardLast4"),
-            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"))
+            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"),json.optBoolean("executed",false))
     }
 
     private fun encodeStandaloneRefund(e:StandaloneRefundEvidence?):String?=e?.let {
