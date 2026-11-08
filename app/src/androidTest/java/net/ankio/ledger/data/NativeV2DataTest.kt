@@ -71,7 +71,7 @@ class NativeV2DataTest {
             db.version = 1
         }
         assertEquals(listOf(original.asLegacyExcluded()), store.all())
-        assertEquals(10, store.readableDatabase.version)
+        assertEquals(11, store.readableDatabase.version)
         assertTrue(store.accounts().isEmpty())
         assertTrue(store.customCategories().isEmpty())
         store.readableDatabase.rawQuery("SELECT received_at FROM capture_events WHERE event_key = ?",
@@ -104,7 +104,7 @@ class NativeV2DataTest {
         assertEquals(bill.asLegacyExcluded(), store.get(bill.id))
         assertEquals(account.copy(revision = 0), store.getAccount(account.id))
         assertEquals(listOf(category), store.customCategories())
-        assertEquals(10, store.readableDatabase.version)
+        assertEquals(11, store.readableDatabase.version)
         assertTrue(store.screenshotIds().isEmpty())
     }
 
@@ -139,8 +139,8 @@ class NativeV2DataTest {
         }
         assertEquals(listOf(edited), store.accounts())
         assertEquals(setOf(expense, income), store.customCategories().toSet())
-        store.deleteCategory(expense)
-        assertEquals(listOf(income), store.customCategories())
+        expectFailure { store.deleteCategory(expense) }
+        assertEquals(setOf(expense, income), store.customCategories().toSet())
         assertEquals(expense.name, store.get(bill.id)!!.bill.category)
         expectFailure { store.deleteAccount(edited.id) }
         val archived = store.archiveAccount(edited.id)
@@ -165,7 +165,7 @@ class NativeV2DataTest {
         store.addCategory(expense); store.addCategory(income)
         channels.set(ChannelSettings.Channel.OCR, true)
         val encoded = LedgerBackup.encode(store, channels)
-        assertEquals(4, JSONObject(encoded).getInt("version"))
+        assertEquals(6, JSONObject(encoded).getInt("version"))
         val backup = decode(encoded)
         assertEquals(setOf(posted.copy(id = 0), pending.copy(id = 0)), backup.records.toSet())
         assertEquals(setOf(asset.copy(id = 0), debt.copy(id = 0)), backup.accounts.toSet())

@@ -34,7 +34,7 @@ class LedgerWebBridgeTest {
             assertEquals(1234L, original.bill.amountCents)
             assertEquals(Source.MANUAL, original.capture.source)
             val edited = JSONObject(bridge.save(input(id).put("amount", "1.01")
-                .put("direction", "INCOME").put("note", "修改备注").toString()))
+                .put("direction", "INCOME").put("category", "其他").put("note", "修改备注").toString()))
             assertTrue(edited.toString(), edited.getBoolean("ok"))
             val record = app.store.get(id)!!
             assertEquals(original.uid, record.uid)

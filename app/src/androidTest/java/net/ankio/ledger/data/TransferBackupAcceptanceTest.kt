@@ -116,7 +116,9 @@ class TransferBackupAcceptanceTest {
         // The zero-effect reference is constructed from a legal complete refund with an explicit existing endpoint.
         val zeroRecord=bill(amount=0).let {it.copy(bill=it.bill.copy(refund=RefundInfo("wechat",1000,1000)),
             wallet=RecordWalletLink(it.uid,WalletEligibility.ACTIVE,a.uid),walletEffects=emptyMap())}
-        val full=decoded(source);val zeroBackup=full.copy(records=full.records+zeroRecord,wallets=full.wallets!!.let {it.copy(
+        val full=decoded(source);val zeroBackup=full.copy(records=full.records+zeroRecord,
+            recordCategoryIds=full.recordCategoryIds+(zeroRecord.uid to full.categoryDirectory.single { it.direction==Direction.EXPENSE && it.isFallback }.id),
+            wallets=full.wallets!!.let {it.copy(
             links=it.links+zeroRecord.wallet!!,effects=it.effects+(zeroRecord.uid to emptyMap()))})
         val target=store();val existing=wallet(target,"合成本机A",uid=a.uid);val before=target.getAccountByUid(a.uid)!!.amountCents
         LedgerBackup.restore(target,zeroBackup)

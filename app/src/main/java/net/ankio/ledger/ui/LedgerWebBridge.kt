@@ -21,6 +21,9 @@ import net.ankio.ledger.data.LedgerAccount
 import net.ankio.ledger.data.AccountType
 import net.ankio.ledger.data.AccountBanks
 import net.ankio.ledger.data.CustomCategory
+import net.ankio.ledger.data.CategoryDirectory
+import net.ankio.ledger.data.CategoryException
+import net.ankio.ledger.data.LedgerCategory
 import net.ankio.ledger.data.LedgerReadView
 import net.ankio.ledger.data.WalletReadModel
 import net.ankio.ledger.data.WalletException
@@ -126,6 +129,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("uid", record.uid)
                 put("merchant", record.bill.merchant)
                 put("category", record.bill.category)
+                app.store.categoryFor(record).let { category ->
+                    put("categoryId", category?.id ?: JSONObject.NULL); put("categoryIcon", category?.icon ?: "tag")
+                }
                 put("note", record.note)
                 put("amountCents", record.bill.amountCents ?: JSONObject.NULL)
                 put("direction", record.bill.direction?.name ?: JSONObject.NULL)
@@ -191,6 +197,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("pendingDeletion",app.store.pendingDeletion()?.let { JSONObject().put("id",it.id).put("expiresAt",it.expiresAt) }?:JSONObject.NULL)
             .put("records", records).put("recognitionTasks",tasks).put("channels", channels)
             .put("accounts", accounts).put("customCategories", custom)
+            .put("categoryDirectory", directoryData()).put("categoryIconOptions", categoryIconOptions())
             .put("walletSettings",walletSettingsData())
             .put("bankCodeOptions",JSONArray().apply { BankCodes.entries.forEach { put(JSONObject().put("code",it.code).put("label",it.label)) } })
             .put("bankOptions",JSONArray().apply { AccountBanks.entries.forEach {
@@ -220,6 +227,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("captureMode",if(task?.optString("origin")?.startsWith("payment_auto:")==true)"page" else "")
             .put("refundCandidateCount",if((record.bill.refund!=null||record.bill.standaloneRefund!=null)&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
+            .put("categoryId",app.store.categoryFor(record)?.id ?: JSONObject.NULL).put("categoryIcon",app.store.categoryFor(record)?.icon ?: "tag")
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
@@ -285,13 +293,19 @@ class LedgerWebBridge(private val activity: MainActivity) {
             else -> throw InvalidInput("请选择支出、收入或转账")
         }
         val merchant = string(input, "merchant", 1024).trim().ifBlank { "未填写商户" }
-        val category = string(input, "category", 1024).trim().ifBlank { "其他" }
+        val categoryName = string(input, "category", 1024).trim().ifBlank { "其他" }
         val occurredAt = integer(input, "occurredAt", 1, MAX_TIME)
         val note = string(input, "note", 500).trim()
         val confirmed = if (input.has("confirmDuplicate")) {
             input.get("confirmDuplicate") as? Boolean ?: throw InvalidInput("重复确认参数无效")
         } else false
         val result = synchronized(app.store) {
+            val category = if (direction == Direction.TRANSFER) "本人互转" else {
+                val categoryId = if (input.has("categoryId") && !input.isNull("categoryId")) string(input, "categoryId", 160) else ""
+                if (categoryId.isNotBlank()) app.store.category(categoryId, direction).name
+                else app.store.categoryDirectory(direction).firstOrNull { it.name == categoryName }?.name
+                    ?: throw CategoryException("CATEGORY_NOT_FOUND", "分类已不存在或收支方向不一致，请重新选择")
+            }
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
@@ -552,6 +566,55 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("generation",app.channels.shakeMasterGeneration()).put("captureHealth",app.captureHealth.snapshot()).toString()
     } catch(error:Exception) { structuredFailure(error,"应用选择保存失败").toString() }
 
+    private fun categoryJson(category: LedgerCategory) = JSONObject().put("id", category.id).put("name", category.name)
+        .put("direction", category.direction.name).put("icon", category.icon).put("order", category.order)
+        .put("isFallback", category.isFallback).put("referenceCount", category.referenceCount).put("canDelete", category.canDelete)
+
+    private fun directoryData(): JSONObject {
+        val categories = app.store.categoryDirectory()
+        return JSONObject().put("expense", JSONArray().apply { categories.filter { it.direction == Direction.EXPENSE }.forEach { put(categoryJson(it)) } })
+            .put("income", JSONArray().apply { categories.filter { it.direction == Direction.INCOME }.forEach { put(categoryJson(it)) } })
+    }
+    private fun categoryIconOptions() = JSONArray().apply { CategoryDirectory.icons.forEach { (key, label) -> put(JSONObject().put("key", key).put("label", label)) } }
+    private fun directoryResponse() = JSONObject().put("ok", true).put("categoryDirectory", directoryData()).put("categoryIconOptions", categoryIconOptions())
+    private fun categoryDirection(value: String): Direction = when (value) {
+        "EXPENSE", "expense" -> Direction.EXPENSE
+        "INCOME", "income" -> Direction.INCOME
+        else -> throw CategoryException("CATEGORY_DIRECTION", "分类仅支持收入或支出")
+    }
+    private fun categoryFailure(error: Exception): String = if (error is CategoryException) structuredFailure(error, "分类操作失败").toString()
+        else failure(error.message ?: "分类操作失败，请重试", "CATEGORY_INVALID").toString()
+
+    @JavascriptInterface fun getCategoryDirectory(): String = try {
+        synchronized(app.store) { directoryResponse().toString() }
+    } catch (error: Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun saveCategory(json: String): String = try {
+        checkInput(json.length <= MAX_INPUT_LENGTH, "分类数据过长")
+        val input = JSONObject(json)
+        val id = if (input.has("id") && !input.isNull("id")) string(input, "id", 160).takeIf { it.isNotBlank() } else null
+        val name = string(input, "name", 40).trim()
+        val direction = categoryDirection(string(input, "direction", 16))
+        val icon = if (input.has("icon")) string(input, "icon", 40) else "tag"
+        synchronized(app.store) {
+            val category = app.store.saveCategory(id, name, direction, icon)
+            app.changed(); directoryResponse().put("category", categoryJson(category)).toString()
+        }
+    } catch (error: Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun reorderCategories(direction: String, idsJson: String): String = try {
+        checkInput(idsJson.length <= 200_000, "分类顺序过长")
+        val input = JSONArray(idsJson)
+        checkInput(input.length() <= 2_000, "分类数量过多")
+        val ids = (0 until input.length()).map { index -> (input.get(index) as? String)?.takeIf { it.length <= 160 }
+            ?: throw CategoryException("CATEGORY_INVALID", "分类顺序无效") }
+        synchronized(app.store) { app.store.reorderCategories(categoryDirection(direction), ids); app.changed(); directoryResponse().toString() }
+    } catch (error: Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun removeCategory(id: String): String = try {
+        synchronized(app.store) { app.store.removeCategory(id); app.changed(); directoryResponse().toString() }
+    } catch (error: Exception) { categoryFailure(error) }
+
     @JavascriptInterface
     fun addCategory(name: String, direction: String): String = try {
         checkInput(name.trim()!="转账手续费","转账手续费为系统分类，请使用其他分类名称")
@@ -749,6 +812,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
 
     private fun failure(message:String,code:String="OPERATION_FAILED") = JSONObject().put("ok",false).put("error",message).put("code",code)
     private fun failureCode(error:Exception):String = when(error) {
+        is CategoryException -> error.code
         is WalletException -> error.code
         is IllegalArgumentException -> error.message?.takeIf { it=="STATISTICS_OVERFLOW" } ?: "INVALID_INPUT"
         is JSONException -> "INVALID_INPUT"
@@ -761,7 +825,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             "TRANSFER_AMOUNT_CONFLICT" to "转账金额、手续费或到账金额不一致","TRANSFER_IDENTITY_CONFLICT" to "同一交易的信息有冲突，请核对原账单",
             "TRANSFER_STATUS_REQUIRED" to "尚未确认转账完成，请核对终态","TRANSFER_PAYMENT_EVIDENCE_CONFLICT" to "新账户证据与原钱包冲突，请核对",
             "TRANSFER_REFUND_CONFLICT" to "含消费退款记录，不能直接改为转账","STATISTICS_OVERFLOW" to "统计金额超过支持范围，请缩小时间范围")
-        return failure(messages[code] ?: error.message ?: fallback,code)
+        return failure(messages[code] ?: error.message ?: fallback,code).also { if(error is CategoryException && error.code=="CATEGORY_REFERENCED")it.put("referenceCount",error.referenceCount) }
     }
     private class InvalidInput(message: String) : IllegalArgumentException(message)
 

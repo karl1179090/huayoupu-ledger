@@ -271,7 +271,7 @@ class MerchantIconTest {
             store.writableDatabase.execSQL("DROP TABLE merchant_icon_assets")
             store.rebuildPreWalletSchemaForTest(3)
             store.close(); store = LedgerStore(app, name)
-            assertEquals(10, store.readableDatabase.version)
+            assertEquals(11, store.readableDatabase.version)
             assertEquals(saved.asLegacyExcluded(), store.get(saved.id)); assertArrayEquals(image, store.screenshot(saved.id))
             assertTrue(store.merchantIconIds().isEmpty())
         } finally { store.close(); app.deleteDatabase(name); bitmap.recycle() }
@@ -296,7 +296,7 @@ class MerchantIconTest {
             }
             store.rebuildPreWalletSchemaForTest(4)
             store.close(); store = LedgerStore(app, name)
-            assertEquals(10, store.readableDatabase.version)
+            assertEquals(11, store.readableDatabase.version)
             assertEquals(first.asLegacyExcluded(), store.get(first.id)); assertEquals(second.asLegacyExcluded(), store.get(second.id))
             assertArrayEquals(store.merchantIcon(first.id), store.merchantIcon(second.id))
             assertNotNull(MerchantIconEncoding.mime(store.merchantIcon(first.id)!!))

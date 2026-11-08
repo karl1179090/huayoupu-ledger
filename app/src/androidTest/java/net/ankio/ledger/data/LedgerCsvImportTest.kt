@@ -77,6 +77,19 @@ class LedgerCsvImportTest {
         assertEquals(0,LedgerCsvImport.apply(target,document).imported)
     }
 
+    @Test fun qianjiPrimaryAndSecondaryLabelsBecomeOneFullDirectoryName() {
+        val document = read(("时间,分类,二级分类,类型,金额,账户1,账户2,备注,账单标记,手续费,优惠券,标签,账单图片\n" +
+            "2026-11-08 12:00,合成一级,二级,支出,12.34,,,,,,,,\n").toByteArray())
+        assertTrue(document.errors.toString(), document.errors.isEmpty())
+        val target = store(); val wallets = target.walletSnapshot()
+        assertEquals(1, LedgerCsvImport.apply(target, document).imported)
+        assertEquals("合成一级/二级", target.all().single().bill.category)
+        val category = target.categoryDirectory(Direction.EXPENSE).single { it.name == "合成一级/二级" }
+        assertEquals(1L, category.referenceCount)
+        assertEquals(wallets.settings, target.walletSnapshot().settings)
+        assertEquals(wallets.movements, target.walletSnapshot().movements)
+    }
+
     @Test fun invalidRowsArePreviewedAndNeverSilentlyRoundedOrImported() {
         val bytes=csv(listOf(record())).toString(Charsets.UTF_8)
         val invalid=bytes.replace("\"123.45\"","\"123.456\"")
