@@ -260,6 +260,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .confirm-card .amount-row:focus-within{background:#F4F2FA}
 .record-chips button{background:var(--tint);color:var(--grape-ink)}
 .record-chips #time-label{background:#EFEDF4;color:#5C5575}
+.record-chips .time-basis{background:#F4F2FA;color:var(--muted)}
 .confirm-card .note-row{border-top-color:#E9E5F2}
 .refund-summary{color:#43791F}
 .refund-match{background:#E9F8DC;color:#3B7A20}
