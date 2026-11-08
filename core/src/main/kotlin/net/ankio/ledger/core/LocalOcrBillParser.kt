@@ -358,7 +358,8 @@ object LocalOcrBillParser {
         }
         // Wallets show the trading name above the amount; the legal full name below
         // can be a different person or company and must not break the icon anchor.
-        labeledValues(lines, merchantLabel).firstOrNull(::plausibleMerchant)?.let { return it.take(80) }
+        labeledValues(lines, merchantLabel).firstOrNull { plausibleMerchant(it) || it.length == 1 && it.single().isLetter() }
+            ?.let { return it.take(80) }
         // In text-only documents accept a clear named transaction header, never an arbitrary label.
         return lines.firstOrNull { it.text.startsWith("转账给") && it.text.length > 3 }?.text?.removePrefix("转账给")?.take(80).orEmpty()
     }

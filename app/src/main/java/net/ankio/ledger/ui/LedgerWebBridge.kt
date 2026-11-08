@@ -300,7 +300,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             Direction.TRANSFER.name -> Direction.TRANSFER
             else -> throw InvalidInput("请选择支出、收入或转账")
         }
-        val merchant = string(input, "merchant", 1024).trim().ifBlank { "未填写商户" }
+        val enteredMerchant = string(input, "merchant", 1024).trim()
         val categoryName = string(input, "category", 1024).trim().ifBlank { "其他" }
         val occurredAt = integer(input, "occurredAt", 1, MAX_TIME)
         val note = string(input, "note", 500).trim()
@@ -316,6 +316,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             }
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
+            val merchant = enteredMerchant.ifBlank { if(original?.bill?.receipt!=null) "" else "未填写商户" }
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")
             if(direction==Direction.TRANSFER && (original?.bill?.refund!=null || original?.bill?.standaloneRefund!=null))throw WalletException("TRANSFER_REFUND_CONFLICT","含退款历史的消费不能直接改为转账，请先核对退款记录")

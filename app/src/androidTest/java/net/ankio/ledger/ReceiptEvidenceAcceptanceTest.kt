@@ -27,6 +27,40 @@ class ReceiptEvidenceAcceptanceTest {
     @get:Rule val wallet = CaptureWalletFixture()
     private val app get() = ApplicationProvider.getApplicationContext<LedgerApp>()
 
+    @Test fun savingANoteKeepsMissingReceiptMerchantAndEveryFinancialFact() = runBlocking {
+        app.taskRecovery.await()
+        val now = System.currentTimeMillis()
+        val raw = "支付成功\n付款金额：12.00元\n商品说明：早餐套餐\n交易单号：SYNTHETIC-EDIT-${UUID.randomUUID()}"
+        val bill = LocalOcrBillParser.parse(raw.lines().map(::LocalOcrLine), 0, 0, now, origin="image")!!
+        val recognized = (app.store.ingest(Capture(Source.IMAGE, "image", raw, now), bill) as IngestResult.Saved).record
+        val original = app.store.saveEdited(recognized.copy(bill=recognized.bill.copy(category="交通")))
+        val balances = app.store.accounts().associate { it.uid to it.amountCents }
+        val movements = app.store.walletSnapshot().movements
+        try {
+            withBridge { bridge ->
+                val result = JSONObject(bridge.save(JSONObject().put("id", original.id).put("amount", "12.00")
+                    .put("direction", "EXPENSE").put("merchant", "").put("category", "交通").put("occurredAt", original.bill.occurredAt)
+                    .put("note", "用户手写火锅备注").put("confirmDuplicate", false)
+                    .put("expectedRevision", original.wallet!!.revision).put("submissionToken", UUID.randomUUID().toString()).toString()))
+                assertTrue(result.toString(), result.getBoolean("ok"))
+                val saved = app.store.get(original.id)!!
+                assertEquals("", saved.bill.merchant)
+                assertEquals(original.bill.receipt, saved.bill.receipt)
+                assertNull(saved.bill.receipt!!.merchant)
+                assertEquals("交通", saved.bill.category)
+                assertEquals("用户手写火锅备注", saved.note)
+                assertEquals(original.bill.amountCents, saved.bill.amountCents)
+                assertEquals(original.bill.occurredAt, saved.bill.occurredAt)
+                assertEquals(original.walletEffects, saved.walletEffects)
+                assertEquals(balances, app.store.accounts().associate { it.uid to it.amountCents })
+                assertEquals(movements, app.store.walletSnapshot().movements)
+                val detail = JSONObject(bridge.recordDetails(original.id)).getJSONObject("record")
+                assertEquals("", detail.getString("merchant"))
+                assertTrue(detail.getJSONObject("receipt").isNull("merchant"))
+            }
+        } finally { app.store.delete(original.id) }
+    }
+
     @Test fun shortMissingPeripheralAndInvalidReceiptsRemainTruthfulAtTheDetailBoundary() = runBlocking {
         app.taskRecovery.await()
         val tasks = mutableListOf<Long>()

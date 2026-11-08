@@ -188,8 +188,8 @@ async function installRulesFixture(page){
     if(payload.id){
      const existing=rows.find(r=>r.id===Number(payload.id));
      if(existing){
-      const changedCat=existing.categoryId!==payload.categoryId||existing.direction!==payload.direction;
-      existing.merchant=payload.merchant;existing.direction=payload.direction;existing.category=payload.category;existing.categoryId=payload.categoryId;
+      const changedCat=payload.categoryEdited===true||(payload.categoryEdited===undefined&&(existing.categoryId!==payload.categoryId||existing.direction!==payload.direction));
+      existing.merchant=payload.merchant;existing.direction=payload.direction;existing.category=payload.category;existing.categoryId=payload.categoryId;existing.note=payload.note;
       if(changedCat)existing.categoryDecision={categoryId:payload.categoryId,source:'MANUAL',manual:true,ruleId:null,ruleVersion:null,explanation:'人工选择分类'};
      }
      return JSON.stringify({ok:true,id:payload.id,state:'POSTED'});
@@ -440,6 +440,35 @@ async function installRulesFixture(page){
   assert.equal(importText101.includes('rule:custom:secret-id-999'),false,'Must not expose ruleId in record details');
   assert.equal(importText101.includes('rules:v1:secret-hash-888'),false,'Must not expose ruleVersion in record details');
   await page.screenshot({path:path.join(output,'06-record-detail-rule-explanation.png')});
+
+  // Only edit note - categoryEdited must be false and categoryDecision preserved
+  await page.locator('#note').fill('仅修改备注不选分类');
+  await page.evaluate(()=>submitDraft());
+  await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
+  const noteOnlySave=await page.evaluate(()=>window.calls.saves[window.calls.saves.length-1]);
+  assert.equal(noteOnlySave.categoryEdited,false,'Only editing note must pass categoryEdited: false');
+  assert.equal(noteOnlySave.categoryDecision,undefined,'Must not send synthesized categoryDecision in payload');
+
+  // Re-open record 101, verify original rule explanation is preserved
+  await page.evaluate(()=>openRecord(101));
+  await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
+  assert.equal(await page.locator('#category-explanation').innerText(),'命中规则：星巴克咖啡','Rule explanation must be preserved when category was not edited');
+
+  // Explicitly select the SAME category (品质餐饮 / cat:expense:dining) - categoryEdited must be true and explanation immediately becomes 人工选择分类
+  await page.locator('#category').click();
+  await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
+  await page.locator('#record-category-choices [data-category-id="cat:expense:dining"]').click();
+  await page.waitForFunction(()=>!document.querySelector('#sheet').open);
+  assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类','Live UI explanation must update to 人工选择分类 immediately upon explicit selection');
+  await page.evaluate(()=>submitDraft());
+  await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
+  const sameCatSave=await page.evaluate(()=>window.calls.saves[window.calls.saves.length-1]);
+  assert.equal(sameCatSave.categoryEdited,true,'Explicitly selecting the same category must pass categoryEdited: true');
+
+  // Re-open record 101, verify categoryDecision is now manual
+  await page.evaluate(()=>openRecord(101));
+  await page.waitForFunction(()=>!document.querySelector('#record-panel')._morph);
+  assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类');
   await page.evaluate(()=>cancelEditor(true));
   await page.waitForFunction(()=>!document.querySelector('#record-panel').open);
 
@@ -460,6 +489,8 @@ async function installRulesFixture(page){
   assert.equal(await page.locator('#category-explanation').innerText(),'人工选择分类');
   await page.evaluate(()=>submitDraft());
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),ruleSaveCountBeforeManualEdit,'Manual category edit must never silently create a permanent rule');
+  const record103Save=await page.evaluate(()=>window.calls.saves[window.calls.saves.length-1]);
+  assert.equal(record103Save.categoryEdited,true,'Changing category on record 103 must pass categoryEdited: true');
 
   // 12. 320px narrow viewport + large text (fontScale=1.5) overflow verification
   await page.setViewportSize({width:320,height:740});

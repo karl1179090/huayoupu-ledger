@@ -364,3 +364,18 @@ dialog input,dialog select,.month-input{border-color:#E3DFF0;background:#FAF9FD}
 
 /* ---------- 桌面媒体查询下的旧规则覆盖 ---------- */
 @media(min-width:650px){.bottom-nav{border:0}}
+
+/* ---------- 凭证结构化信息 ---------- */
+.receipt-details{border-top-color:#E9E5F2}
+.receipt-heading{color:var(--muted)}
+.receipt-readonly{background:var(--tint);color:var(--grape-deep)}
+.receipt-field dt{color:var(--muted)}
+.receipt-field dd{color:var(--ink)}
+.receipt-value.is-missing{color:var(--muted-soft)}
+.receipt-verify{border-top-color:#E9E5F2}
+.receipt-evidence-toggle{background:#F4F2FA;color:var(--grape-deep)}
+.receipt-evidence-toggle small{color:var(--muted)}
+.receipt-evidence-item{background:#FAF9FD;border-color:#ECE8F6}
+.receipt-evidence-meta b{color:#453F5E}
+.receipt-source-tag{background:var(--tint);color:var(--grape-deep)}
+.receipt-evidence-raw{color:#5C5575}
