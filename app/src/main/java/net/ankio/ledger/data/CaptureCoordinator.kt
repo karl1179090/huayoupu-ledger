@@ -23,7 +23,7 @@ class CaptureCoordinator(context: Context) {
         synchronized(app.channels) {
             if (!allowed()) CandidateSubmission(candidateId,IngestResult.Ignored)
             else synchronized(app.store) {
-                val bill=app.store.classify(candidate.bill,classificationSnapshot ?: app.store.classificationRules())
+                val bill=app.store.classify(candidate.bill,classificationSnapshot ?: app.store.classificationRules(),capture)
                 val classified=candidate.copy(bill=bill)
                 (if(operationKey==null)CandidateSubmission(candidateId,app.store.ingest(capture.copy(text = capture.text.take(32_768)), bill, eventKey=eventKey, screenshot = screenshot, merchantIcon = merchantIcon))
                 else app.store.ingestCandidate(capture.copy(text=capture.text.take(32_768)),classified,operationKey,eventKey,screenshot,merchantIcon)).also {
