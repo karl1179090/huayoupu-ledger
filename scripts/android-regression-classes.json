@@ -82,7 +82,8 @@
     "net.ankio.ledger.ClassificationManagementBridgeTest",
     "net.ankio.ledger.RecognitionTimeAcceptanceTest",
     "net.ankio.ledger.ocr.RecognitionTimeGateTest",
-    "net.ankio.ledger.data.RecognitionTimeProcessRestartTest"
+    "net.ankio.ledger.data.RecognitionTimeProcessRestartTest",
+    "net.ankio.ledger.DateOnlyCalendarBridgeTest"
   ],
   "api34": [
     "net.ankio.ledger.ShakeWhitelistTest",
@@ -117,7 +118,8 @@
     "net.ankio.ledger.ClassificationManagementBridgeTest",
     "net.ankio.ledger.RecognitionTimeAcceptanceTest",
     "net.ankio.ledger.ocr.RecognitionTimeGateTest",
-    "net.ankio.ledger.data.RecognitionTimeProcessRestartTest"
+    "net.ankio.ledger.data.RecognitionTimeProcessRestartTest",
+    "net.ankio.ledger.DateOnlyCalendarBridgeTest"
   ],
   "api36": [
     "net.ankio.ledger.widget.ExpenseWidgetTest",
