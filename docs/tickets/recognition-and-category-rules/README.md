@@ -11,7 +11,7 @@
 - 10 将多笔自动入账、日金额业务匹配、候选幂等和中断恢复作为一个完整的资金提交能力验收。
 - 只把真实技术前置项标为阻塞：银行凭证和时间可在 03 之后分别推进，分类与节点选路无需等待多笔功能，规则测试不阻塞备份实现。
 - 已按依赖顺序在用户 fork 创建子 issue，关联父 issue 并使用 GitHub 原生阻塞边；每项应用 `ready-for-agent`。发布任务时保留父 issue 的正文、状态及标签。
-- 当前可开始的前沿是 01、02。任务显示 `ready-for-agent` 表示规格完整，有未完成阻塞项时仍需等待。
+- 发布时可开始的前沿是 01、02；执行中的可开始任务以 GitHub 原生阻塞项状态为准。任务显示 `ready-for-agent` 表示规格完整，有未完成阻塞项时仍需等待。
 
 ## 任务清单
 
@@ -90,4 +90,4 @@
 
 每份任务均按 Parent、What to build、Acceptance criteria、Blocked by 模板准备。线上已建立原生阻塞关系，因此正文省略 Blocked by 段落；本地保留规划编号方便核对。已逐项回读正文、父子关系、阻塞关系及标签，发布映射用于恢复及避免重复建票。
 
-集成分支为 `codex/recognition-category-integration`。用户已另外授权实现这些任务：开发和验收子代理使用 6.1 Sol / xhigh，界面设计与开发通过 Computer Use 指派 Antigravity 中的 Gemini 4 Argon；所有实现工作树从集成分支创建，验收后汇入该分支。
+集成分支为 `codex/recognition-category-integration`。用户已另外授权实现这些任务：开发和验收子代理使用 6.1 Sol / xhigh；界面设计与开发通过 Computer Use 指派 Antigravity 中的 Gemini。早期界面使用 Gemini 4 Argon，依用户最新指示，后续界面工作改用 Gemini 3.8 Flash / High，并保留已有改动继续开发。所有实现工作树从集成分支创建，验收后汇入该分支。
