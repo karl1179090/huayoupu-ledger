@@ -27,7 +27,7 @@ class NodeCapturePipelineTest {
             receipt=ReceiptEvidence(time=TransactionTimeResolver.fallback(clock)))) }
     }))
 
-    @Test fun savedNodeSnapshotPostsThroughSharedPipelineAndRecoveryDoesNotRecognizeOrChargeAgain()=runBlocking {
+    @Test fun savedNodeSnapshotPostsThroughSharedPipelineAndRecoveryDoesNotRecognizeOrChargeAgain()=runBlocking<Unit> {
         app.taskRecovery.await()
         val previous=app.store.walletSettings().defaultAccountUid
         val wallet=app.store.saveAccount(LedgerAccount(name="合成节点钱包",amountCents=10000,kind="cash"));app.store.setDefaultWallet(wallet.uid)
@@ -72,7 +72,7 @@ class NodeCapturePipelineTest {
             app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(wallet.uid));app.store.deleteAccount(wallet.id)
         }
     }
-    @Test fun qualifiedProductionAdapterUsesFrozenClassificationAndOnlyTheActualWechatWallet()=runBlocking {
+    @Test fun qualifiedProductionAdapterUsesFrozenClassificationAndOnlyTheActualWechatWallet()=runBlocking<Unit> {
         app.taskRecovery.await()
         val settings=app.store.walletSettings()
         val wallet=app.store.saveAccount(LedgerAccount(name="合成已验证零钱",amountCents=10000,kind="wechat"))
@@ -129,7 +129,7 @@ class NodeCapturePipelineTest {
         }
     }
 
-    @Test fun anotherImageCannotBorrowSavedNodeAuthorizationOrCreateAnOcrFallbackBill()=runBlocking {
+    @Test fun anotherImageCannotBorrowSavedNodeAuthorizationOrCreateAnOcrFallbackBill()=runBlocking<Unit> {
         app.taskRecovery.await()
         val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm")
         val records=app.store.all();val accounts=app.store.accounts()
@@ -144,7 +144,7 @@ class NodeCapturePipelineTest {
         } finally { app.tasks.delete(task) }
     }
 
-    @Test fun unknownInvalidConflictingAndImportedEvidenceUseExactlyOneOcrAndSharedSubmission()=runBlocking {
+    @Test fun unknownInvalidConflictingAndImportedEvidenceUseExactlyOneOcrAndSharedSubmission()=runBlocking<Unit> {
         app.taskRecovery.await()
         val previous=app.store.walletSettings().defaultAccountUid
         val wallet=app.store.saveAccount(LedgerAccount(name="合成节点回退钱包",amountCents=10000,kind="cash"));app.store.setDefaultWallet(wallet.uid)
