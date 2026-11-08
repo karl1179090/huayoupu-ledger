@@ -61,6 +61,34 @@ const recordMerchant=r=>r?.merchant!==undefined&&r?.merchant!==null?String(r.mer
 const knownReceiptApps={'com.tencent.mm':'微信','com.eg.android.AlipayGphone':'支付宝','com.taobao.taobao':'淘宝','com.unionpay':'云闪付','com.jingdong.app.mall':'京东','com.xunmeng.pinduoduo':'拼多多','com.sankuai.meituan':'美团'};
 const receiptSourceNames={ocr:'识别文字',node:'页面节点',capture:'采集来源'};
 const receiptFieldSpecs=[['merchant','商家'],['productDescription','商品说明'],['transactionDescription','交易说明'],['orderRemark','订单备注'],['serviceProvider','服务商'],['receiptIssuer','凭证来源'],['sourceApp','来源应用']];
+function formatBankName(code){
+ if(!code)return '';
+ const normalized=String(code).trim().toLowerCase().replace(/^bank_/,'');
+ const fromCode=(bankCodeOptions||[]).find(b=>b.code?.toLowerCase()===normalized);
+ if(fromCode?.label)return fromCode.label;
+ const fromOptions=(bankOptions||[]).find(b=>b.kind?.toLowerCase()==='bank_'+normalized||b.kind?.toLowerCase()===normalized);
+ if(fromOptions?.label)return fromOptions.label;
+ const fromAccount=(accounts||[]).find(a=>(a.bankCode?.toLowerCase()===normalized||a.kind?.toLowerCase()==='bank_'+normalized)&&a.name);
+ if(fromAccount?.name)return fromAccount.name.replace(/卡$/,'').replace(/信用卡$/,'').replace(/储蓄卡$/,'');
+ return code;
+}
+function walletSelectionReasonLabel(reason,source,manualLocked){
+ if(manualLocked||reason==='MANUAL'||source==='MANUAL')return '人工选择';
+ if(reason==='BANK_AND_TAIL')return '银行与尾号匹配';
+ if(reason==='UNIQUE_BANK')return '同银行唯一账户';
+ const s=reason||source;
+ return {PAYMENT_METHOD:'根据付款方式匹配',APP:'使用应用钱包',DEFAULT:'使用默认钱包'}[s]||'';
+}
+function bankReviewMessage(code){
+ return {
+  BANK_DIRECTION_REQUIRED:'交易收支方向待确认，请选择支出或收入',
+  PAYMENT_METHOD_UNMATCHED:'未匹配到对应银行账户，请核对并选择钱包',
+  PAYMENT_METHOD_AMBIGUOUS:'存在多个同银行账户或凭证模糊，请确认实际钱包',
+  PAYMENT_EVIDENCE_CONFLICT:'银行凭证与付款方式冲突，请确认实际钱包',
+  WALLET_REQUIRED:'未关联资产钱包，请选择钱包',
+  PAYMENT_METHOD_UNSUPPORTED:'此付款方式使用回退钱包'
+ }[code]||'';
+}
 function formatReceiptSourceApp(value){const raw=String(value??'').trim();if(!raw)return '';const app=(automatic.applications||[]).find(a=>a.packageName===raw&&a.label);return app?.label||knownReceiptApps[raw]||raw}
 const transferName=r=>r.direction==='TRANSFER'?`${r.transfer?.from?.accountName||r.transfer?.from?.reference?.name||'待选钱包'} → ${r.transfer?.to?.accountName||r.transfer?.to?.reference?.name||'待选钱包'}`:recordMerchant(r)||(r?.receipt?'未提供':'未填写商户');
 const signedMoney=(cents,income=false)=>`¥ ${income?'+':'-'}${money(cents)}`;
@@ -274,14 +302,14 @@ function syncRecordHistory(){
  if(!wasDirty){const resolved=resolveRecordCategory(current);draft.category=resolved.name;draft.categoryId=resolved.id;draft.expectedRevision=current.wallet?.revision??0}updateEditor();if(!wasDirty)editorBaseline=JSON.stringify(readDraft());remember();
 }
 function readDraft(){const direction=$('direction').dataset.value,category=$('category').textContent,categoryId=direction==='TRANSFER'?null:($('category').dataset.categoryId||findCategoryItem(direction,draft?.categoryId,category)?.id||null);return {merchant:$('merchant').value,category,...(direction!=='TRANSFER'&&categoryId?{categoryId}:{}),amount:$('amount').value,direction,occurredAt:draft&&(draft.refund||localTime(draft.occurredAt)===$('occurred-at').value)?draft.occurredAt:new Date($('occurred-at').value).getTime(),note:$('note').value,...(draft?.manualWalletSelected?{walletAccountUid:draft.walletAccountUid,manualWalletSelected:true}:{}),...(direction==='TRANSFER'?{transfer:readTransfer('record')}:{})}}
-function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
+function updateEditor(){if(!draft)return;const resolvedCat=resolveRecordCategory(draft);$('merchant').value=draft.merchant||'';$('merchant').placeholder=draft.receipt&&typeof draft.receipt==='object'&&!draft.merchant?'未提供':'商户名称';$('category').textContent=resolvedCat.name||draft.category||'其他';$('category').dataset.categoryId=draft.direction==='TRANSFER'?'':(resolvedCat.id||draft.categoryId||'');$('occurred-at').value=localTime(draft.occurredAt||Date.now());updateTimeChip();$('amount').parentElement.classList.remove('error-field');$('amount').value=draft.amount??(draft.amountCents!=null?String(draft.amountCents/100):'');$('note').value=draft.note||'';$('direction').dataset.value=draft.direction||'';$('direction').textContent=directionLabel(draft.direction);$('direction').classList.toggle('pending-direction',!draft.direction);updateAmountSign();$('source-label').textContent=draft.captureMode==='page'?'交易自动识别':({OCR:'摇一摇识别',IMAGE:'截图识别',SMS:'短信记账',NOTIFICATION:'通知记账',MANUAL:'手动记账'})[draft.source]||'';
  const posted=draft.state==='POSTED';
  const editor=$('import'),automatic=['SMS','NOTIFICATION'].includes(draft.source),aiRecord=['OCR','IMAGE'].includes(draft.source);
  editor.classList.toggle('standard-record',!!draft.id&&(automatic||draft.source==='MANUAL'));editor.classList.toggle('ai-record',aiRecord);editor.classList.toggle('posted-record',posted);
  editor.classList.toggle('compact-record',!!(draft.id||draft.recognitionTaskId));
  const hero=editor.querySelector('.record-hero');hero.hidden=!draft.id;hero.innerHTML=draft.id?ledgerIcon(draft):'';
  const original=$('original-message');original.hidden=true;original.querySelector('p').textContent=draft.rawText||'';
-document.querySelector('#import .pending').textContent=draft.recognitionTaskId?(taskNames[draft.taskStatus]||'识别记录'):(posted?'已入账':'待确认');$('editor-title').textContent=captureName(draft)||'手动记账';$('delete-record').hidden=(!draft.id&&!draft.recognitionTaskId)||working;$('delete-record').textContent=draft.recognitionTaskId?'删除识别记录':'删除账单';$('raw-text-button').hidden=!draft.rawText;document.querySelector('.editor-tools').style.display=draft.rawText?'flex':'none';$('review-reason').hidden=posted||!draft.reason;$('review-reason').textContent=draft.reason||'';
+document.querySelector('#import .pending').textContent=draft.recognitionTaskId?(taskNames[draft.taskStatus]||'识别记录'):(posted?'已入账':'待确认');$('editor-title').textContent=captureName(draft)||'手动记账';$('delete-record').hidden=(!draft.id&&!draft.recognitionTaskId)||working;$('delete-record').textContent=draft.recognitionTaskId?'删除识别记录':'删除账单';$('raw-text-button').hidden=!draft.rawText;document.querySelector('.editor-tools').style.display=draft.rawText?'flex':'none';const reviewReasonText=draft.reason||bankReviewMessage(draft.wallet?.reviewCode)||'';$('review-reason').hidden=posted||!reviewReasonText;$('review-reason').textContent=reviewReasonText;
  const scanner=document.querySelector('.scanner');scanner.hidden=draft.source==='MANUAL'&&!!draft.id;const canPick=!working&&!draft.id&&!draft.recognitionTaskId,canView=!!previewUrl&&!working;scanner.setAttribute('aria-disabled',String(!canPick&&!canView));scanner.setAttribute('aria-label',canView?'查看原始截图':canPick?'选择支付截图':'暂无原始截图');scanner.tabIndex=canPick||canView?0:-1;scanner.classList.toggle('placeholder',!previewUrl);scanner.classList.toggle('has-preview',!!previewUrl);$('capture-preview').hidden=!previewUrl;if(previewUrl)$('capture-preview').src=previewUrl;
  document.querySelector('.scanning').textContent=working?(draft.taskStatus==='CAPTURING'?'正在获取账单截图…':draft.taskStatus==='QUEUED'?'已获取截图，等待识别…':'正在识别账单…'):importError||(previewUrl?'本次识别截图 · 请核对记账信息':draft.id?(draft.source==='OCR'||draft.source==='IMAGE'?'这笔历史记录未保存原始截图，可查看识别原文并核对字段':'此记录来自'+(captureName(draft)||'手动记账')+'，没有截图'):'点击上方选择支付截图，自动识别');
  document.querySelector('.scanner').classList.toggle('no-record-image',!!(draft.id||draft.recognitionTaskId)&&!previewUrl);
@@ -307,19 +335,41 @@ function renderReceiptDetails(){
  const recordKey=String(draft.id||draft.recognitionTaskId||0),keepExpanded=section.dataset.recordId===recordKey&&$('receipt-evidence-toggle')?.getAttribute('aria-expanded')==='true';
  section.dataset.recordId=recordKey;section.hidden=false;
  const rows=receiptFieldSpecs.map(([key,label])=>{
-  const rawVal=receiptFieldValue(receipt[key]),missing=key==='merchant'&&!rawVal;
+  let rawVal=receiptFieldValue(receipt[key]);
+  if(key==='receiptIssuer'&&!rawVal&&receipt.bank?.bankCode){
+   rawVal=formatBankName(receipt.bank.bankCode);
+  }
+  const missing=key==='merchant'&&!rawVal;
   if(key!=='merchant'&&!rawVal)return '';
-  const displayVal=missing?'未提供':key==='sourceApp'?formatReceiptSourceApp(rawVal):rawVal;
+  const displayVal=missing?'未提供':key==='sourceApp'?formatReceiptSourceApp(rawVal):key==='receiptIssuer'?formatBankName(rawVal)||rawVal:rawVal;
   return `<div class="receipt-field" data-receipt-field="${key}"><dt>${label}</dt><dd class="receipt-value${missing?' is-missing':''}">${escapeText(displayVal)}</dd></div>`;
- }).filter(Boolean).join('');
+ }).filter(Boolean);
+ if(receipt.bank?.transactionType){
+  const typeVal=receiptFieldValue(receipt.bank.transactionType);
+  if(typeVal)rows.push(`<div class="receipt-field" data-receipt-field="transactionType"><dt>交易类型</dt><dd class="receipt-value">${escapeText(typeVal)}</dd></div>`);
+ }
+ if(receipt.bank?.cardLast4){
+  rows.push(`<div class="receipt-field" data-receipt-field="cardLast4"><dt>交易卡号</dt><dd class="receipt-value">尾号 ${escapeText(receipt.bank.cardLast4)}</dd></div>`);
+ }
  const evidenceItems=receiptFieldSpecs.map(([key,label])=>{
   const f=receipt[key];if(!f||typeof f!=='object')return '';
   const val=receiptFieldValue(f),raw=String(f.rawText??'').trim()||val,src=String(f.source??'').trim();
   if(!val&&!raw)return '';
   const srcName=receiptSourceNames[src]||'凭证记录';
   return `<div class="receipt-evidence-item" data-evidence-field="${key}" data-evidence-source="${escapeText(src)}"><div class="receipt-evidence-meta"><b>${label}</b><span class="receipt-source-tag">${escapeText(srcName)}</span></div><div class="receipt-evidence-raw">${escapeText(raw)}</div></div>`;
- }).filter(Boolean).join('');
- section.innerHTML=`<div class="receipt-heading"><b>凭证信息</b><small class="receipt-readonly">只读</small></div><dl class="receipt-fields">${rows}</dl>${evidenceItems?`<div class="receipt-verify"><button type="button" id="receipt-evidence-toggle" class="receipt-evidence-toggle" aria-expanded="${keepExpanded}" aria-controls="receipt-evidence-panel"><span>核对原始文字与来源</span><small class="receipt-toggle-state">${keepExpanded?'收起':'查看'}</small></button><div id="receipt-evidence-panel" class="receipt-evidence-panel"${keepExpanded?'':' hidden'}>${evidenceItems}</div></div>`:''}`;
+ }).filter(Boolean);
+ if(receipt.bank?.transactionType&&typeof receipt.bank.transactionType==='object'){
+  const f=receipt.bank.transactionType;
+  const val=receiptFieldValue(f),raw=String(f.rawText??'').trim()||val,src=String(f.source??'').trim();
+  if(val||raw){
+   const srcName=receiptSourceNames[src]||'识别文字';
+   evidenceItems.push(`<div class="receipt-evidence-item" data-evidence-field="transactionType" data-evidence-source="${escapeText(src)}"><div class="receipt-evidence-meta"><b>交易类型</b><span class="receipt-source-tag">${escapeText(srcName)}</span></div><div class="receipt-evidence-raw">${escapeText(raw)}</div></div>`);
+  }
+ }
+ if(draft.paymentMethod?.rawValue){
+  evidenceItems.push(`<div class="receipt-evidence-item" data-evidence-field="paymentMethod" data-evidence-source="payment"><div class="receipt-evidence-meta"><b>${escapeText(draft.paymentMethod.rawLabel||'交易账户')}</b><span class="receipt-source-tag">付款方式</span></div><div class="receipt-evidence-raw">${escapeText(draft.paymentMethod.rawValue)}</div></div>`);
+ }
+ section.innerHTML=`<div class="receipt-heading"><b>凭证信息</b><small class="receipt-readonly">只读</small></div><dl class="receipt-fields">${rows.join('')}</dl>${evidenceItems.length?`<div class="receipt-verify"><button type="button" id="receipt-evidence-toggle" class="receipt-evidence-toggle" aria-expanded="${keepExpanded}" aria-controls="receipt-evidence-panel"><span>核对原始文字与来源</span><small class="receipt-toggle-state">${keepExpanded?'收起':'查看'}</small></button><div id="receipt-evidence-panel" class="receipt-evidence-panel"${keepExpanded?'':' hidden'}>${evidenceItems.join('')}</div></div>`:''}`;
  const toggle=$('receipt-evidence-toggle'),panel=$('receipt-evidence-panel');
  if(toggle&&panel)toggle.onclick=()=>{const next=panel.hidden;panel.hidden=!next;toggle.setAttribute('aria-expanded',String(next));const state=toggle.querySelector('.receipt-toggle-state');if(state)state.textContent=next?'收起':'查看'};
 }
@@ -393,17 +443,18 @@ function closeSheet(animate=true){
 $('sheet').addEventListener('cancel',e=>{e.preventDefault();closeSheet()});
 $('sheet').addEventListener('click',e=>{if(e.target===$('sheet')){const r=$('sheet').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeSheet()}});
 function about(){if(native?.aboutFrom)native.aboutFrom(nativeOrigin(document.querySelector('.about-app')));else if(native)native.about();else showSheet('关于花有谱','<p class="sheet-copy">花有谱 · 少点手动，收支有谱</p>')}
-function submitDraft(confirmDuplicate=false){if((draft?.refund||draft?.standaloneRefund)&&draft.state!=='POSTED'){chooseRefundTarget();return}if(working){notify('正在识别，请稍候');return}if($('direction').dataset.value==='TRANSFER'&&!validTransfer('record'))return;const values=readDraft();$('amount').parentElement.classList.remove('error-field');if(!/^\d+(\.\d{1,2})?$/.test(values.amount)||(Number(values.amount)<0||(Number(values.amount)===0&&!(draft?.refund&&draft.state==='POSTED'&&draft.amountCents===0)))){$('amount').parentElement.classList.add('error-field');$('amount').focus();notify('请输入大于零、最多两位小数的金额');return}if(!Number.isFinite(values.occurredAt)){$('occurred-at').focus();notify('请选择有效交易时间');return}if(!native){notify('请在 Android 应用中保存账单');return}const result=JSON.parse(native.save(JSON.stringify({...values,id:draft?.id||0,recognitionTaskId:draft?.recognitionTaskId||0,confirmDuplicate,expectedRevision:draft?.expectedRevision??draft?.wallet?.revision??0,submissionToken:draft?.submissionToken||(draft.submissionToken=submissionToken())})));if(result.duplicateRequired){showSheet('疑似重复，仍然保存？','<p class="sheet-copy">这笔账单可能已从其他渠道记录，请核对后再确认。</p><div class="sheet-actions"><button onclick="closeSheet()">返回核对</button><button class="primary" id="confirm-duplicate">仍然保存</button></div>');$('confirm-duplicate').onclick=()=>submitDraft(true);return}if(!result.ok){notify(result.error||'保存失败，请重试');return}const edited=draft?.state==='POSTED';filter=values.direction==='TRANSFER'?'transfer':values.direction==='INCOME'?'income':'expense';refresh();cancelEditor(true);notify(result.state==='REVIEW'?'已保存，请选择钱包后入账':edited?'修改已保存':'记账成功')}
+function submitDraft(confirmDuplicate=false){if((draft?.refund||draft?.standaloneRefund)&&draft.state!=='POSTED'){chooseRefundTarget();return}if(working){notify('正在识别，请稍候');return}if($('direction').dataset.value==='TRANSFER'&&!validTransfer('record'))return;const values=readDraft();if(!values.direction||!['EXPENSE','INCOME','TRANSFER'].includes(values.direction)){notify('请确认交易收支方向');$('direction').focus();return}$('amount').parentElement.classList.remove('error-field');if(!/^\d+(\.\d{1,2})?$/.test(values.amount)||(Number(values.amount)<0||(Number(values.amount)===0&&!(draft?.refund&&draft.state==='POSTED'&&draft.amountCents===0)))){$('amount').parentElement.classList.add('error-field');$('amount').focus();notify('请输入大于零、最多两位小数的金额');return}if(!Number.isFinite(values.occurredAt)){$('occurred-at').focus();notify('请选择有效交易时间');return}if(!native){notify('请在 Android 应用中保存账单');return}const result=JSON.parse(native.save(JSON.stringify({...values,id:draft?.id||0,recognitionTaskId:draft?.recognitionTaskId||0,confirmDuplicate,expectedRevision:draft?.expectedRevision??draft?.wallet?.revision??0,submissionToken:draft?.submissionToken||(draft.submissionToken=submissionToken())})));if(result.duplicateRequired){showSheet('疑似重复，仍然保存？','<p class="sheet-copy">这笔账单可能已从其他渠道记录，请核对后再确认。</p><div class="sheet-actions"><button onclick="closeSheet()">返回核对</button><button class="primary" id="confirm-duplicate">仍然保存</button></div>');$('confirm-duplicate').onclick=()=>submitDraft(true);return}if(!result.ok){notify(result.error||'保存失败，请重试');return}const edited=draft?.state==='POSTED';filter=values.direction==='TRANSFER'?'transfer':values.direction==='INCOME'?'income':'expense';refresh();cancelEditor(true);notify(result.state==='REVIEW'?'已保存，请选择钱包后入账':edited?'修改已保存':'记账成功')}
 function restoreState(state){if(!state)return;month=/^\d{4}-\d{2}$/.test(state.month)?state.month:month;filter=['income','expense','transfer','all'].includes(state.filter)?state.filter:'expense';draft=state.draft||null;editorBaseline=typeof state.editorBaseline==='string'?state.editorBaseline:null;if(draft)updateEditor();previewUrl=state.previewUrl||'';if(state.manual){manualType=['income','expense','transfer'].includes(state.manual.type)?state.manual.type:'expense';manualTransfer=state.manual.transfer||manualTransfer;$('manual-occurred-at').value=state.manual.occurredAt||localTime(Date.now());manualCategory=state.manual.category||'餐饮';manualCategoryId=state.manual.categoryId||null;$('manual-amount').value=state.manual.amount||'';$('manual-note').value=state.manual.note||'';$('manual-note-count').textContent=$('manual-note').value.length+'/500';manualWalletUid=state.manual.walletUid||walletSettings.defaultAccountUid;manualWalletSelected=!!state.manual.walletSelected;manualSubmissionToken=state.manual.submissionToken||submissionToken();drawManualWallet()}statsType=['expense','income','all'].includes(state.statsType)?state.statsType:'expense';rankingType=state.rankingType==='income'?'income':'expense';assetsHidden=!!state.assetsHidden;go(['ledger','import','settings','manual','stats','assets'].includes(state.page)?state.page:'ledger');refresh();if(draft){updateEditor();if(state.recordPanel)showRecordPanel(null)}if(state.manualPanel)beginManual(false);remember()}
 window.LedgerUI={getState,back(){if(window.LedgerSetup?.isOpen()){window.LedgerSetup.close();return true}if($('sheet').open){closeSheet();return true}if(manualOpen||manualClosing){if(!manualClosing)closeManual();return true}if(recordPanelOpen||recordPanelClosing){if(!recordPanelClosing)cancelEditor();return true}if(searching){setSearchOpen(false);return true}if(page!=='ledger'){go('ledger');return true}return false},event(type,data){switch(type){case'fileOperation':if(data){showSheet('文件处理中',`<div class="export-progress" role="status"><span class="recognition-spinner" aria-hidden="true"></span><p>${escapeText(data)}…</p></div>`);$('sheet').dataset.fileOperation='true'}else if($('sheet').dataset.fileOperation){closeSheet();delete $('sheet').dataset.fileOperation}break;case'shakeApplications':openShakeWhitelist();break;case'permissionSetup':window.LedgerSetup?.render(data);break;case'fontScale':document.body.classList.toggle('large-text',data>=1.4);document.body.style.setProperty('--scaled-fab-font',`${35/Math.max(1,data)}px`);break;case'refresh':if(refresh()){if(page==='stats')drawStats();if(page==='assets')drawAssets();if(page==='manual')drawCategories()}break;case'statisticsPeriod':openStatistics(data);break;case'navigate':go(data);break;case'message':notify(data);break;case'restoreState':restoreState(data);break;case'openRecord':openRecord(data,true);break;case'preview':previewUrl=data.url;updateEditor();break;case'importStatus':working=!!data.working;if(working){newDraft();if(data.taskId){draft.recognitionTaskId=data.taskId;draft.taskStatus='CAPTURING'}go('import')}if(data.error)importError=String(data.error);updateEditor();break;case'importError':working=false;importError=typeof data==='string'?data:String(data?.error||'识别失败，请重新选择截图重试');updateEditor();break}}};
 document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;viewLimit=200;refresh();remember()});
 document.querySelectorAll('[data-channel]').forEach(s=>s.onclick=()=>setChannel(s.dataset.channel,s.getAttribute('aria-checked')!=='true'));
 $('month').onclick=()=>{showSheet('选择账本月份',`<input id="month-picker" class="month-input" type="month" value="${month}" min="2000-01" max="2100-12"/><div class="sheet-actions"><button id="month-prev">上个月</button><button id="month-next">下个月</button><button class="primary" id="month-apply">确定</button></div>`);const move=delta=>{const [y,m]=$('month-picker').value.split('-').map(Number),d=new Date(y,m-1+delta,1);$('month-picker').value=localTime(d.getTime()).slice(0,7)};$('month-prev').onclick=()=>move(-1);$('month-next').onclick=()=>move(1);$('month-apply').onclick=()=>{const value=$('month-picker').value;if(value){month=value;viewLimit=200;refresh();closeSheet();remember()}}};
 $('category').onclick=()=>{
- const activeDir=()=>$('direction').dataset.value||'EXPENSE';
+ const activeDir=()=>$('direction').dataset.value||'';
  showSheet(draft?.refund?'分类':'分类与收支方向',(draft?.refund?'':`<div class="direction-choices"><button type="button" data-direction="EXPENSE" class="${activeDir()==='EXPENSE'?'active':''}">支出</button><button type="button" data-direction="INCOME" class="${activeDir()==='INCOME'?'active':''}">收入</button><button type="button" data-direction="TRANSFER" class="${activeDir()==='TRANSFER'?'active':''}">转账</button></div>`)+'<div id="record-category-choices"></div><button type="button" id="record-manage-categories" class="sheet-row"><span><b>管理分类目录</b><small>添加、改名、排序或调整图标</small></span><span aria-hidden="true">›</span></button>');
  const renderChoices=dir=>{
   const box=$('record-category-choices'),manageBtn=$('record-manage-categories');if(!box)return;
+  if(!dir){box.innerHTML='<p class="sheet-copy">请先在上方选择交易收支方向（支出、收入或转账），确认后将列出对应分类。</p>';if(manageBtn)manageBtn.hidden=true;return}
   if(dir==='TRANSFER'){box.innerHTML='<p class="sheet-copy">本人钱包互转不计入收支分类，请在下方核对转出与转入钱包。</p>';if(manageBtn)manageBtn.hidden=true;return}
   if(manageBtn){manageBtn.hidden=false;manageBtn.onclick=()=>openCategoryManager(dir)}
   const items=directoryItems(dir),curId=$('category').dataset.categoryId||'',curName=$('category').textContent;
@@ -414,6 +465,8 @@ $('category').onclick=()=>{
  document.querySelectorAll('[data-direction]').forEach(b=>b.onclick=()=>{
   const nextDir=b.dataset.direction,prevDir=$('direction').dataset.value;
   $('direction').dataset.value=nextDir;$('direction').textContent=directionLabel(nextDir);
+  $('direction').classList.remove('pending-direction');
+  if(draft)draft.direction=nextDir;
   if(nextDir==='TRANSFER'){$('category').textContent='转账';$('category').dataset.categoryId='';if(draft){draft.category='转账';draft.categoryId=null}}
   else if(prevDir!==nextDir||!$('category').dataset.categoryId||!directoryItems(nextDir).some(c=>c.id===$('category').dataset.categoryId)){const nextCat=findCategoryItem(nextDir,null,null);$('category').textContent=nextCat.name;$('category').dataset.categoryId=nextCat.id;if(draft){draft.category=nextCat.name;draft.categoryId=nextCat.id}}
   updateAmountSign();document.querySelectorAll('[data-direction]').forEach(e=>e.classList.toggle('active',e===b));renderChoices(nextDir);remember();
@@ -696,17 +749,46 @@ function walletLabel(account){return account?`${account.name}${account.cardLast4
 function availableWallets(){return accounts.filter(a=>a.type==='ASSET'&&!a.archived)}
 function drawManualWallet(){drawTransfer('manual');$('manual-wallet').hidden=manualType==='transfer';const account=accounts.find(a=>a.uid===(manualWalletSelected?manualWalletUid:walletSettings.defaultAccountUid));$('manual-wallet').querySelector('span').textContent=account?walletLabel(account):'选择钱包';}
 function drawRecordWallet(){
- if(!draft)return;drawTransfer('record');const isTransfer=$('direction').dataset.value==='TRANSFER';$('record-wallet').hidden=isTransfer;if(isTransfer){$('wallet-explanation').textContent=eligibilityText(draft.wallet?.eligibility);return}const wallet=draft.wallet,uid=draft.manualWalletSelected?draft.walletAccountUid:wallet?.accountUid||(!draft.id?walletSettings.defaultAccountUid:draft.walletAccountUid),account=accounts.find(a=>a.uid===uid);
+ if(!draft)return;drawTransfer('record');const isTransfer=$('direction').dataset.value==='TRANSFER';$('record-wallet').hidden=isTransfer;if(isTransfer){$('wallet-explanation').textContent=eligibilityText(draft.wallet?.eligibility);return}
+ const wallet=draft.wallet;
+ let uid=null;
+ if(draft.manualWalletSelected){
+  uid=draft.walletAccountUid;
+ }else if(wallet&&'accountUid' in wallet&&wallet.accountUid){
+  uid=wallet.accountUid;
+ }else if(!draft.id&&!draft.receipt?.bank&&!draft.paymentMethod&&!wallet?.reviewCode){
+  uid=walletSettings.defaultAccountUid;
+ }else{
+  uid=draft.walletAccountUid||null;
+ }
+ const account=accounts.find(a=>a.uid===uid);
  const historical=!!draft.id&&wallet&&wallet.eligibility!=='ACTIVE';
- $('record-wallet').disabled=working;$('record-wallet').querySelector('span').textContent=account?walletLabel(account):wallet?.accountName||'选择钱包';
- const source={MANUAL:'人工选择',PAYMENT_METHOD:'根据付款方式匹配',APP:'使用应用钱包',DEFAULT:'使用默认钱包'}[draft.manualWalletSelected?'MANUAL':wallet?.selectionSource]||'';
- let explanation=historical?eligibilityText(wallet.eligibility):draft.state==='POSTED'?`${source}${source?' · ':''}本笔余额变化 ${Number(wallet?.appliedCents)>0?'+':''}${money(wallet?.appliedCents||0)} 元`:uid?'待确认，余额尚未变化':'请选择钱包后入账';
- if(draft.manualWalletSelected&&!historical)explanation='人工选择 · 保存后更新钱包余额';
- if(wallet?.reviewCode?.startsWith('TRANSFER_'))explanation+='\n'+transferReviewMessage(wallet.reviewCode)+'；确认为本人互转时，可切换为转账后核对双方钱包。';
- if(wallet?.reviewCode==='PAYMENT_EVIDENCE_CONFLICT')explanation+=' · 付款方式有冲突，请核对钱包';
- if(wallet?.reviewCode==='PAYMENT_METHOD_AMBIGUOUS')explanation+=' · 组合付款或方式冲突，已使用回退钱包';
- if(wallet?.reviewCode==='PAYMENT_METHOD_UNSUPPORTED')explanation+=' · 此付款方式使用回退钱包';
- if(draft.paymentMethod?.rawValue)explanation+=`\n${draft.paymentMethod.rawLabel||'付款方式'}：${draft.paymentMethod.rawValue}`;
+ $('record-wallet').disabled=working;
+ $('record-wallet').querySelector('span').textContent=account?walletLabel(account):wallet?.accountName||'选择钱包';
+ const source=walletSelectionReasonLabel(wallet?.selectionReason,wallet?.selectionSource,draft.manualWalletSelected||wallet?.manualLocked);
+ let explanation='';
+ if(historical){
+  explanation=eligibilityText(wallet.eligibility);
+ }else if(draft.state==='POSTED'){
+  explanation=`${source}${source?' · ':''}本笔余额变化 ${Number(wallet?.appliedCents)>0?'+':''}${money(wallet?.appliedCents||0)} 元`;
+ }else{
+  if(draft.manualWalletSelected){
+   explanation='人工选择 · 待确认，未影响钱包余额';
+  }else if(uid){
+   explanation=`${source}${source?' · ':''}待确认，未影响钱包余额`;
+  }else{
+   explanation='请选择钱包后入账 · 待确认，未影响钱包余额';
+  }
+ }
+ if(wallet?.reviewCode?.startsWith('TRANSFER_')){
+  explanation+='\n'+transferReviewMessage(wallet.reviewCode)+'；确认为本人互转时，可切换为转账后核对双方钱包。';
+ }else if(wallet?.reviewCode){
+  const msg=bankReviewMessage(wallet.reviewCode);
+  if(msg)explanation+=(explanation?'\n':'')+msg;
+ }
+ if(draft.paymentMethod?.rawValue){
+  explanation+=`\n${draft.paymentMethod.rawLabel||'交易账户'}：${draft.paymentMethod.rawValue}`;
+ }
  $('wallet-explanation').textContent=explanation;
 }
 function chooseWallet(target){
