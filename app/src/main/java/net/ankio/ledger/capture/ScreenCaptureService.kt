@@ -425,7 +425,7 @@ open class ScreenCaptureService:AccessibilityService() {
                 var missingReason:ScreenshotFailureReason?=null
                 val screenshotAt=SystemClock.elapsedRealtime()
                 bitmap=try { withTimeoutOrNull(4_000) { screenshotProvider(if(Build.VERSION.SDK_INT>=34)target.id else null) {
-                    allowed() && captureContentGeneration(target.id)==snapshot.generation &&
+                    allowed() && (fallback!=null || trigger.freshAt(SystemClock.elapsedRealtime())) && captureContentGeneration(target.id)==snapshot.generation &&
                         (automatic || screenUnlocked() && foregroundSwitch.get()==observed?.switchGeneration)
                 } }
                     ?:throw ScreenshotAcquisitionException(ScreenshotFailureReason.TIMEOUT,"系统截图响应超时，请检查无障碍状态后重试")

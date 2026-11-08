@@ -148,6 +148,28 @@ class ShakeWhitelistCaptureTest {
         } finally { service.screenshotProvider=provider }
     }
 
+    @Test fun unknownLayoutDelayedSuccessfulPixelsKeepTheOriginalTriggerDeadline() {
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        val deliveryAllowed=CompletableDeferred<Boolean>()
+        val accounts=app.store.accounts()
+        service.screenshotProvider={ _,allowed ->
+            delay(1_800)
+            val permitted=allowed();deliveryAllowed.complete(permitted)
+            if(!permitted)throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"synthetic expired pixel delivery")
+            android.graphics.Bitmap.createBitmap(100,200,android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        try {
+            service.captureOnShake()
+            await { deliveryAllowed.isCompleted && (taskIds()-previousTasks).singleOrNull()?.let {
+                app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            assertFalse("Unknown/OCR layouts must reject pixels delivered after the original trigger deadline",runBlocking { deliveryAllowed.await() })
+            assertEquals(0,calls.get())
+            assertNull(app.tasks.recordId((taskIds()-previousTasks).single()))
+            assertEquals(accounts,app.store.accounts())
+        } finally { service.screenshotProvider=provider }
+    }
+
     @Test fun ordinaryScreenshotTimeoutStillPostsTheOriginalReliableNodesWithoutOcr() {
         startFixture("safe");service.processorFactory=nodeFactory()
         val provider=service.screenshotProvider
