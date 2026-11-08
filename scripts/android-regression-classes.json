@@ -76,7 +76,8 @@
     "net.ankio.ledger.CategoryManagementBridgeTest",
     "net.ankio.ledger.data.CategoryMigrationTest",
     "net.ankio.ledger.ReceiptEvidenceAcceptanceTest",
-    "net.ankio.ledger.data.ReceiptEvidencePersistenceTest"
+    "net.ankio.ledger.data.ReceiptEvidencePersistenceTest",
+    "net.ankio.ledger.BankReceiptAcceptanceTest"
   ],
   "api34": [
     "net.ankio.ledger.ShakeWhitelistTest",
@@ -105,7 +106,8 @@
     "net.ankio.ledger.CategoryManagementBridgeTest",
     "net.ankio.ledger.data.CategoryMigrationTest",
     "net.ankio.ledger.ReceiptEvidenceAcceptanceTest",
-    "net.ankio.ledger.data.ReceiptEvidencePersistenceTest"
+    "net.ankio.ledger.data.ReceiptEvidencePersistenceTest",
+    "net.ankio.ledger.BankReceiptAcceptanceTest"
   ],
   "api36": [
     "net.ankio.ledger.widget.ExpenseWidgetTest",

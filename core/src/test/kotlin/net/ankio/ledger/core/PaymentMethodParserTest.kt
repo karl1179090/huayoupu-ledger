@@ -7,6 +7,20 @@ class PaymentMethodParserTest {
     private fun parse(vararg text: String, income: Boolean = false, origin: String = PaymentApps.WECHAT) =
         PaymentMethodParser.parse(text.map { LocalOcrLine(it) }, if (income) Direction.INCOME else Direction.EXPENSE, origin)
 
+    @Test fun actualDebitEvidencePrecedesAStatedPaymentPreference() {
+        val bank = PaymentMethodParser.parse(listOf(LocalOcrLine("付款方式：优先使用零钱"),
+            LocalOcrLine("扣款账户：招商银行(0007)")), Direction.EXPENSE, PaymentApps.WECHAT)!!
+        assertEquals("BANK_CARD", bank.medium)
+        assertEquals("0007", bank.cardLast4)
+        assertFalse(bank.ambiguous)
+        val balance = PaymentMethodParser.parse(listOf(LocalOcrLine("付款方式：优先使用招商银行(1234)"),
+            LocalOcrLine("通过零钱扣款")), Direction.EXPENSE, PaymentApps.WECHAT)!!
+        assertEquals("WECHAT_BALANCE", balance.medium)
+        assertEquals("实际扣款", balance.rawLabel)
+        assertEquals("零钱", balance.rawValue)
+        assertFalse(balance.ambiguous)
+    }
+
     @Test fun explicitBankCardWinsOverThePaymentAppAndKeepsLeadingZeroes() {
         for (value in listOf("招商银行（0007）", "招行储蓄卡 ****0007", "招商银行 尾号0007")) {
             val evidence = parse("付款方式：$value")!!

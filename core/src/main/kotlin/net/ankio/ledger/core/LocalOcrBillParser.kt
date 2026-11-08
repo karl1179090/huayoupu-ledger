@@ -90,6 +90,8 @@ object LocalOcrBillParser {
             .filter { it.text.isNotBlank() }
         if (clean.isEmpty()) return null
         val text = clean.joinToString("\n") { it.text }
+        if (BankReceiptParser.matches(clean))
+            return if (expenseOnly) null else BankReceiptParser.parse(clean, capturedAt, origin)
         val transfer = TransferEvidenceParser.parse(clean, origin)
         if (transfer != null && transfer.intent != TransferIntent.EXTERNAL) {
             if (expenseOnly && !TransferEvidenceParser.automaticCandidate(transfer, origin)) return null
