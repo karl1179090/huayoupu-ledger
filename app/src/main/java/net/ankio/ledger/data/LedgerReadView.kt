@@ -48,7 +48,7 @@ class LedgerReadView(private val store:LedgerStore) {
             t.to_manual_locked tf_to_locked,t.fee_manual_locked tf_fee_locked,t.review_code tf_review,
             t.from_reference tf_from_reference,t.to_reference tf_to_reference,fa.name tf_from_name,ta.name tf_to_name,
             fa.archived tf_from_archived,ta.archived tf_to_archived,w.account_reference wallet_reference,
-            r.category_id category_id,cat.icon category_icon,r.receipt_evidence
+            r.category_id category_id,cat.icon category_icon,r.receipt_evidence,r.category_decision
             FROM records r LEFT JOIN merchant_icons i ON i.record_id=r.id LEFT JOIN merchant_icon_assets a ON a.merchant_key=i.merchant_key
             LEFT JOIN record_wallet_links w ON w.record_uid=r.uid LEFT JOIN accounts wa ON wa.uid=w.account_uid
             LEFT JOIN record_transfer_details t ON t.record_uid=r.uid LEFT JOIN accounts fa ON fa.uid=t.from_account_uid
@@ -78,6 +78,7 @@ class LedgerReadView(private val store:LedgerStore) {
                 put("standaloneRefund",if(c.isNull(34))JSONObject.NULL else JSONObject(c.getString(34)))
                 fun text(key:String):String?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it))null else c.getString(it) }
                 fun number(key:String):Long?=c.getColumnIndexOrThrow(key).let { if(c.isNull(it))null else c.getLong(it) }
+                put("categoryDecision",ClassificationCodec.decision(text("category_decision")?.let { ClassificationCodec.readDecision(JSONObject(it)) }))
                 put("receipt",ReceiptEvidenceCodec.json(text("receipt_evidence")?.let(ReceiptEvidenceCodec::decode)))
                 getJSONObject("wallet").put("accountReference",text("wallet_reference")?.let(::JSONObject) ?: JSONObject.NULL)
                 val fee=number("tf_fee")

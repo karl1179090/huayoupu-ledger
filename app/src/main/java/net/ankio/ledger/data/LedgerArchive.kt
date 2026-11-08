@@ -46,7 +46,7 @@ object LedgerArchive {
 
     /** Ledger rows and media are fixed first; compression and destination I/O hold no ledger lock. */
     fun write(store:LedgerStore,channels:ChannelSettings,output:OutputStream):Summary=StagedLedgerBackup.capture(store).use { snapshot->
-        val ledger=JSONObject(LedgerBackup.encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory))
+        val ledger=JSONObject(LedgerBackup.encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory,snapshot.classification))
         val histories=JSONObject();val icons=JSONObject(snapshot.iconAssets)
         snapshot.histories.forEach { (uid,entries)->histories.put(uid,JSONArray(entries.map { entry->
             LedgerBackup.historyJson(entry).put("asset",snapshot.historyAssets[uid]?.get(entry.sequence) ?: JSONObject.NULL)

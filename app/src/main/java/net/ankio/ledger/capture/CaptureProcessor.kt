@@ -54,6 +54,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 app.changed();return IngestResult.DuplicateSkipped
             }
             taskId?.let { app.tasks.diagnose(it,"stage","local_recognition");app.tasks.diagnose(it,"engine","local") }
+            val classification=taskId?.let(app.tasks::classificationSnapshot) ?: app.store.classificationRules()
             val recognized = recognize(guard)
             currentCoroutineContext().ensureActive()
             beforeAccept()
@@ -68,7 +69,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 if(recognized.iconDetails.isNotBlank())app.tasks.diagnose(it,"icon_details",recognized.iconDetails)
                 app.tasks.diagnose(it,"stage","save_result")
             }
-            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), allowed=guard).outcome
+            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), classificationSnapshot=classification, allowed=guard).outcome
             if(result==IngestResult.Ignored&&!guard())throw CancellationException("识别已停止")
             taskId?.let { id ->
                 // Explain REVIEW without exporting the model response or financial fields.
