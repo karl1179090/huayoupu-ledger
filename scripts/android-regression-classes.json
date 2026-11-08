@@ -79,7 +79,9 @@
     "net.ankio.ledger.data.ReceiptEvidencePersistenceTest",
     "net.ankio.ledger.data.MerchantClassificationTest",
     "net.ankio.ledger.data.MerchantClassificationProcessRestartTest",
-    "net.ankio.ledger.ClassificationManagementBridgeTest"
+    "net.ankio.ledger.ClassificationManagementBridgeTest",
+    "net.ankio.ledger.data.CompoundClassificationTest",
+    "net.ankio.ledger.CompoundClassificationBridgeTest"
   ],
   "api34": [
     "net.ankio.ledger.ShakeWhitelistTest",
@@ -111,7 +113,9 @@
     "net.ankio.ledger.data.ReceiptEvidencePersistenceTest",
     "net.ankio.ledger.data.MerchantClassificationTest",
     "net.ankio.ledger.data.MerchantClassificationProcessRestartTest",
-    "net.ankio.ledger.ClassificationManagementBridgeTest"
+    "net.ankio.ledger.ClassificationManagementBridgeTest",
+    "net.ankio.ledger.data.CompoundClassificationTest",
+    "net.ankio.ledger.CompoundClassificationBridgeTest"
   ],
   "api36": [
     "net.ankio.ledger.widget.ExpenseWidgetTest",

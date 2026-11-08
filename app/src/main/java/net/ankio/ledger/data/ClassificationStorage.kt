@@ -53,6 +53,19 @@ internal object ClassificationStorage {
             throw ClassificationException("RULE_INVALID","规则顺序已变化，请刷新后重试")
         changed(db,current.copy(customRules=current.customRules.map { if(it.direction==direction)it.copy(order=ids.indexOf(it.id)) else it }))
     }
+    fun setBuiltinEnabled(db:SQLiteDatabase,id:String,enabled:Boolean) {
+        val current=configuration(db)
+        val rule=current.builtinRules.firstOrNull { it.id==id }
+            ?: throw ClassificationException("RULE_NOT_FOUND","内置规则已不存在，请刷新后重试")
+        target(db,rule)
+        if(rule.enabled!=enabled)changed(db,current.copy(builtinRules=current.builtinRules.map { if(it.id==id)it.copy(enabled=enabled) else it }))
+    }
+    fun copyBuiltin(db:SQLiteDatabase,id:String):ClassificationRule {
+        val rule=configuration(db).builtinRules.firstOrNull { it.id==id }
+            ?: throw ClassificationException("RULE_NOT_FOUND","内置规则已不存在，请刷新后重试")
+        target(db,rule)
+        return rule.copy(id="",name=rule.name.take(76)+"（副本）",enabled=true,order=0,conflictReason=null)
+    }
     fun hold(db:SQLiteDatabase,key:String,snapshot:ClassificationSnapshot=configuration(db),taskDatabase:String?=null):ClassificationSnapshot {
         require(key.length in 1..200)
         db.rawQuery("SELECT payload FROM classification_snapshots WHERE operation_key=?",arrayOf(key)).use {
@@ -88,6 +101,7 @@ internal object ClassificationStorage {
     fun validateBackup(backup:ClassificationBackup,categories:List<LedgerCategory>) {
         val targets=categories.associateBy { it.id }
         fun validate(snapshot:ClassificationSnapshot,requireTargets:Boolean) {
+            ClassificationCodec.snapshot(snapshot)
             (snapshot.customRules+snapshot.builtinRules).forEach { rule ->
                 ClassificationCodec.validateRule(rule,true)
                 if(requireTargets)require(targets[rule.categoryId]?.direction==rule.direction) { "规则目标分类不存在或方向不一致" }
