@@ -5,7 +5,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
-const screenshotDir = process.env.RECEIPT_SCREENSHOT_DIR || '/Users/karl/.cache/huayoupu-ledger-spec/notes/t03-ui-screenshots';
+const screenshotDir = process.env.RECEIPT_SCREENSHOT_DIR || path.resolve('output/receipt-details');
 
 async function installSyntheticBridge(page) {
   await page.addInitScript(() => {
@@ -408,7 +408,7 @@ async function assertNoHorizontalOverflow(page, label) {
     await assertNoHorizontalOverflow(page, 'full-receipt-expanded');
     await page.screenshot({ path: path.join(screenshotDir, '02-receipt-full-evidence-expanded.png') });
 
-    // Edit user handwritten note and save: existing edit semantics preserved
+    // Edit user handwritten note and save: existing edit semantics + unified categoryId preserved
     await page.locator('#note').fill('和同事早餐（已核对）');
     await page.evaluate(() => submitDraft());
     await page.clock.runFor(3000);
@@ -416,6 +416,30 @@ async function assertNoHorizontalOverflow(page, label) {
     assert.equal(saved101.id, 101);
     assert.equal(saved101.merchant, '合成咖啡');
     assert.equal(saved101.note, '和同事早餐（已核对）');
+    assert.equal(saved101.categoryId, 'cat:expense:dining');
+
+    // User manually edits merchant or clears merchant: receipt evidence stays read-only history and never overwrites user-edited merchant
+    await page.locator('[data-record="101"]').click();
+    await page.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+    await page.locator('#merchant').fill('人工改名咖啡店');
+    await page.evaluate(() => submitDraft());
+    await page.clock.runFor(3000);
+    assert.equal(await page.locator('[data-record="101"] .entry-title').textContent(), '人工改名咖啡店');
+    await page.locator('[data-record="101"]').click();
+    await page.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+    assert.equal(await page.locator('#merchant').inputValue(), '人工改名咖啡店');
+    assert.equal(await page.locator('[data-receipt-field="merchant"] dd').textContent(), '合成咖啡');
+    await page.locator('#merchant').fill('');
+    await page.evaluate(() => submitDraft());
+    await page.clock.runFor(3000);
+    assert.equal(await page.locator('[data-record="101"] .entry-title').textContent(), '未提供');
+    await page.locator('[data-record="101"]').click();
+    await page.waitForFunction(() => !document.querySelector('#record-panel')._morph);
+    assert.equal(await page.locator('#merchant').inputValue(), '');
+    assert.equal(await page.locator('[data-receipt-field="merchant"] dd').textContent(), '合成咖啡');
+    await page.locator('#merchant').fill('合成咖啡');
+    await page.evaluate(() => submitDraft());
+    await page.clock.runFor(3000);
 
     // 2. Partial missing fields & missing merchant (#102: imported image, merchant=null, sourceApp=null)
     await page.locator('[data-record="102"]').click();
