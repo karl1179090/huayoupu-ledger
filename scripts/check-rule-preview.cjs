@@ -56,23 +56,23 @@ async function installRulePreviewFixture(page){
    },
    {
     id:102,uid:'rec-102',merchant:'上海地铁通行',categoryId:'cat:expense:transit',category:'交通',categoryIcon:'bus',
-    amountCents:400,direction:'EXPENSE',occurredAt:now-7200_000,state:'POSTED',source:'LIVE',note:'通勤',orderContent:['地铁出行单程票'],
-    sourceObj:{captureSource:'LIVE',platform:'alipay',sourcePackage:'com.eg.android.AlipayGphone'},
+    amountCents:400,direction:'EXPENSE',occurredAt:now-7200_000,state:'POSTED',source:'OCR',note:'通勤',orderContent:['地铁出行单程票'],
+    sourceObj:{captureSource:'OCR',platform:'alipay',sourcePackage:'com.eg.android.AlipayGphone'},
     categoryDecision:{categoryId:'cat:expense:transit',source:'BUILTIN_RULE',manual:false,ruleId:'builtin:expense:transit',explanation:'命中内置规则「内置交通」'},
     wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-400,eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
    },
    {
     id:103,uid:'rec-103',merchant:'全家便利店（南京西路店）',categoryId:'cat:expense:shopping',category:'购物',categoryIcon:'bag-shopping',
     amountCents:1850,direction:'EXPENSE',occurredAt:now-10800_000,state:'POSTED',source:'IMAGE',note:'日用补给',orderContent:['乌龙茶500ml','纯净水'],
-    sourceObj:{captureSource:'IMAGE',platform:'alipay',sourcePackage:'com.eg.android.AlipayGphone'},
-    categoryDecision:{categoryId:'cat:expense:shopping',source:'FALLBACK_OTHER',manual:false,ruleId:null,explanation:'未命中规则，归入其他'},
+    sourceObj:{captureSource:'IMAGE',platform:'alipay',sourcePackage:null},
+    categoryDecision:{categoryId:'cat:expense:shopping',source:'FALLBACK',manual:false,ruleId:null,explanation:'未命中规则，归入其他'},
     wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-1850,eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
    },
    {
     id:104,uid:'rec-104',merchant:'未知独立小店',categoryId:'cat:expense:other',category:'其他',categoryIcon:'ellipsis',
-    amountCents:2500,direction:'EXPENSE',occurredAt:now-14400_000,state:'POSTED',source:'MANUAL',note:'杂货',orderContent:[],
+    amountCents:2500,direction:'EXPENSE',occurredAt:now-14400_000,state:'POSTED',source:'MANUAL',note:'手写备注包含星巴克咖啡外卖关键词',orderContent:[],
     sourceObj:{captureSource:'MANUAL',platform:null,sourcePackage:null},
-    categoryDecision:{categoryId:'cat:expense:other',source:'FALLBACK_OTHER',manual:false,ruleId:null,explanation:'未命中任何分类规则，归入默认「其他」分类'},
+    categoryDecision:{categoryId:'cat:expense:other',source:'FALLBACK',manual:false,ruleId:null,explanation:'未命中任何分类规则，归入默认「其他」分类'},
     wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-2500,eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
    },
    {
@@ -88,6 +88,41 @@ async function installRulePreviewFixture(page){
     sourceObj:{captureSource:'MANUAL',platform:null,sourcePackage:null},
     categoryDecision:null,
     wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-50000,eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
+   },
+   {
+    id:107,uid:'rec-107',merchant:'品牌连锁便利店',categoryId:'cat:expense:shopping',category:'购物',categoryIcon:'bag-shopping',
+    amountCents:3200,direction:'EXPENSE',occurredAt:new Date('2026-11-05T00:00:00.000+08:00').getTime(),
+    state:'POSTED',source:'IMAGE',note:'',orderContent:['零食小吃'],
+    receipt:{
+     time:{
+      localDate:'2026-11-05',
+      precision:'DATE',
+      source:'EXPLICIT',
+      reference:'RECOGNITION',
+      accountingAt:new Date('2026-11-05T00:00:00.000+08:00').getTime()
+     }
+    },
+    sourceObj:{captureSource:'IMAGE',platform:'wechat',sourcePackage:null},
+    categoryDecision:{categoryId:'cat:expense:shopping',source:'FALLBACK',manual:false,ruleId:null,explanation:'未命中规则，归入其他'},
+    wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-3200,eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
+   },
+   {
+    id:108,uid:'rec-108',merchant:'时间修改过的餐厅',categoryId:'cat:expense:dining',category:'餐饮',categoryIcon:'utensils',
+    amountCents:6800,direction:'EXPENSE',occurredAt:new Date('2026-11-06T12:30:00.000+08:00').getTime(),
+    _timeEdited:true,
+    state:'POSTED',source:'OCR',note:'',orderContent:['工作日午餐'],
+    receipt:{
+     time:{
+      localDate:'2026-11-06',
+      precision:'DATE',
+      source:'EXPLICIT',
+      reference:'RECOGNITION',
+      accountingAt:new Date('2026-11-06T12:30:00.000+08:00').getTime()
+     }
+    },
+    sourceObj:{captureSource:'OCR',platform:'wechat',sourcePackage:'com.tencent.mm'},
+    categoryDecision:{categoryId:'cat:expense:dining',source:'CUSTOM_RULE',manual:false,ruleId:'rule:custom:1',explanation:'命中自定义规则「所有星巴克咖啡」'},
+    wallet:{accountUid:'wechat',accountName:'微信零钱',appliedCents:-6800,eligibility:'ACTIVE',selectionSource:'DEFAULT',revision:1}
    }
   ];
 
@@ -130,9 +165,12 @@ async function installRulePreviewFixture(page){
     const k='category:'+catObj.name,cur=catMap.get(k)||{key:k,categoryId:catObj.id,icon:catObj.icon,name:catObj.name,direction:r.direction,amount:0,count:0};
     cur.amount+=r.amountCents;cur.count++;catMap.set(k,cur);
    }
-   const expenseTotal=rows.filter(r=>r.state==='POSTED'&&r.direction==='EXPENSE').reduce((s,r)=>s+r.amountCents,0);
+   const expenseRows=rows.filter(r=>r.state==='POSTED'&&r.direction==='EXPENSE');
+   const incomeRows=rows.filter(r=>r.state==='POSTED'&&r.direction==='INCOME');
+   const expenseTotal=expenseRows.reduce((s,r)=>s+r.amountCents,0);
+   const incomeTotal=incomeRows.reduce((s,r)=>s+r.amountCents,0);
    return {
-    totals:{expense:String(expenseTotal),income:'2500000',expenseCount:4,incomeCount:1,totalCount:5},
+    totals:{expense:String(expenseTotal),income:String(incomeTotal),expenseCount:expenseRows.length,incomeCount:incomeRows.length,totalCount:expenseRows.length+incomeRows.length},
     previous:{expense:'5000',income:'0'},
     days:[{day:8,direction:'EXPENSE',amount:String(expenseTotal)}],
     categories:[...catMap.values()].map(c=>({...c,amount:String(c.amount)})),
@@ -230,12 +268,11 @@ async function installRulePreviewFixture(page){
     const conds=[];
     if(r.merchant)conds.push({field:'MERCHANT',operator:'EQUALS',value:r.merchant});
     if(r.orderContent&&r.orderContent[0])conds.push({field:'ORDER_CONTENT',operator:'EQUALS',value:r.orderContent[0]});
-    else if(r.note)conds.push({field:'ORDER_CONTENT',operator:'EQUALS',value:r.note});
     return JSON.stringify({
      ok:true,recordId:r.id,
      input:{
       direction:r.direction,merchant:r.merchant,
-      orderContent:r.orderContent||(r.note?[r.note]:[]),
+      orderContent:Array.isArray(r.orderContent)?r.orderContent:[],
       captureSource:r.sourceObj?.captureSource||r.source,
       sourcePackage:r.sourceObj?.sourcePackage||null,
       platform:r.sourceObj?.platform||null
@@ -259,7 +296,7 @@ async function installRulePreviewFixture(page){
      if(!r)return JSON.stringify({ok:false,code:'RULE_NOT_FOUND',error:'账单不存在'});
      testInput={
       direction:r.direction,merchant:r.merchant||null,
-      orderContent:r.orderContent||(r.note?[r.note]:[]),
+      orderContent:Array.isArray(r.orderContent)?r.orderContent:[],
       captureSource:r.sourceObj?.captureSource||r.source||'MANUAL',
       sourcePackage:r.sourceObj?.sourcePackage||null,
       platform:r.sourceObj?.platform||null
@@ -276,10 +313,25 @@ async function installRulePreviewFixture(page){
      }
      let captureSource=null,platform=null,sourcePackage=null;
      if(p.input.source){
-      if(typeof p.input.source==='string'){
-       const parts=p.input.source.split(':');
-       captureSource=parts[0]||'LIVE';
-       platform=parts[1]||null;
+      const s=String(p.input.source).trim();
+      if(s==='LIVE'){
+       captureSource='OCR';
+      }else if(s==='LIVE:com.tencent.mm'){
+       captureSource='OCR';sourcePackage='com.tencent.mm';
+      }else if(s==='LIVE:com.eg.android.AlipayGphone'){
+       captureSource='OCR';sourcePackage='com.eg.android.AlipayGphone';
+      }else if(s==='IMAGE'){
+       captureSource='IMAGE';
+      }else if(s==='IMAGE:wechat'){
+       captureSource='IMAGE';platform='wechat';
+      }else if(s==='IMAGE:alipay'){
+       captureSource='IMAGE';platform='alipay';
+      }else if(s.startsWith('LIVE:')){
+       captureSource='OCR';sourcePackage=s.slice(5);
+      }else if(s.startsWith('IMAGE:')){
+       captureSource='IMAGE';platform=s.slice(6);
+      }else{
+       captureSource=s;
       }
      }
      testInput={direction:dir,merchant:m?String(m):null,orderContent:oc.map(String),captureSource,sourcePackage,platform};
@@ -371,7 +423,7 @@ async function installRulePreviewFixture(page){
     const decisionCat=selectedRule?((testInput.direction==='INCOME'?dir.income:dir.expense).find(c=>c.id===selectedRule.categoryId)||fallbackCat):fallbackCat;
     const isBuiltin=selectedRule?.id?.startsWith('builtin:');
     const decision={
-     categoryId:decisionCat.id,source:selectedRule?(isBuiltin?'BUILTIN_RULE':'CUSTOM_RULE'):'FALLBACK_OTHER',
+     categoryId:decisionCat.id,source:selectedRule?(isBuiltin?'BUILTIN_RULE':'CUSTOM_RULE'):'FALLBACK',
      ruleId:selectedRule?selectedRule.id:null,ruleVersion:'rules:v1:test',
      explanation:selectedRule?`命中${isBuiltin?'内置':'自定义'}规则「${selectedRule.name}」`:'未命中任何分类规则，归入默认「其他」分类'
     };
@@ -446,6 +498,43 @@ async function installRulePreviewFixture(page){
   // Snapshot before test to verify zero mutation
   const initialSnapshotJson=await page.evaluate(()=>window.LedgerNative.snapshot());
 
+  // 0. Wire triples check against literal expected native values before UI driving
+  const wireCases=[
+   {src:null,expected:{captureSource:null,sourcePackage:null,platform:null}},
+   {src:'LIVE',expected:{captureSource:'OCR',sourcePackage:null,platform:null}},
+   {src:'LIVE:com.tencent.mm',expected:{captureSource:'OCR',sourcePackage:'com.tencent.mm',platform:null}},
+   {src:'LIVE:com.eg.android.AlipayGphone',expected:{captureSource:'OCR',sourcePackage:'com.eg.android.AlipayGphone',platform:null}},
+   {src:'IMAGE',expected:{captureSource:'IMAGE',sourcePackage:null,platform:null}},
+   {src:'IMAGE:wechat',expected:{captureSource:'IMAGE',sourcePackage:null,platform:'wechat'}},
+   {src:'IMAGE:alipay',expected:{captureSource:'IMAGE',sourcePackage:null,platform:'alipay'}}
+  ];
+  for(const tc of wireCases){
+   const rawRes=await page.evaluate(s=>window.LedgerNative.previewClassification(JSON.stringify({
+    input:{direction:'EXPENSE',merchant:'测试平台',orderContent:[],source:s}
+   })),tc.src);
+   const parsed=JSON.parse(rawRes);
+   assert.equal(parsed.ok,true);
+   assert.equal(parsed.preview.input.captureSource,tc.expected.captureSource,`Wire captureSource for source ${tc.src}`);
+   assert.equal(parsed.preview.input.sourcePackage,tc.expected.sourcePackage,`Wire sourcePackage for source ${tc.src}`);
+   assert.equal(parsed.preview.input.platform,tc.expected.platform,`Wire platform for source ${tc.src}`);
+  }
+
+  // 0b. Decoupling test: missing structured orderContent with keyword-bearing note
+  // Proves handwritten note does not pollute orderContent or prefill conditions
+  const draft104Raw=await page.evaluate(()=>window.LedgerNative.classificationRuleDraftFromBill(104));
+  const draft104=JSON.parse(draft104Raw);
+  assert.equal(draft104.ok,true);
+  assert.deepEqual(draft104.input.orderContent,[],'orderContent must be empty when structured order fields are missing');
+  assert.equal(draft104.rule.conditions.length,1,'Only merchant condition prefilled');
+  assert.equal(draft104.rule.conditions[0].field,'MERCHANT');
+  assert.ok(!draft104.rule.conditions.some(c=>c.field==='ORDER_CONTENT'),'Handwritten note must NOT be prefilled as ORDER_CONTENT condition');
+
+  const preview104Raw=await page.evaluate(()=>window.LedgerNative.previewClassification(JSON.stringify({recordId:104})));
+  const preview104=JSON.parse(preview104Raw);
+  assert.equal(preview104.ok,true);
+  assert.deepEqual(preview104.preview.input.orderContent,[],'preview input.orderContent must not fall back to note');
+  assert.equal(preview104.preview.decision.source,'FALLBACK','Must fall back to FALLBACK');
+
   // 1. Entry from Bill Edit: 'create-rule-from-bill' button
   await page.evaluate(()=>openRecord(101));
   await page.waitForFunction(()=>document.querySelector('#record-panel').open&&!document.querySelector('#record-panel')._morph);
@@ -498,9 +587,9 @@ async function installRulePreviewFixture(page){
   await page.locator('#run-rule-test-btn').click();
   await page.waitForSelector('#rule-test-result');
 
-  // Verify native.previewClassification was actually called by the click
+  // Verify native.previewClassification was actually called exactly once by the click
   const newPreviewCalls=await page.evaluate(()=>window.calls.previewClassification.length);
-  assert.ok(newPreviewCalls>prevPreviewCalls,'Clicking run-rule-test-btn must invoke native.previewClassification');
+  assert.equal(newPreviewCalls,prevPreviewCalls+1,'Clicking run-rule-test-btn must invoke native.previewClassification exactly once');
 
   // Assert result summary is actually in viewport (not scrolled away to top)
   const isSummaryInViewport=await page.evaluate(()=>{
@@ -547,8 +636,11 @@ async function installRulePreviewFixture(page){
   await page.locator('[data-condition-keyword="0"]').fill('西西弗书店');
 
   // Run test
+  const prevPreviewCallsNeg=await page.evaluate(()=>window.calls.previewClassification.length);
   await page.locator('#run-rule-test-btn').click();
   await page.waitForSelector('#rule-test-result');
+  const newPreviewCallsNeg=await page.evaluate(()=>window.calls.previewClassification.length);
+  assert.equal(newPreviewCallsNeg,prevPreviewCallsNeg+1,'Negative test click must invoke native.previewClassification exactly once');
 
   // The draft has NOT_CONTAINS '外卖', but orderContent is missing/empty!
   // It MUST NOT match, evaluating to false!
@@ -561,7 +653,25 @@ async function installRulePreviewFixture(page){
 
   await page.screenshot({path:path.join(output,'04-negative-missing-field-result.png')});
 
-  // 5. Test with Existing Bill Picker & trusted source
+  // 4b. Explicit manual source selection "现场识别" check
+  await page.locator('#test-source').selectOption('LIVE');
+  const prevPreviewCallsLive=await page.evaluate(()=>window.calls.previewClassification.length);
+  await page.locator('#run-rule-test-btn').click();
+  await page.waitForSelector('#rule-test-result');
+  const newPreviewCallsLive=await page.evaluate(()=>window.calls.previewClassification.length);
+  assert.equal(newPreviewCallsLive,prevPreviewCallsLive+1,'Manual LIVE source test click must invoke previewClassification exactly once');
+
+  // Verify request choice LIVE was sent to native
+  const lastCallRaw=await page.evaluate(()=>window.calls.previewClassification[window.calls.previewClassification.length-1]);
+  const lastCall=JSON.parse(lastCallRaw);
+  assert.equal(lastCall.input.source,'LIVE','Request choice LIVE must be sent to native');
+
+  // Verify displayed source label shows '现场识别' and NOT raw token 'OCR'
+  const liveSrcText=await page.locator('#test-result-source').innerText();
+  assert.ok(liveSrcText.includes('现场识别'),'Must display 现场识别 for LIVE source');
+  assert.ok(!liveSrcText.includes('OCR'),'Raw token OCR must not be displayed');
+
+  // 5. Test with Existing Bill Picker & trusted source & 04 DATE display
   // Switch mode to BILL
   await page.locator('#test-mode-bill-btn').click();
   await page.waitForSelector('#test-bill-section');
@@ -572,16 +682,28 @@ async function installRulePreviewFixture(page){
 
   // Click '加载更多账单'
   await page.locator('#test-bill-load-more').click();
-  await page.waitForFunction(()=>document.querySelectorAll('.test-bill-item').length===5);
-  assert.match(await page.locator('#test-bill-page-meta').innerText(),/已显示本月全部可用账单（共 5 笔）/);
+  await page.waitForFunction(()=>document.querySelectorAll('.test-bill-item').length===7);
+  assert.match(await page.locator('#test-bill-page-meta').innerText(),/已显示本月全部可用账单（共 7 笔）/);
+
+  // Verify trusted 04 DATE bill (107) shows recordDisplayTime format: YYYY-MM-DD 仅日期 without HH:mm
+  const r107TimeText=await page.locator('[data-test-record-id="107"] .test-bill-meta span').first().innerText();
+  assert.equal(r107TimeText,'2026-11-05 仅日期','Trusted DATE bill must display localDate + 仅日期 without HH:mm');
+
+  // Verify untrusted/_timeEdited bill (108) retains 04 fallback date-time
+  const r108TimeText=await page.locator('[data-test-record-id="108"] .test-bill-meta span').first().innerText();
+  assert.ok(r108TimeText.includes('2026-11-06')&&r108TimeText.includes('12:30'),'Untrusted/_timeEdited bill must display full date and time');
+  assert.ok(!r108TimeText.includes('仅日期'),'Untrusted/_timeEdited bill must not display 仅日期');
 
   // Select Record 102 (上海地铁通行)
   await page.locator('[data-test-record-id="102"]').click();
   assert.equal(await page.locator('[data-test-record-id="102"]').getAttribute('aria-checked'),'true');
 
   // Run test on selected bill
+  const prevPreviewCallsBill=await page.evaluate(()=>window.calls.previewClassification.length);
   await page.locator('#run-rule-test-btn').click();
   await page.waitForSelector('#rule-test-result');
+  const newPreviewCallsBill=await page.evaluate(()=>window.calls.previewClassification.length);
+  assert.equal(newPreviewCallsBill,prevPreviewCallsBill+1,'Bill test click must invoke previewClassification exactly once');
 
   // Assert result summary is visible in viewport for bill test
   const billSummaryInViewport=await page.evaluate(()=>{
@@ -597,8 +719,11 @@ async function installRulePreviewFixture(page){
   assert.equal(await page.locator('.test-decision-source-tag').innerText(),'内置规则');
   assert.match(await page.locator('#test-decision-explanation').innerText(),/内置交通/);
 
-  // Verify trusted source tag is displayed from backend source: LIVE + alipay
-  assert.match(await page.locator('#test-result-source').innerText(),/支付宝凭证 · 现场识别/);
+  // Verify trusted source tag is displayed from backend source: LIVE/OCR + alipay
+  const r102SrcText=await page.locator('#test-result-source').innerText();
+  assert.ok(r102SrcText.includes('现场识别'),'Must display 现场识别 for bill 102');
+  assert.ok(r102SrcText.includes('支付宝'),'Must display 支付宝 for bill 102');
+  assert.ok(!r102SrcText.includes('OCR'),'Raw token OCR must not be displayed');
 
   await page.screenshot({path:path.join(output,'05-bill-picker-tested.png')});
 
@@ -617,8 +742,11 @@ async function installRulePreviewFixture(page){
   assert.equal(await page.locator('#test-use-draft').isChecked(),false);
   // Enter a merchant name and run test directly
   await page.locator('#test-merchant').fill('星巴克咖啡（徐家汇店）');
+  const prevPreviewCallsDirect=await page.evaluate(()=>window.calls.previewClassification.length);
   await page.locator('#run-rule-test-btn').click();
   await page.waitForSelector('#rule-test-result');
+  const newPreviewCallsDirect=await page.evaluate(()=>window.calls.previewClassification.length);
+  assert.equal(newPreviewCallsDirect,prevPreviewCallsDirect+1,'Direct test click must invoke previewClassification exactly once');
 
   // Test should succeed without draft error and hit rule:custom:1
   assert.equal(await page.locator('#test-result-category-name').innerText(),'餐饮');

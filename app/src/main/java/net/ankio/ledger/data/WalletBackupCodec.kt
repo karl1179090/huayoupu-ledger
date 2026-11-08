@@ -25,7 +25,7 @@ internal object WalletBackupCodec {
         BackupValues.keys(json,setOf("version","medium","role","bankCode","cardLast4","platform","rawLabel","rawValue","ambiguous","reason"))
         require(number(json,"version")==1L)
         val medium=optional(json,"medium",32)!!;require(medium in setOf("BANK_CARD","WECHAT_BALANCE","ALIPAY_BALANCE","UNKNOWN","UNSUPPORTED","LIABILITY"))
-        val role=optional(json,"role",16)!!;require(role in setOf("DEBIT","CREDIT"))
+        val role=optional(json,"role",16)!!;require(role in setOf("DEBIT","CREDIT","UNKNOWN"))
         val bank=optional(json,"bankCode",32);require(bank==null || bank.matches(Regex("[a-z][a-z0-9_]{1,31}")))
         val last=optional(json,"cardLast4",4);require(last==null || last.matches(Regex("[0-9]{4}")))
         val platform=optional(json,"platform",16);require(platform==null || platform in setOf("wechat","alipay"))

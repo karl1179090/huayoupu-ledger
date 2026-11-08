@@ -1,5 +1,7 @@
 package net.ankio.ledger.data
 
+import net.ankio.ledger.core.BankReceiptEvidence
+import net.ankio.ledger.core.Direction
 import net.ankio.ledger.core.ReceiptEvidence
 import net.ankio.ledger.core.ReceiptField
 import net.ankio.ledger.core.ReceiptTimeEvidence
@@ -9,17 +11,20 @@ import org.json.JSONObject
 object ReceiptEvidenceCodec {
     const val MAX_BYTES = 32 * 1024
     private val fields = setOf("merchant", "productDescription", "transactionDescription", "orderRemark",
-        "serviceProvider", "receiptIssuer", "sourceApp")
+        "serviceProvider", "receiptIssuer", "sourceApp", "bank")
 
     fun json(receipt: ReceiptEvidence?): Any = receipt?.let { evidence ->
         fun field(value: ReceiptField?): Any = value?.let {
             JSONObject().put("value", it.value).put("rawText", it.rawText).put("source", it.source).put("blockId", it.blockId)
         } ?: JSONObject.NULL
+        val bank = evidence.bank?.let { value -> JSONObject().put("bankCode", value.bankCode ?: JSONObject.NULL)
+            .put("cardLast4", value.cardLast4 ?: JSONObject.NULL).put("transactionType", field(value.transactionType))
+            .put("direction", value.direction?.name ?: JSONObject.NULL).put("ambiguous", value.ambiguous) } ?: JSONObject.NULL
         JSONObject().put("version", evidence.version).put("blockId", evidence.blockId)
             .put("merchant", field(evidence.merchant)).put("productDescription", field(evidence.productDescription))
             .put("transactionDescription", field(evidence.transactionDescription)).put("orderRemark", field(evidence.orderRemark))
             .put("serviceProvider", field(evidence.serviceProvider)).put("receiptIssuer", field(evidence.receiptIssuer))
-            .put("sourceApp", field(evidence.sourceApp))
+            .put("sourceApp", field(evidence.sourceApp)).put("bank", bank)
             .put("time", evidence.time?.let { time -> JSONObject()
                 .put("rawText",time.rawText).put("accountingAt",time.accountingAt).put("localDate",time.localDate)
                 .put("zoneId",time.zoneId).put("precision",time.precision).put("source",time.source)
@@ -37,11 +42,17 @@ object ReceiptEvidenceCodec {
         require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId", "time") }) { "凭证字段不支持" }
         require(obj.get("version") is Int && obj.getInt("version") == 1) { "凭证版本不支持" }
         fun text(value: JSONObject, key: String) = value.get(key) as? String ?: error("凭证字段类型错误：$key")
-        fun field(key: String): ReceiptField? {
-            if (obj.isNull(key)) return null
-            val value = obj.getJSONObject(key)
+        fun field(key: String, parent: JSONObject = obj): ReceiptField? {
+            if (parent.isNull(key)) return null
+            val value = parent.getJSONObject(key)
             require(value.keys().asSequence().toSet() == setOf("value", "rawText", "source", "blockId"))
             return ReceiptField(text(value, "value"), text(value, "rawText"), text(value, "source"), text(value, "blockId"))
+        }
+        val bank = if (obj.isNull("bank")) null else obj.getJSONObject("bank").let { value ->
+            require(value.keys().asSequence().toSet().all { it in setOf("bankCode", "cardLast4", "transactionType", "direction", "ambiguous") })
+            fun optional(key: String) = if (value.isNull(key)) null else text(value, key)
+            BankReceiptEvidence(optional("bankCode"), optional("cardLast4"), field("transactionType", value),
+                optional("direction")?.let(Direction::valueOf), value.get("ambiguous") as? Boolean ?: error("银行证据类型错误"))
         }
         val time=if(obj.isNull("time"))null else obj.getJSONObject("time").let { value ->
             require(value.keys().asSequence().toSet() == setOf("rawText","accountingAt","localDate","zoneId","precision","source","reference","recognitionAt"))
@@ -55,6 +66,6 @@ object ReceiptEvidenceCodec {
         return ReceiptEvidence(version=obj.getInt("version"), blockId=text(obj, "blockId"),
             merchant=field("merchant"), productDescription=field("productDescription"),
             transactionDescription=field("transactionDescription"), orderRemark=field("orderRemark"),
-            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), time=time)
+            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time)
     }
 }
