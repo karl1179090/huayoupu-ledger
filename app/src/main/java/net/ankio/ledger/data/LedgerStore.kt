@@ -211,6 +211,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         db.execSQL("CREATE TABLE merchant_icon_assets (merchant_key TEXT PRIMARY KEY NOT NULL, image BLOB NOT NULL)")
     }
 
+    private fun linkMerchantIcon(db:SQLiteDatabase,id:Long,bill:ParsedBill,image:ByteArray?) {
+        MerchantNames.reliableName(bill)?.let { linkMerchantIcon(db,id,it,image) }
+    }
+
     private fun linkMerchantIcon(db: SQLiteDatabase, id: Long, merchant: String, image: ByteArray?) {
         val key = MerchantNames.key(merchant) ?: return
         // References also exist for bills without a crop, so a later icon serves earlier same-name bills.
@@ -255,11 +259,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val result=if(repair) {
             check(db.update("records",ContentValues().apply { put("merchant",bill.merchant) },"id=?",arrayOf(original.id.toString()))==1)
             val previousKey=iconKey(db,original.id)
-            linkMerchantIcon(db,original.id,bill.merchant,image?:merchantIcon(original.id))
+            linkMerchantIcon(db,original.id,bill,image?:merchantIcon(original.id))
             pruneIcon(db,previousKey)
             original.copy(bill=original.bill.copy(merchant=bill.merchant))
         }else original
-        if(sameName)linkMerchantIcon(db,original.id,original.bill.merchant,image)
+        if(sameName)linkMerchantIcon(db,original.id,bill,image)
         val incoming=bill.receipt ?: return result
         val previous=result.bill.receipt
         val receipt=when {
@@ -671,7 +675,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     else enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
                 if(promoted) {
                     check(db.update("records",values(presentation),"id=?",arrayOf(presentation.id.toString()))==1)
-                    linkMerchantIcon(db,presentation.id,presentation.bill.merchant,merchantIcon)
+                    linkMerchantIcon(db,presentation.id,presentation.bill,merchantIcon)
                 }
                 val presented=syncWallet(db,presentation,
                     incomingEvidence=bill.paymentMethod,changed=enriched || promoted || presentation!=identified)
@@ -684,14 +688,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             if(automatic!=null) {
                 val completed=syncWallet(db,completePaymentIdentity(db,automatic,bill),incomingEvidence=bill.paymentMethod)
                 val supplemented=appendPaymentScreenshot(db,completed,capture,screenshot)
-                linkMerchantIcon(db,completed.id,completed.bill.merchant,merchantIcon)
+                linkMerchantIcon(db,completed.id,completed.bill,merchantIcon)
                 db.setTransactionSuccessful()
                 return IngestResult.Saved(completed,supplemented=supplemented)
             }
             val repeated=if(!requireReview && eventKey==null)uniqueRepeatedPayment(capture,bill) else null
             if(repeated!=null) {
                 val supplemented=appendPaymentScreenshot(db,repeated,capture,screenshot)
-                linkMerchantIcon(db,repeated.id,repeated.bill.merchant,merchantIcon)
+                linkMerchantIcon(db,repeated.id,repeated.bill,merchantIcon)
                 val linked=syncWallet(db,repeated,incomingEvidence=bill.paymentMethod,changed=false)
                 db.setTransactionSuccessful()
                 return IngestResult.Saved(linked,supplemented=supplemented)
@@ -745,7 +749,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 var original=if(promoted)previous.copy(bill=bill.copy(category=previous.bill.category,categoryDecision=previous.bill.categoryDecision),state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
                     else enrichPaymentPresentation(db,previous,capture,bill,merchantIcon)
                 if(promoted)check(db.update("records",values(original),"id=?",arrayOf(original.id.toString()))==1)
-                if(promoted)linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon)
+                if(promoted)linkMerchantIcon(db,original.id,original.bill,merchantIcon)
                 persistIdentities(db,original.id,(original.identities+incomingIdentities).distinct())
                 val supplemented = bill.reliable && appendPaymentScreenshot(db, original, capture, screenshot)
                 original=syncWallet(db,original,incomingEvidence=bill.paymentMethod,changed=promoted)
@@ -771,7 +775,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 db.insertOrThrow("capture_images", null, ContentValues().apply { put("record_id", id) })
             }
             insertHistory(db, id, RecordCaptureHistory(1,capture.receivedAt,"payment",bill.amountCents,0,capture.text,screenshot != null))
-            linkMerchantIcon(db, id, bill.merchant, merchantIcon)
+            linkMerchantIcon(db, id, bill, merchantIcon)
             syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
             db.setTransactionSuccessful()
             return IngestResult.Saved(requireNotNull(get(id)))
@@ -854,7 +858,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                         db.update("records",ContentValues().apply { put("note",copy.note) },"id=?",arrayOf(current.id.toString()))
                         syncWallet(db,requireNotNull(get(current.id)))
                     }
-                    if(MerchantNames.key(current.bill.merchant)==MerchantNames.key(copy.bill.merchant))linkMerchantIcon(db,current.id,current.bill.merchant,merchantIcon(copy.id))
+                    if(MerchantNames.key(current.bill.merchant)==MerchantNames.key(copy.bill.merchant))linkMerchantIcon(db,current.id,current.bill,merchantIcon(copy.id))
                     redirectCaptureReceipts(db,copy.uid,current.uid)
                     delete(copy.id);merged[copy.id]=current.id
                     db.setTransactionSuccessful()
@@ -868,7 +872,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val entries=captureHistory(pending.id)
                 if(entries.isEmpty())appendPaymentScreenshot(db,original,pending.capture,screenshot(pending.id))
                 else entries.forEach { entry -> appendPaymentScreenshot(db,original,pending.capture.copy(text=entry.rawText,receivedAt=entry.at),historyScreenshot(pending.id,entry.sequence)) }
-                linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon(pending.id))
+                linkMerchantIcon(db,original.id,original.bill,merchantIcon(pending.id))
                 redirectCaptureReceipts(db,pending.uid,original.uid)
                 delete(pending.id);merged[pending.id]=original.id
                 db.setTransactionSuccessful()
@@ -889,7 +893,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         try {
             db.update("records",ContentValues().apply { put("merchant",recognized.merchant) },"id=?",arrayOf(id.toString()))
             val previousKey=iconKey(db,id)
-            linkMerchantIcon(db,id,recognized.merchant,icon);pruneIcon(db,previousKey)
+            linkMerchantIcon(db,id,recognized,icon);pruneIcon(db,previousKey)
             syncWallet(db,requireNotNull(get(id)));db.setTransactionSuccessful();return true
         } finally { db.endTransaction() }
     }
@@ -969,7 +973,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             persistIdentities(db,id,identities(posted))
             if (record.id == 0L) insertHistory(db,id,RecordCaptureHistory(1,record.capture.receivedAt,"payment",amount,0,record.capture.text,false))
             db.delete("merchant_icons", "record_id = ?", arrayOf(id.toString()))
-            linkMerchantIcon(db, id, posted.bill.merchant, null)
+            linkMerchantIcon(db, id, posted.bill, null)
             pruneIcon(db, previousKey)
             val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true,originalPosted=previous?.state==RecordState.POSTED,humanConfirmed=true)
             WalletAccounting.remember(db,token,"RECORD_SAVE",saved.uid)
@@ -1250,7 +1254,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         }
         insertHistory(db,id,RecordCaptureHistory(1,capture.receivedAt,"refund_pending",null,evidence.refundedCents,capture.text,image!=null,
             "single",evidence.refundId,evidence.refundedCents))
-        linkMerchantIcon(db,id,bill.merchant,merchantIcon)
+        linkMerchantIcon(db,id,bill,merchantIcon)
         syncWallet(db,pending.copy(id=id),isNew=true,kind="REFUND")
         return IngestResult.Saved(requireNotNull(get(id)))
     }
@@ -1295,7 +1299,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val original=if(isAutomaticPayment(target))completePaymentIdentity(db,target,bill) else target
             val result=applyRefund(db,original,capture,bill,image)
             if(MerchantNames.key(original.bill.merchant)==MerchantNames.key(bill.merchant))
-                linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon)
+                linkMerchantIcon(db,original.id,original.bill,merchantIcon)
             return result
         }
         val candidates=matchingRefundCandidates(capture,bill)
@@ -1348,7 +1352,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             insertHistory(db,id,RecordCaptureHistory(1,capture.receivedAt,
                 if(refund.refundedCents==refund.originalAmountCents)"full_refund" else "partial_refund",
                 bill.amountCents,refund.refundedCents,capture.text,image!=null,"cumulative",null,refund.refundedCents))
-            linkMerchantIcon(db,id,bill.merchant,merchantIcon)
+            linkMerchantIcon(db,id,bill,merchantIcon)
             syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
             return IngestResult.Saved(requireNotNull(get(id)))
         } catch(error:Throwable) { screenshots.release(imageOwner(id));throw error }
@@ -1489,7 +1493,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun restoreMerchantIcon(id:Long,image:ByteArray) {
         val record=requireNotNull(get(id)) { "账单已不存在" }
         require(image.isNotEmpty() && image.size<=5*1024*1024)
-        val key=MerchantNames.key(record.bill.merchant) ?: return
+        val key=MerchantNames.reliableName(record.bill)?.let(MerchantNames::key) ?: return
         writableDatabase.insertWithOnConflict("merchant_icon_assets",null,ContentValues().apply {
             put("merchant_key",key);put("image",image)
         },SQLiteDatabase.CONFLICT_IGNORE)
@@ -1838,7 +1842,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     val id = db.insertOrThrow("records", null, values(record.copy(id = 0, duplicateId = null)))
                     persistIdentities(db,id,identities(record))
                     WalletAccounting.saveLink(db,RecordWalletLink(record.uid,WalletEligibility.RESTORE_EXCLUDED))
-                    linkMerchantIcon(db, id, record.bill.merchant, null)
+                    linkMerchantIcon(db, id, record.bill, null)
                     imported++
                 }
             }
@@ -1921,7 +1925,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     validateImportedModel(record)
                     require(record.bill.direction!=Direction.TRANSFER || record.bill.refund==null && record.bill.standaloneRefund==null) { "转账不能包含消费退款" }
                     val id=db.insertOrThrow("records",null,values(record.copy(id=0,duplicateId=null)))
-                    persistIdentities(db,id,identities(record));linkMerchantIcon(db,id,record.bill.merchant,null)
+                    persistIdentities(db,id,identities(record));linkMerchantIcon(db,id,record.bill,null)
                     insertHistory(db,id,RecordCaptureHistory(1,record.capture.receivedAt,
                         if(record.bill.refund==null)"payment" else if(record.bill.amountCents==0L)"full_refund" else "partial_refund",
                         record.bill.amountCents,record.bill.refund?.refundedCents ?: 0L,record.capture.text,false))

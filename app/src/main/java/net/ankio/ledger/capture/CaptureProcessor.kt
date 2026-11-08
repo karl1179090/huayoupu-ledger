@@ -23,12 +23,26 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
     suspend fun processPrepared(image:ByteArray,source:Source,origin:String,taskId:Long,allowed:()->Boolean):IngestResult =
         processRecognition(source,origin,taskId,{},allowed) { guard, time -> recognize(image, taskId, origin, guard, time) }
 
-    private suspend fun recognize(image:ByteArray,taskId:Long?,origin:String,guard:()->Boolean,time:()->net.ankio.ledger.core.RecognitionTimeContext):net.ankio.ledger.ocr.RecognitionResult {
+    /** Qualify immutable nodes before pixels; this does not authorize any later window. */
+    fun prepareNodeFallback(taskId:Long,snapshot:net.ankio.ledger.core.NodeSnapshot,origin:String):net.ankio.ledger.core.NodeRoute? {
+        val route=nodeRegistry.select(snapshot,app.tasks.automatic(taskId)) { app.tasks.beginRecognition(taskId,recognitionClock) }
+        return route.takeIf { it.candidate?.let { candidate -> policy(taskId).allows(candidate.bill,origin) }==true &&
+            net.ankio.ledger.core.TransactionRejection.reason(it.rawText.orEmpty())==null }
+    }
+
+    suspend fun processWithoutScreenshot(source:Source,origin:String,taskId:Long,allowed:()->Boolean):IngestResult =
+        processRecognition(source,origin,taskId,{},allowed) { guard,time ->
+            check(app.tasks.hasMissingNodeEvidence(taskId)) { "Missing node capture evidence" }
+            recognize(null,taskId,origin,guard,time)
+        }
+
+    private suspend fun recognize(image:ByteArray?,taskId:Long?,origin:String,guard:()->Boolean,time:()->net.ankio.ledger.core.RecognitionTimeContext):net.ankio.ledger.ocr.RecognitionResult {
         if(!guard())throw CancellationException("识别已停止")
         val imported=taskId?.let(app.tasks::isImageImport)==true
         val snapshot=if(imported)null else taskId?.let { app.tasks.nodeSnapshot(it,image) }
         val routeAt=android.os.SystemClock.elapsedRealtime()
         val route=snapshot?.let { nodeRegistry.select(it,taskId?.let(app.tasks::automatic)==true,time) }
+        check(image!=null || route?.candidate!=null) { "Missing screenshot requires qualified original nodes" }
         taskId?.let { id ->
             app.tasks.recordRoute(id,route,snapshot,if(imported)"image_import" else null)
             app.tasks.phaseTiming(id,"route",(android.os.SystemClock.elapsedRealtime()-routeAt-(route?.parseMillis ?: 0)).coerceAtLeast(0))
@@ -36,10 +50,11 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
         }
         route?.candidate?.let { candidate ->
             if(!guard())throw CancellationException("识别已停止")
-            taskId?.let { app.tasks.prepared(it,image) }
+            taskId?.let { if(image!=null)app.tasks.prepared(it,image) else app.tasks.markNodeRecognizing(it) }
             return net.ankio.ledger.ocr.RecognitionResult(requireNotNull(route.rawText),candidate.bill,image,
                 iconStatus="cached_or_default",iconDetails="method=verified_node; no_new_crop")
         }
+        check(image!=null) { "Missing screenshot cannot fall back to OCR" }
         val prepared:(ByteArray)->Unit={ bytes -> taskId?.let { app.tasks.prepared(it,bytes);app.changed() } }
         val liveAt=taskId?.let(app.tasks::livePaymentAt)
         return client.recognizePrepared(image,onPrepared=prepared,stillAllowed=guard,livePaymentAt=liveAt,policy=policy(taskId),origin=origin,recognitionTime=time)

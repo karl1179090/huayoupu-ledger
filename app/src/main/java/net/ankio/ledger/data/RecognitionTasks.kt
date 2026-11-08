@@ -179,6 +179,38 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         }
         return storeImage(id,image,"QUEUED","已获取截图，等待识别")
     }
+    /** Only a prequalified original node capture may be queued without image bytes. */
+    @Synchronized fun queuedWithoutScreenshot(id:Long,snapshot:net.ankio.ledger.core.NodeSnapshot,
+        route:net.ankio.ledger.core.NodeRoute,reason:net.ankio.ledger.capture.ScreenshotFailureReason):Boolean {
+        require(reason in setOf(net.ankio.ledger.capture.ScreenshotFailureReason.UNAVAILABLE,net.ankio.ledger.capture.ScreenshotFailureReason.TIMEOUT))
+        require(route.candidate!=null && route.verification!=null && net.ankio.ledger.core.CapturePrivacy.manualAllowed(snapshot.page()))
+        val valid=readableDatabase.rawQuery("SELECT source,origin FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+            it.moveToFirst() && it.getString(0)==Source.OCR.name && it.getString(1) in
+                setOf("shake:${snapshot.packageName}","shortcut:${snapshot.packageName}","payment_auto:${snapshot.packageName}") }
+        require(valid && !screenshots.contains(imageOwner(id)))
+        val db=writableDatabase;db.beginTransaction()
+        try {
+            if(db.update("tasks",ContentValues().apply {
+                put("node_snapshot",NodeSnapshotCodec.json(snapshot).toString());putNull("node_image_hash")
+                put("status","QUEUED");put("message","正在识别记账中")
+            },"id=? AND status='CAPTURING'",arrayOf(id.toString()))!=1)return false
+            recordRoute(id,route,snapshot)
+            val evidence=requireNotNull(storedRecognitionEvidence(id))
+            evidence.put("screenshot",JSONObject().put("state",reason.name).put("reason",reason.name))
+            writeRecognitionEvidence(id,evidence);db.setTransactionSuccessful();return true
+        } finally { db.endTransaction() }
+    }
+    fun hasMissingNodeEvidence(id:Long):Boolean=readableDatabase.rawQuery("SELECT node_snapshot,node_image_hash,recognition_evidence FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+        if(!it.moveToFirst() || it.isNull(0) || !it.isNull(1) || it.isNull(2) || screenshots.contains(imageOwner(id)))false
+        else runCatching { RecognitionEvidenceCodec.decode(JSONObject(it.getString(2))).let { evidence ->
+            evidence.route=="NODE" && evidence.screenshot.state in setOf("UNAVAILABLE","TIMEOUT") && evidence.screenshot.reason==evidence.screenshot.state &&
+                evidence.snapshot?.fingerprint==NodeSnapshotCodec.decode(it.getString(0)).fingerprint } }.getOrDefault(false)
+    }
+    @Synchronized fun markNodeRecognizing(id:Long) {
+        check(hasMissingNodeEvidence(id))
+        writableDatabase.update("tasks",ContentValues().apply { put("status","RECOGNIZING");put("message","正在识别记账中") },
+            "id=? AND status IN ('QUEUED','RECOGNIZING')",arrayOf(id.toString()))
+    }
     private fun imageHash(image:ByteArray)=java.security.MessageDigest.getInstance("SHA-256").digest(image).joinToString("") { "%02x".format(it) }
     fun nodeSnapshot(id:Long,image:ByteArray?=null):net.ankio.ledger.core.NodeSnapshot?=readableDatabase.rawQuery("SELECT node_snapshot,node_image_hash FROM tasks WHERE id=?",arrayOf(id.toString())).use {
         if(!it.moveToFirst() || it.isNull(0))null else {
@@ -216,7 +248,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         JSONArray().apply { while(c.moveToNext()) {
             val id=c.getLong(0)
             put(JSONObject().put("operationKey",operationKey(id)).put("recordUid",if(c.isNull(1))JSONObject.NULL else classificationStore?.get(c.getLong(1))?.uid ?: JSONObject.NULL)
-                .put("snapshot",JSONObject(c.getString(2))).put("imageFingerprint",c.getString(4))
+                .put("snapshot",JSONObject(c.getString(2))).put("imageFingerprint",if(c.isNull(4))JSONObject.NULL else c.getString(4))
                 .put("recognitionEvidence",if(c.isNull(3))JSONObject.NULL else JSONObject(c.getString(3))))
         } }
     }
@@ -349,7 +381,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             if((origin.startsWith("shake:") || origin.startsWith("shortcut:")) && shakeAuthorization(id)==null) {
                 update(id,"CANCELLED","请重新选择应用后摇一摇，未新增账单");continue
             }
-            val resume=status=="RECOGNIZING" && (origin.startsWith("payment_auto:") || origin.startsWith("shake:") || origin.startsWith("shortcut:") || isImageImport(id)) && screenshots.contains(imageOwner(id))
+            val resume=status=="RECOGNIZING" && (origin.startsWith("payment_auto:") || origin.startsWith("shake:") || origin.startsWith("shortcut:") || isImageImport(id)) && (screenshots.contains(imageOwner(id)) || hasMissingNodeEvidence(id))
             update(id,if(resume)"QUEUED" else "FAILED",if(resume)"已恢复截图，等待识别" else "上次识别被系统中断，请重新摇动或导入截图")
         }
     }

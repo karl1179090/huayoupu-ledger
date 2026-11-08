@@ -128,8 +128,57 @@ class ShakeWhitelistCaptureTest {
         assertEquals(2,(taskIds()-previousTasks).size)
     }
 
-    @Test fun protectedPixelFailureRetainsTheExistingPrivacyRefusalWithoutATaskOrBill() {
+    @Test fun ordinaryScreenshotFailurePostsReliableNodesWithoutOcrAndKeepsMissingImageEvidence() {
         startFixture("safe")
+        service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.UNAVAILABLE,"synthetic unavailable") }
+        try {
+            service.captureOnShake()
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            val record=app.tasks.recordId(task)?.let(app.store::get)
+            assertNotNull("Reliable qualified nodes must survive ordinary screenshot failure",record)
+            assertEquals(RecordState.POSTED,record!!.state)
+            assertEquals(-1234L,record.wallet!!.appliedCents);assertEquals(0,calls.get())
+            assertNull(app.store.screenshot(record.id));assertNull(app.tasks.image(task))
+            assertEquals("NODE",record.bill.receipt!!.recognition!!.route)
+            assertEquals("UNAVAILABLE",record.bill.receipt!!.recognition!!.screenshot.state)
+            assertEquals("UNAVAILABLE",app.tasks.recognitionEvidence(task)!!.getJSONObject("screenshot").getString("state"))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun ordinaryScreenshotTimeoutStillPostsTheOriginalReliableNodesWithoutOcr() {
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->delay(5_000);error("bounded timeout must cancel pixel acquisition") }
+        try {
+            service.captureOnShake()
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            val record=app.tasks.recordId(task)?.let(app.store::get)
+            assertNotNull("A bounded ordinary timeout must preserve still-current reliable nodes",record)
+            assertEquals("TIMEOUT",record!!.bill.receipt!!.recognition!!.screenshot.state)
+            assertEquals(RecordState.POSTED,record.state);assertEquals(0,calls.get());assertNull(app.store.screenshot(record.id))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    private fun nodeFactory():()->CaptureProcessor {
+        val info=app.packageManager.getPackageInfo(fixturePackage,0)
+        val verification=net.ankio.ledger.core.NodeLayoutVerification("synthetic-failure",fixturePackage,info.versionName.orEmpty(),info.longVersionCode,
+            "${Build.VERSION.RELEASE}/api${Build.VERSION.SDK_INT}/${Build.FINGERPRINT}".take(256),"${Build.MANUFACTURER}/${Build.MODEL}".take(256),
+            setOf("net.ankio.ledger.ShakeCaptureFixtureActivity"),false,"synthetic-failure-comparison","synthetic capture only")
+        val registry=net.ankio.ledger.core.NodeRecognitionRegistry(listOf(net.ankio.ledger.core.NodeLayoutAdapter(verification,{true}) { _,clock ->
+            val field=net.ankio.ledger.core.ReceiptField(merchant,merchant,"node")
+            listOf(net.ankio.ledger.core.TransactionCandidate(net.ankio.ledger.core.CandidateId.SINGLE,
+                net.ankio.ledger.core.ParsedBill(1234,net.ankio.ledger.core.Direction.EXPENSE,merchant,"其他",clock.recognitionAt,null,true,"",
+                    receipt=net.ankio.ledger.core.ReceiptEvidence(merchant=field))))
+        }))
+        return { CaptureProcessor(app,OcrClient(app,net.ankio.ledger.ocr.RecognitionBackend { _,_,_,_,_,_->calls.incrementAndGet();error("nodes must not invoke OCR") }),nodeRegistry=registry) }
+    }
+
+    @Test fun protectedPixelFailureRetainsTheExistingPrivacyRefusalWithoutATaskOrBill() {
+        startFixture("safe");service.processorFactory=nodeFactory()
         val provider=service.screenshotProvider
         service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.PROTECTED,"合成受保护页面，未截图") }
         try {
@@ -137,6 +186,65 @@ class ShakeWhitelistCaptureTest {
             await { app.channels.lastStatus().contains("合成受保护页面") }
             assertEquals(previousTasks,taskIds())
             assertEquals(0,calls.get());assertTrue(app.store.all().none { it.bill.merchant.startsWith(merchant) })
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun ordinaryFailureAfterWindowContentChangeCannotSaveOldNodes() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->entered.complete(Unit);release.await();throw ScreenshotAcquisitionException(ScreenshotFailureReason.UNAVAILABLE,"synthetic unavailable") }
+        try {
+            service.captureOnShake();await { entered.isCompleted }
+            val event=android.view.accessibility.AccessibilityEvent.obtain(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            event.packageName=fixturePackage
+            try { InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onAccessibilityEvent(event) } }
+            finally { event.recycle() }
+            release.complete(Unit)
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            assertNull(app.tasks.recordId(task));assertEquals(0,calls.get());assertFalse(app.tasks.hasMissingNodeEvidence(task))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun ordinaryFailureAfterConsentRevocationCannotSaveOldNodes() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->entered.complete(Unit);release.await();throw ScreenshotAcquisitionException(ScreenshotFailureReason.TIMEOUT,"synthetic timeout") }
+        try {
+            service.captureOnShake();await { entered.isCompleted }
+            app.channels.setShakePackage(fixturePackage,false);release.complete(Unit)
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            assertEquals("CANCELLED",app.tasks.status(task));assertNull(app.tasks.recordId(task));assertEquals(0,calls.get());assertFalse(app.tasks.hasMissingNodeEvidence(task))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun typedAuthorizationAndWindowFailuresNeverUseReliableNodeFallback() {
+        val provider=service.screenshotProvider
+        service.processorFactory=nodeFactory()
+        try {
+            listOf(ScreenshotFailureReason.AUTHORIZATION_CHANGED,ScreenshotFailureReason.WINDOW_CHANGED).forEach { reason ->
+                startFixture("safe");val before=taskIds()
+                service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(reason,"synthetic refusal") }
+                service.captureOnShake()
+                await { (taskIds()-before).singleOrNull()?.let { app.tasks.status(it)=="FAILED" }==true }
+                val task=(taskIds()-before).single()
+                assertNull(app.tasks.recordId(task));assertFalse(app.tasks.hasMissingNodeEvidence(task));assertEquals(0,calls.get())
+            }
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun unknownNodesWithOrdinaryScreenshotFailureNeverStartOcrOrPost() {
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.UNAVAILABLE,"synthetic unavailable") }
+        try {
+            service.captureOnShake()
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it)=="FAILED" }==true }
+            val task=(taskIds()-previousTasks).single()
+            assertNull(app.tasks.recordId(task));assertEquals(0,calls.get());assertFalse(app.tasks.hasMissingNodeEvidence(task))
         } finally { service.screenshotProvider=provider }
     }
 
@@ -165,6 +273,7 @@ class ShakeWhitelistCaptureTest {
     }
 
     @Test fun sensitiveEditableAndUnreadablePagesNeverRequestPixelsOrCreateTasks() {
+        service.processorFactory=nodeFactory()
         val count=service.screenshotRequests;val before=taskIds()
         for(mode in listOf("password","editable","verification","blank")) {
             startFixture(mode);service.captureOnShake();SystemClock.sleep(1_900)
