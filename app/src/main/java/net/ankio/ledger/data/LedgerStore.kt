@@ -38,7 +38,7 @@ sealed class IngestResult {
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 10) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 11) {
     private val backupContext=context.applicationContext
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
@@ -86,10 +86,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         createRefunds(db)
         createIdentitiesAndUndo(db)
         WalletAccounting.create(db)
+        CategoryDirectory.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..9 && newVersion == 10) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..10 && newVersion == 11) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -121,7 +122,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             persistIdentities(db,record.id,recovered)
         } }
         }
-        if (oldVersion < 9) migrateWallets(db) else WalletAccounting.migrateV10(db)
+        if (oldVersion < 9) migrateWallets(db) else if (oldVersion < 10) WalletAccounting.migrateV10(db)
+        CategoryDirectory.create(db)
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -682,7 +684,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 ?: automaticCandidate?.let { Duplicate.Possible(it.id) }
             val reason = if(refundedPaymentCandidate!=null) "疑似为已退款账单的原付款页面，请核对后保存"
                 else if (possible != null) "疑似与已有账单重复，请核对后保存" else bill.reason
-            val draft = LedgerRecord(capture = capture, bill = bill.copy(reason = reason),
+            val draft = LedgerRecord(capture = capture, bill = bill.copy(reason = reason,
+                category = CategoryDirectory.recognitionName(db, bill.direction, bill.category)),
                 state = if (!requireReview && bill.reliable && bill.amountCents != null && bill.direction != null && possible == null)
                     RecordState.POSTED else RecordState.REVIEW,
                 reason = reason,
@@ -1612,30 +1615,57 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             Direction.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("direction")))))
     } }
 
-    @Synchronized
-    fun addCategory(category: CustomCategory): Boolean {
-        category.validate()
-        require(category.name!="转账手续费") { "转账手续费为系统分类，请使用其他分类名称" }
-        return writableDatabase.insertWithOnConflict("custom_categories", null, categoryValues(category),
-            SQLiteDatabase.CONFLICT_IGNORE) != -1L
+    fun categoryDirectory(direction: Direction? = null): List<LedgerCategory> = CategoryDirectory.list(readableDatabase, direction)
+
+    fun category(id: String, direction: Direction): LedgerCategory = CategoryDirectory.requireCategory(readableDatabase, id, direction)
+
+    fun categoryFor(record: LedgerRecord): LedgerCategory? = record.bill.direction?.takeIf { it != Direction.TRANSFER }?.let {
+        CategoryDirectory.byName(readableDatabase, it, record.bill.category)
     }
 
-    @Synchronized fun deleteCategory(category: CustomCategory) {
+    @Synchronized fun saveCategory(id: String? = null, name: String, direction: Direction, icon: String = "tag"): LedgerCategory = categoryTransaction {
+        CategoryDirectory.save(it, id, name, direction, icon)
+    }
+
+    @Synchronized fun reorderCategories(direction: Direction, ids: List<String>) = categoryTransaction {
+        CategoryDirectory.reorder(it, direction, ids)
+    }
+
+    @Synchronized fun removeCategory(id: String) = categoryTransaction { CategoryDirectory.remove(it, id) }
+
+    private fun <T> categoryTransaction(action: (SQLiteDatabase) -> T): T {
+        val db = writableDatabase; db.beginTransaction()
+        try { val result = action(db); db.setTransactionSuccessful(); return result } finally { db.endTransaction() }
+    }
+
+    @Synchronized
+    fun addCategory(category: CustomCategory): Boolean = categoryTransaction { db ->
+        category.validate(); CategoryDirectory.validateName(category.name); CategoryDirectory.validateDirection(category.direction)
+        if (CategoryDirectory.byNormalized(db, category.direction, category.name) != null) false
+        else { CategoryDirectory.save(db, null, category.name, category.direction, "tag"); true }
+    }
+
+    @Synchronized fun deleteCategory(category: CustomCategory) = categoryTransaction { db ->
         category.validate()
-        // Past bills keep their original category text after removal from the picker.
-        writableDatabase.delete("custom_categories", "direction = ? AND name = ?",
-            arrayOf(category.direction.name, category.name))
+        val existing = CategoryDirectory.byName(db, category.direction, category.name)
+            ?: throw CategoryException("CATEGORY_NOT_FOUND", "分类已不存在，请刷新后重试")
+        CategoryDirectory.remove(db, existing.id)
     }
 
     /** Compatibility API: merging saved history never posts a new financial transaction. */
     @Synchronized
     fun merge(records: List<LedgerRecord>, accounts: List<LedgerAccount> = emptyList(),
-              categories: List<CustomCategory> = emptyList()): Int {
+              categories: List<CustomCategory> = emptyList(), categoryDirectory: List<LedgerCategory> = emptyList(),
+              categoryBindings: Map<String, String> = emptyMap()): Int {
         val db = writableDatabase
         db.beginTransaction()
         try {
             var imported = 0
-            records.forEach { record ->
+            val mappedCategories = CategoryDirectory.merge(db, categoryDirectory)
+            val incomingCategories = categoryDirectory.associateBy { it.direction to it.name }
+            records.forEach { original ->
+                val category = (categoryBindings[original.uid] ?: incomingCategories[original.bill.direction to original.bill.category]?.id)?.let { mappedCategories[it] }
+                val record = if (category == null) original else original.copy(bill = original.bill.copy(category = category.name))
                 // UUIDs identify records in repeated backups. Do not overwrite subsequent local edits.
                 val exists = db.rawQuery("SELECT 1 FROM records WHERE uid = ?", arrayOf(record.uid)).use { it.moveToFirst() }
                 if (!exists) {
@@ -1651,8 +1681,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val exists = db.rawQuery("SELECT 1 FROM accounts WHERE uid = ?", arrayOf(account.uid)).use { it.moveToFirst() }
                 if (!exists) db.insertOrThrow("accounts", null, accountValues(account.copy(id = 0)))
             }
-            categories.forEach { category ->
+            categories.forEach { original ->
+                val mapped = incomingCategories[original.direction to original.name]?.id?.let { mappedCategories[it] }
+                val category = if (mapped == null) original else original.copy(name = mapped.name)
                 category.validate()
+                CategoryDirectory.ensure(db, category.direction, category.name)
                 db.insertWithOnConflict("custom_categories", null, categoryValues(category), SQLiteDatabase.CONFLICT_IGNORE)
             }
             db.setTransactionSuccessful()
@@ -1819,6 +1852,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         put("raw_text", r.capture.text); put("received_at", r.capture.receivedAt)
         put("amount", r.bill.amountCents); put("direction", r.bill.direction?.name)
         put("merchant", r.bill.merchant); put("category", r.bill.category)
+        put("category_id", CategoryDirectory.ensure(writableDatabase, r.bill.direction, r.bill.category)?.id)
         put("occurred_at", r.bill.occurredAt); put("transaction_id", r.bill.transactionId)
         put("reliable", if (r.bill.reliable) 1 else 0); put("time_explicit", if (r.bill.timeExplicit) 1 else 0)
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)

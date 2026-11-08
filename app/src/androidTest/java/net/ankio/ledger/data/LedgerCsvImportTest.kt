@@ -77,6 +77,39 @@ class LedgerCsvImportTest {
         assertEquals(0,LedgerCsvImport.apply(target,document).imported)
     }
 
+    @Test fun qianjiPrimaryAndSecondaryLabelsBecomeOneFullDirectoryName() {
+        val document = read(("时间,分类,二级分类,类型,金额,账户1,账户2,备注,账单标记,手续费,优惠券,标签,账单图片\n" +
+            "2026-11-08 12:00,合成一级,二级,支出,12.34,,,,,,,,\n").toByteArray())
+        assertTrue(document.errors.toString(), document.errors.isEmpty())
+        val target = store(); val wallets = target.walletSnapshot()
+        assertEquals(1, LedgerCsvImport.apply(target, document).imported)
+        assertEquals("合成一级/二级", target.all().single().bill.category)
+        val category = target.categoryDirectory(Direction.EXPENSE).single { it.name == "合成一级/二级" }
+        assertEquals(1L, category.referenceCount)
+        assertEquals(wallets.settings, target.walletSnapshot().settings)
+        assertEquals(wallets.movements, target.walletSnapshot().movements)
+    }
+
+    @Test fun csvCategoryNameCanBeUsedAgainAfterItsOriginalIdIsRenamed() {
+        fun document(time: String, amount: String) = read(("时间,分类,二级分类,类型,金额,账户1,账户2,备注,账单标记,手续费,优惠券,标签,账单图片\n" +
+            "$time,合成导入原名,,支出,$amount,,,,,,,,\n").toByteArray())
+        val target = store(); val wallets = target.walletSnapshot()
+        assertEquals(1, LedgerCsvImport.apply(target, document("2026-11-08 12:00", "12.34")).imported)
+        val original = target.categoryDirectory(Direction.EXPENSE).single { it.name == "合成导入原名" }
+        target.saveCategory(original.id, "合成导入改名", Direction.EXPENSE, "heart")
+        val later = document("2026-11-08 13:00", "23.45")
+        assertEquals(1, LedgerCsvImport.apply(target, later).imported)
+        val directory = target.categoryDirectory(Direction.EXPENSE)
+        val renamed = directory.single { it.name == "合成导入改名" }
+        val reused = directory.single { it.name == "合成导入原名" }
+        assertEquals(original.id, renamed.id); assertEquals("heart", renamed.icon)
+        assertNotEquals(original.id, reused.id)
+        assertEquals(mapOf("合成导入改名" to 1234L, "合成导入原名" to 2345L), target.all().associate { it.bill.category to it.bill.amountCents })
+        assertEquals(0, LedgerCsvImport.apply(target, later).imported)
+        assertEquals(reused.id, target.categoryDirectory(Direction.EXPENSE).single { it.name == "合成导入原名" }.id)
+        assertEquals(wallets.settings, target.walletSnapshot().settings); assertEquals(wallets.movements, target.walletSnapshot().movements)
+    }
+
     @Test fun invalidRowsArePreviewedAndNeverSilentlyRoundedOrImported() {
         val bytes=csv(listOf(record())).toString(Charsets.UTF_8)
         val invalid=bytes.replace("\"123.45\"","\"123.456\"")

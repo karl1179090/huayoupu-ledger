@@ -78,7 +78,7 @@ class WalletMigrationTest {
             try {
                 fixture(name,version)
                 LedgerStore(context,name).use { store->
-                    assertEquals(10,store.readableDatabase.version)
+                    assertEquals(11,store.readableDatabase.version)
                     val historical=store.get(41)!!
                     assertEquals(recordUid,historical.uid);assertEquals(WalletEligibility.LEGACY_EXCLUDED,historical.wallet!!.eligibility)
                     assertEquals(0L,historical.wallet.appliedCents)
@@ -114,7 +114,7 @@ class WalletMigrationTest {
                 }
                 db.execSQL("DROP TABLE wallet_movements")
             }
-            LedgerStore(context,name).use { store->assertEquals(10,store.readableDatabase.version);assertEquals(12345L,store.getAccount(17)!!.amountCents) }
+            LedgerStore(context,name).use { store->assertEquals(11,store.readableDatabase.version);assertEquals(12345L,store.getAccount(17)!!.amountCents) }
         } finally { context.deleteDatabase(name) }
     }
     private fun v9Expected()=JSONObject(InstrumentationRegistry.getInstrumentation().context.assets.open("transfers/ledger-v9-expected.json").bufferedReader().use { it.readText() })
@@ -133,7 +133,7 @@ class WalletMigrationTest {
             val (balances,movements)=v9Fixture(name)
             repeat(3) {
                 LedgerStore(context,name).use { store->
-                    assertEquals(10,store.readableDatabase.version)
+                    assertEquals(11,store.readableDatabase.version)
                     assertEquals(balances,store.accounts().associate { it.uid to it.amountCents })
                     assertEquals(movements,store.readableDatabase.rawQuery("SELECT COUNT(*) FROM wallet_movements",null).use { c->c.moveToFirst();c.getLong(0) })
                     assertEquals(2,store.readableDatabase.rawQuery("SELECT COUNT(*) FROM record_wallet_effects",null).use { c->c.moveToFirst();c.getInt(0) })
@@ -170,7 +170,7 @@ class WalletMigrationTest {
                 assertEquals(movements,db.rawQuery("SELECT COUNT(*) FROM wallet_movements",null).use { c->c.moveToFirst();c.getLong(0) })
                 db.execSQL("UPDATE record_wallet_links SET eligibility='ACTIVE' WHERE applied_cents<>0")
             }
-            LedgerStore(context,name).use { assertEquals(10,it.writableDatabase.version) }
+            LedgerStore(context,name).use { assertEquals(11,it.writableDatabase.version) }
         } finally { context.deleteDatabase(name) }
     }
 

@@ -28,7 +28,7 @@ class WalletBackupTest {
     @Test fun fullSnapshotRestoresNegativeBalanceAndAppliedStateWithoutReplay() {
         val source=store();val wallet=account(source);source.setDefaultWallet(wallet.uid)
         val saved=source.saveEdited(record())
-        val decoded=backup(source);assertEquals(5,decoded.metadataVersion)
+        val decoded=backup(source);assertEquals(6,decoded.metadataVersion)
         val target=store();val summary=LedgerBackup.restoreDetailed(target,decoded)
         assertEquals(RestoreSummary(1,0,0,1),summary)
         assertEquals(-2000L,target.getAccountByUid(wallet.uid)!!.amountCents)
