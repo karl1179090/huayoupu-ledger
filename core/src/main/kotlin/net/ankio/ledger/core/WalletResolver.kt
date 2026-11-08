@@ -95,7 +95,7 @@ object WalletResolver {
 
     /** Historical source prefixes are allowed; arbitrary OCR text never becomes a source package. */
     fun sourcePackage(origin: String): String? {
-        val value = origin.trim().removePrefix("shake:").removePrefix("payment_auto:")
+        val value = origin.trim().removePrefix("shake:").removePrefix("payment_auto:").removePrefix("shortcut:")
         return value.takeIf { Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+").matches(it) }
     }
 

@@ -10,6 +10,66 @@ class BankReceiptParserTest {
         LocalOcrBillParser.parse((listOf("招商银行", "交易成功提醒") + fields).map(::LocalOcrLine),
             0, 0, now, policy=policy, origin="shake:com.tencent.mm")
 
+    @Test fun nativeBankSourceRuleUsesCapturedPackageAcrossExistingTriggerPrefixes() {
+        val raw="招商银行\n交易成功提醒\n交易类型：网上快捷支付\n交易金额：12.00元\n交易卡号：尾号0007\n交易说明：午餐"
+        val bill=LocalOcrBillParser.parse(raw.lines().map(::LocalOcrLine),0,0,now,origin="image")!!
+        val rule=ClassificationRule("native-bank","原生午餐",true,Direction.EXPENSE,"cat:expense:dining",0,
+            listOf(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.CONTAINS,"午餐")),
+            source="LIVE:${PaymentApps.WECHAT}")
+        val snapshot=ClassificationSnapshot("synthetic-native-bank",listOf(rule),emptyList())
+        for(prefix in listOf("shake:","shortcut:","payment_auto:")) {
+            val input=ClassificationInput.from(bill,Capture(Source.OCR,prefix+PaymentApps.WECHAT,raw,now))
+            assertEquals(prefix,PaymentApps.WECHAT,input.sourcePackage)
+            assertEquals(prefix,"native-bank",ClassificationEngine.classify(snapshot,input).ruleId)
+        }
+    }
+
+    @Test fun missingYearBankImageDateAndCompoundInputsKeepIssuerOutOfMerchantAndPlatform() {
+        val at=Instant.parse("2026-11-08T04:00:00Z").toEpochMilli()
+        val time=RecognitionTimeContext(at,"Asia/Shanghai","2026-11-02")
+        val lines=listOf("招商银行","交易成功提醒","交易类型：网上快捷支付","交易金额：12.00元",
+            "交易卡号：尾号0007","交易说明：午餐","交易日期：11月01日","微信支付广告")
+        val bill=LocalOcrBillParser.parse(lines.map(::LocalOcrLine),0,0,at,origin="image",timeContext=time)!!
+        assertTrue(bill.reliable)
+        assertEquals("",bill.merchant)
+        assertEquals("招商银行",bill.receipt!!.receiptIssuer!!.value)
+        assertEquals("YEAR_INFERRED",bill.receipt!!.time!!.source)
+        assertEquals("DATE",bill.receipt!!.time!!.precision)
+        assertEquals("2026-11-01",bill.receipt!!.time!!.localDate)
+        assertEquals(Instant.parse("2026-10-31T16:00:00Z").toEpochMilli(),bill.occurredAt)
+        val input=ClassificationInput.from(bill,Capture(Source.IMAGE,"image",lines.joinToString("\n"),at))
+        assertEquals(Source.IMAGE,input.captureSource)
+        assertNull(input.platform)
+        fun rule(id:String,order:Int,field:ClassificationField,op:ClassificationOperator,value:String,source:String)=
+            ClassificationRule(id,id,true,Direction.EXPENSE,"cat:expense:dining",order,
+                listOf(ClassificationCondition(field,op,value)),source=source)
+        val snapshot=ClassificationSnapshot("synthetic-bank-image",listOf(
+            rule("sender",0,ClassificationField.MERCHANT,ClassificationOperator.CONTAINS,"招商银行","IMAGE"),
+            rule("missing",1,ClassificationField.MERCHANT,ClassificationOperator.NOT_CONTAINS,"打车","IMAGE"),
+            rule("carrier",2,ClassificationField.ORDER_CONTENT,ClassificationOperator.CONTAINS,"午餐","IMAGE:wechat"),
+            rule("business",3,ClassificationField.ORDER_CONTENT,ClassificationOperator.CONTAINS,"午餐","IMAGE")),emptyList())
+        assertEquals("business",ClassificationEngine.classify(snapshot,input).ruleId)
+        assertEquals("cmb",bill.paymentMethod!!.bankCode)
+        assertEquals("0007",bill.paymentMethod!!.cardLast4)
+    }
+
+    @Test fun explicitPaymentIssuerAllowsImagePlatformCompoundRuleWithoutChangingBankAccountEvidence() {
+        val at=Instant.parse("2026-11-08T04:00:00Z").toEpochMilli()
+        val raw="支付成功\n交易金额：12.00元\n商户名称：合成咖啡\n商品说明：午餐\n付款方式：招商银行(0007)\n凭证来源：微信支付"
+        val bill=LocalOcrBillParser.parse(raw.lines().map(::LocalOcrLine),0,0,at,origin="image")!!
+        val rule=ClassificationRule("explicit","明确平台午餐",true,Direction.EXPENSE,"cat:expense:dining",0,
+            listOf(ClassificationCondition(ClassificationField.MERCHANT,ClassificationOperator.CONTAINS,"合成"),
+                ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.CONTAINS,"午餐")),
+            matchMode=ClassificationMatchMode.ALL,source="IMAGE:wechat")
+        val snapshot=ClassificationSnapshot("synthetic-explicit-image",listOf(rule),emptyList())
+        val image=ClassificationInput.from(bill,Capture(Source.IMAGE,"image",raw,at))
+        assertEquals("wechat",image.platform)
+        assertEquals("explicit",ClassificationEngine.classify(snapshot,image).ruleId)
+        assertNull(ClassificationEngine.classify(snapshot,ClassificationInput.from(bill,Capture(Source.OCR,PaymentApps.WECHAT,raw,at))).ruleId)
+        assertEquals("cmb",bill.paymentMethod!!.bankCode)
+        assertEquals("0007",bill.paymentMethod!!.cardLast4)
+    }
+
     @Test fun actualAccountFieldsDoNotDowngradeTailsOrMixPreferencesAndCounterparties() {
         val explicit=parse("交易类型：网上快捷支付","交易金额：12.00元","付款方式：招商银行(9999)",
             "支付方式：优先使用工商银行(1234)")!!

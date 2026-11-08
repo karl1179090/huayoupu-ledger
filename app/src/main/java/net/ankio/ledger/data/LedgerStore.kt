@@ -38,7 +38,7 @@ sealed class IngestResult {
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 13) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 14) {
     private val backupContext=context.applicationContext
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
@@ -88,10 +88,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         WalletAccounting.create(db)
         CategoryDirectory.create(db)
         ClassificationStorage.create(db)
+        AccountingDates.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..12 && newVersion == 13) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..13 && newVersion == 14) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -126,7 +127,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         if (oldVersion < 9) migrateWallets(db) else if (oldVersion < 10) WalletAccounting.migrateV10(db)
         if (oldVersion < 11) CategoryDirectory.create(db)
         if(oldVersion < 12)db.execSQL("ALTER TABLE records ADD COLUMN receipt_evidence TEXT")
-        ClassificationStorage.create(db)
+        if(oldVersion<13)ClassificationStorage.create(db)
+        AccountingDates.migrate(db)
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -275,7 +277,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
         }
         if(receipt==previous)return result
-        check(db.update("records",ContentValues().apply { put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt)) },
+        check(db.update("records",ContentValues().apply {
+            put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt))
+            put("accounting_date",AccountingDates.dateOnly(result.bill.copy(receipt=receipt)))
+        },
             "id=?",arrayOf(result.id.toString()))==1)
         return result.copy(bill=result.bill.copy(receipt=receipt))
     }
@@ -908,7 +913,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized
     fun saveEdited(record: LedgerRecord, walletAccountUid:String?=null,manualWalletSelected:Boolean=false,
         expectedRevision:Long?=record.wallet?.revision,submissionToken:String?=null,
-        transferDetails:RecordTransferDetails?=record.transfer): LedgerRecord {
+        transferDetails:RecordTransferDetails?=record.transfer,manualCategorySelected:Boolean=false): LedgerRecord {
         val db=writableDatabase;db.beginTransaction()
         try {
         val token=submissionToken ?: if(record.id==0L)record.uid else null
@@ -950,7 +955,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             transfer=if(record.bill.direction==Direction.TRANSFER)manualTransfer else null,
             bill = record.bill.copy(reliable = true, reason = provenance, receipt=receipt,
                 timeExplicit=if(timeChanged)true else record.bill.timeExplicit, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
-                if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || record.bill.categoryDecision?.manual==true)
+                if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || manualCategorySelected)
                     CategoryDecision(CategoryDirectory.ensure(db,record.bill.direction,record.bill.category)?.id,CategorySource.MANUAL,true,explanation="人工选择分类")
                 else previous.bill.categoryDecision),
             state = RecordState.POSTED, reason = provenance, duplicateId = null)
@@ -1703,6 +1708,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun saveClassificationRule(rule:ClassificationRule):ClassificationRule = classificationTransaction { ClassificationStorage.save(it,rule) }
     @Synchronized fun deleteClassificationRule(id:String) = classificationTransaction { ClassificationStorage.delete(it,id) }
     @Synchronized fun reorderClassificationRules(direction:Direction,ids:List<String>) = classificationTransaction { ClassificationStorage.reorder(it,direction,ids) }
+    @Synchronized fun setBuiltinClassificationRuleEnabled(id:String,enabled:Boolean) = classificationTransaction { ClassificationStorage.setBuiltinEnabled(it,id,enabled) }
+    @Synchronized fun copyBuiltinClassificationRule(id:String):ClassificationRule = ClassificationStorage.copyBuiltin(readableDatabase,id)
     @Synchronized fun holdClassificationSnapshot(key:String,snapshot:ClassificationSnapshot?=null,taskDatabase:String?=null):ClassificationSnapshot = classificationTransaction {
         ClassificationStorage.hold(it,key,snapshot ?: ClassificationStorage.configuration(it),taskDatabase)
     }
@@ -1714,9 +1721,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val db=writableDatabase;db.beginTransaction()
         return try { action(db).also { db.setTransactionSuccessful() } } finally { db.endTransaction() }
     }
-    @Synchronized fun classify(bill:ParsedBill,snapshot:ClassificationSnapshot):ParsedBill {
+    @Synchronized fun classify(bill:ParsedBill,snapshot:ClassificationSnapshot,capture:Capture?=null):ParsedBill {
         val direction=bill.direction?.takeIf { it in listOf(Direction.EXPENSE,Direction.INCOME) } ?: return bill
-        val decision=ClassificationEngine.classify(snapshot,ClassificationInput(direction,bill.merchant),bill.categoryDecision)
+        val decision=ClassificationEngine.classify(snapshot,ClassificationInput.from(bill,capture),bill.categoryDecision)
         val category=CategoryDirectory.requireCategory(readableDatabase,requireNotNull(decision.categoryId),direction)
         return bill.copy(category=category.name,categoryDecision=decision)
     }
@@ -1975,6 +1982,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)
         put("note", r.note);put("standalone_refund",encodeStandaloneRefund(r.bill.standaloneRefund))
         put("receipt_evidence",ReceiptEvidenceCodec.encode(r.bill.receipt))
+        put("accounting_date",AccountingDates.dateOnly(r.bill))
         put("category_decision",r.bill.categoryDecision?.let { ClassificationCodec.decision(it.copy(categoryId=CategoryDirectory.ensure(writableDatabase,r.bill.direction,r.bill.category)?.id)).toString() })
         put("transaction_identities",TransactionIdentities.encode(identities(r)))
         put("refund_provider", r.bill.refund?.provider);put("refund_original", r.bill.refund?.originalAmountCents)

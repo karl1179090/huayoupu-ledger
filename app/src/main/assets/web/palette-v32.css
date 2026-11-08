@@ -261,6 +261,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .confirm-card .amount-row:focus-within{background:#F4F2FA}
 .record-chips button{background:var(--tint);color:var(--grape-ink)}
 .record-chips #time-label{background:#EFEDF4;color:#5C5575}
+.record-chips .time-basis{background:#F4F2FA;color:var(--muted)}
 .confirm-card .note-row{border-top-color:#E9E5F2}
 .refund-summary{color:#43791F}
 .refund-match{background:#E9F8DC;color:#3B7A20}
@@ -311,7 +312,7 @@ dialog input,dialog select,.month-input{border-color:#E3DFF0;background:#FAF9FD}
 
 /* ---------- 设置页 ---------- */
 #settings .settings-header>button{color:var(--muted)}
-#settings .payment-settings>p,#settings .payment-note,#settings .account-preferences #engine-provider,#settings .category-preferences #category-summary-count,#settings .about-app{color:var(--muted)}
+#settings .payment-settings>p,#settings .payment-note,#settings .account-preferences #engine-provider,#settings .category-preferences #category-summary-count,#settings .category-preferences #classification-rules-summary,#settings .about-app,.category-explanation{color:var(--muted)}
 #settings .payment-note:before{color:var(--muted-soft)}
 #settings .payment-app{background:#F4F2FA}
 #settings .account-preferences>button,#settings .category-preferences>button{border-bottom-color:#E9E5F2}

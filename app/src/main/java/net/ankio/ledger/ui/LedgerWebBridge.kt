@@ -27,6 +27,7 @@ import net.ankio.ledger.data.CategoryDirectory
 import net.ankio.ledger.data.CategoryException
 import net.ankio.ledger.data.LedgerCategory
 import net.ankio.ledger.data.LedgerReadView
+import net.ankio.ledger.data.CalendarRecordPages
 import net.ankio.ledger.data.WalletReadModel
 import net.ankio.ledger.data.ReceiptEvidenceCodec
 import net.ankio.ledger.data.WalletException
@@ -47,33 +48,39 @@ class LedgerWebBridge(private val activity: MainActivity) {
     /** Production list entry: exactly one bounded page, with a revision for continuation. */
     @JavascriptInterface
     fun snapshotFirst(month:String,search:String,direction:String,known:String):String = synchronized(app.store) {
-        val revision=app.revision.value.toString()
-        snapshotViewData(month,search,200,direction,known).put("dataRevision",revision).toString()
+        val zone=java.time.ZoneId.systemDefault()
+        val revision=readRevision(month,search,direction,zone)
+        snapshotViewData(month,search,200,direction,known,zone).put("dataRevision",revision).toString()
     }
 
     /** A mutation invalidates the cursor rather than mixing two different ledger views. */
     @JavascriptInterface
     fun recordPage(month:String,search:String,direction:String,beforeAt:Long,beforeId:Long,expectedRevision:String):String = try {
         synchronized(app.store) {
-            val revision=app.revision.value.toString()
+            val zone=java.time.ZoneId.systemDefault()
+            val revision=readRevision(month,search,direction,zone)
             if(expectedRevision!=revision)JSONObject().put("ok",true).put("reset",true).toString()
             else {
-                val view=LedgerReadView(app.store).records(month,search,direction=direction,beforeAt=beforeAt,beforeId=beforeId)
+                val view=LedgerReadView(app.store,zone).records(month,search,direction=direction,beforeAt=beforeAt,beforeId=beforeId)
                     .put("summary",JSONObject()).put("month",month)
                 val result=buildSnapshot(view).put("dataRevision",revision)
-                if(app.revision.value.toString()!=revision)JSONObject().put("ok",true).put("reset",true).toString()
+                if(readRevision(month,search,direction,java.time.ZoneId.systemDefault())!=revision)JSONObject().put("ok",true).put("reset",true).toString()
                 else result.toString()
             }
         }
-    } catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
+    } catch(_:CalendarRecordPages.StaleCursor) { JSONObject().put("ok",true).put("reset",true).toString() }
+      catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun snapshotView(month:String,search:String,limit:Int,direction:String,known:String):String =
         synchronized(app.store) { snapshotViewData(month,search,limit,direction,known).toString() }
 
-    private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String):JSONObject = try {
-        val read=LedgerReadView(app.store)
-        val key="${app.revision.value}|$month|$search|$limit|$direction|${System.currentTimeMillis()/30_000}|${app.channels.permitted(ChannelSettings.Channel.OCR)}|${net.ankio.ledger.capture.CaptureRuntime.running}|${net.ankio.ledger.capture.ScreenCaptureService.current!=null}"
+    private fun readRevision(month:String,search:String,direction:String,zone:java.time.ZoneId):String =
+        "calendar-v2|$READ_SESSION|${app.revision.value}|${zone.id}|${month.length}:$month|${search.length}:$search|${direction.length}:$direction"
+
+    private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String,zone:java.time.ZoneId=java.time.ZoneId.systemDefault()):JSONObject = try {
+        val read=LedgerReadView(app.store,zone)
+        val key="${readRevision(month,search,direction,zone)}|$limit|${System.currentTimeMillis()/30_000}|${app.channels.permitted(ChannelSettings.Channel.OCR)}|${net.ankio.ledger.capture.CaptureRuntime.running}|${net.ankio.ledger.capture.ScreenCaptureService.current!=null}"
         if(known==key)JSONObject().put("ok",true).put("unchanged",true)
         else {
             val view=read.records(month,search,limit=200,direction=direction)
@@ -81,9 +88,11 @@ class LedgerWebBridge(private val activity: MainActivity) {
             val pages=limit.coerceIn(200,1_000_000)/200
             for(page in 1 until pages) {
                 if(!view.getBoolean("hasMore"))break
-                val next=read.records(month,search,page*200,200,direction)
+                val cursor=view.getJSONObject("nextCursor")
+                val next=read.records(month,search,limit=200,direction=direction,beforeAt=cursor.getLong("occurredAt"),beforeId=cursor.getLong("id"))
                 val rows=next.getJSONArray("records");repeat(rows.length()){view.getJSONArray("records").put(rows.getJSONObject(it))}
                 view.put("hasMore",next.getBoolean("hasMore"))
+                view.put("nextCursor",next.opt("nextCursor") ?: JSONObject.NULL)
             }
             view.put("summary",read.summary(month)).put("month",month)
             buildSnapshot(view).put("viewKey",key)
@@ -286,6 +295,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
     fun save(json: String): String = try {
         checkInput(json.length <= MAX_INPUT_LENGTH, "账单数据过大")
         val input = JSONObject(json)
+        checkInput(!input.has("categoryDecision"),"分类信息无效，请重新打开账单")
+        val categoryEdited=if(input.has("categoryEdited"))input.get("categoryEdited") as? Boolean
+            ?: throw InvalidInput("分类选择状态无效，请重新选择") else false
         checkInput(!input.has("eligibility") && !input.has("walletEffects") && !input.has("appliedCents"),"不能指定余额联动事实")
         val id = integer(input, "id", 0, MAX_SAFE_INTEGER)
         val taskId=if(input.has("recognitionTaskId")) integer(input,"recognitionTaskId",0,MAX_SAFE_INTEGER) else 0L
@@ -363,9 +375,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 val saved = app.store.saveEdited(base.copy(transfer=transfer,
                     bill = base.bill.copy(amountCents = cents, direction = direction,
                         merchant = merchant, category = category, occurredAt = occurredAt,
-                        categoryDecision=net.ankio.ledger.core.CategoryDecision(app.store.categoryDirectory(direction).firstOrNull { it.name==category }?.id,net.ankio.ledger.core.CategorySource.MANUAL,true,explanation="人工选择分类"),
                         reliable = true, reason = "", transfer=null, timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
                     note = note),
+                    manualCategorySelected=categoryEdited,
                     walletAccountUid=if(input.has("walletAccountUid")&&!input.isNull("walletAccountUid"))string(input,"walletAccountUid",64) else null,
                     manualWalletSelected=if(input.has("manualWalletSelected"))input.get("manualWalletSelected") as? Boolean ?: throw InvalidInput("钱包选择参数无效") else false,
                     expectedRevision=if(original!=null)integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else null,
@@ -589,6 +601,18 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
         val rule=ClassificationCodec.readRule(JSONObject(json))
         synchronized(app.store) { app.store.saveClassificationRule(rule);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun setBuiltinClassificationRuleEnabled(json:String):String=try {
+        checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
+        val input=JSONObject(json)
+        val id=(input.get("id") as? String)?.takeIf { it.length in 1..160 }
+            ?: throw ClassificationException("RULE_INVALID","内置规则标识无效")
+        val enabled=input.get("enabled") as? Boolean ?: throw ClassificationException("RULE_INVALID","规则启停状态无效")
+        synchronized(app.store) { app.store.setBuiltinClassificationRuleEnabled(id,enabled);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun copyBuiltinClassificationRule(id:String):String=try {
+        val draft=app.store.copyBuiltinClassificationRule(id)
+        JSONObject().put("ok",true).put("rule",ClassificationCodec.rule(draft).put("id",JSONObject.NULL)).toString()
     } catch(error:Exception) { ruleFailure(error) }
     @JavascriptInterface fun deleteClassificationRule(id:String):String=try {
         synchronized(app.store) { app.store.deleteClassificationRule(id);app.changed();classificationResponse().toString() }
@@ -865,6 +889,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     private class InvalidInput(message: String) : IllegalArgumentException(message)
 
     private companion object {
+        val READ_SESSION=java.util.UUID.randomUUID().toString()
         const val MAX_INPUT_LENGTH = 16_384
         const val MAX_TIME = 4_102_444_800_000L
         // WebView's JavaScript numbers must represent record IDs without rounding.
