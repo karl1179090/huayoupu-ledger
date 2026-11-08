@@ -785,6 +785,99 @@ async function runTests() {
       await mismatchPage.close();
     }
 
+    // =========================================================================
+    // 15. Trend details fallback test when ledgerView.summary.days is absent/null:
+    // When summary.days is null, showTrendDetails uses client-side sums(list.filter(r => recordDay(r) === day)).
+    // Top-level shared recordDay(r) must be used without ReferenceError.
+    // Trusted DATE records (e.g. 202 on Nov 5) must be grouped under trusted day (day 5),
+    // and ordinary/untrusted records must be grouped under real occurredAt day.
+    // =========================================================================
+    console.log('[t04] Running trend details fallback test without summary.days...');
+    const trendPage = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      reducedMotion: 'reduce',
+      timezoneId: 'Asia/Shanghai'
+    });
+
+    const pageErrors = [];
+    trendPage.on('pageerror', err => pageErrors.push(err.message));
+
+    try {
+      await trendPage.route('https://**', r => r.abort());
+      await trendPage.clock.install({ time: new Date('2026-11-06T12:30:00+08:00') });
+      await installSyntheticBridge(trendPage);
+
+      await trendPage.goto(pathToFileURL(path.resolve('app/src/main/assets/web/index.html')).href);
+      await trendPage.evaluate(() => document.fonts.ready);
+
+      // Explicitly delete summary.days to force the fallback calculation path in drawChart & showTrendDetails
+      await trendPage.evaluate(() => {
+        // Add an untrusted mismatched record: occurredAt on Nov 3, but stale time says Nov 5
+        const untrusted = {
+          id: 501, uid: 'rec-501', state: 'POSTED', source: 'OCR', origin: 'shake',
+          merchant: '不可信日期商户', category: '餐饮', categoryId: 'cat:expense:dining',
+          amountCents: 1500, direction: 'EXPENSE',
+          occurredAt: new Date('2026-11-03T10:00:00.000+08:00').getTime(),
+          note: 'occurredAt为3号', rawText: '',
+          hasScreenshot: false, hasMerchantIcon: false, walletAccountUid: 'wechat',
+          receipt: {
+            version: 1, blockId: 'single',
+            time: {
+              rawText: '2026-11-05',
+              accountingAt: new Date('2026-11-05T00:00:00.000+08:00').getTime(), // mismatch!
+              localDate: '2026-11-05', zoneId: 'Asia/Shanghai',
+              precision: 'DATE', source: 'EXPLICIT', reference: 'RECOGNITION',
+              recognitionAt: Date.now()
+            }
+          }
+        };
+        window.fixtureRecords.push(untrusted);
+        refresh();
+        if (ledgerView?.summary) {
+          delete ledgerView.summary.days;
+        }
+        render();
+      });
+
+      // Click trend caption to open trend details sheet
+      await trendPage.evaluate(() => document.querySelector('.trend-caption').click());
+      await trendPage.waitForFunction(() => document.querySelector('#sheet').open);
+
+      assert.equal(pageErrors.length, 0, 'No JavaScript ReferenceError thrown during showTrendDetails fallback');
+
+      // Verify table rows:
+      // Day 5 (11/5): must contain 58.00 from record 202 (trusted DATE)
+      // Day 3 (11/3): must contain 89.00 (rec 203) + 15.00 (rec 501) = 104.00, confirming rec 501 grouped by occurredAt
+      // Day 6 (11/6): must contain 36.50 (rec 201) + 42.00 (rec 205) = 78.50 (ordinary / fallback)
+      const tableRows = await trendPage.evaluate(() => {
+        const rows = document.querySelectorAll('table.trend-table tbody tr');
+        return Array.from(rows).map(tr => {
+          const day = tr.querySelector('th')?.textContent?.trim();
+          const amount = tr.querySelectorAll('td')[0]?.textContent?.trim();
+          return { day, amount };
+        });
+      });
+
+      const day5Row = tableRows.find(r => r.day === '11/5');
+      assert(day5Row, 'Day 11/5 row exists');
+      assert.equal(day5Row.amount, '58.00', 'Day 5 row correctly groups trusted DATE record (58.00)');
+
+      const day3Row = tableRows.find(r => r.day === '11/3');
+      assert(day3Row, 'Day 11/3 row exists');
+      assert.equal(day3Row.amount, '104.00', 'Day 3 row groups untrusted record under real occurredAt day (89.00 + 15.00 = 104.00)');
+
+      const day6Row = tableRows.find(r => r.day === '11/6');
+      assert(day6Row, 'Day 11/6 row exists');
+      assert.equal(day6Row.amount, '78.50', 'Day 6 row groups ordinary and fallback records (36.50 + 42.00 = 78.50)');
+
+      await trendPage.screenshot({ path: path.join(screenshotDir, 'after-15-trend-fallback.png') });
+      console.log('✓ after-15-trend-fallback.png captured');
+      console.log('✓ Trend details fallback without summary.days passed!');
+    } finally {
+      await trendPage.close();
+    }
+
     console.log('ALL TRANSACTION TIME TESTS PASSED!');
   } finally {
     await browser.close();

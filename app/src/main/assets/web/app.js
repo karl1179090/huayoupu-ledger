@@ -188,6 +188,10 @@ function recordDisplayTime(r){
  if(trusted)return `${trusted} 仅日期`;
  return localTime(r?.occurredAt).replace('T',' ');
 }
+function recordDay(r){
+ const trusted=trustedReceiptDate(r);
+ return trusted?Number(trusted.slice(8,10)):new Date(r?.occurredAt).getDate();
+}
 function monthRecords(){return records.filter(r=>r.state==='POSTED'&&recordMonth(r)===month)}
 function sums(list){return list.reduce((a,r)=>{if(r.direction==='INCOME')a.income+=cents(r.amountCents);else a.expense+=expenseOf(r);return a},{income:0n,expense:0n})}
 function notify(text){const t=document.querySelector('.toast');t.textContent=text;t.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>t.classList.remove('show'),2600)}
@@ -331,7 +335,6 @@ function drawSettings(){
 function drawChart(list,now=new Date(),aggregated=null){
  const [year,mo]=month.split('-').map(Number),days=new Date(year,mo,0).getDate(),current=localMonth(now.getTime());
  const eligible=list.filter(r=>r.state==='POSTED'&&recordMonth(r)===month&&r.amountCents!=null&&['INCOME','EXPENSE','TRANSFER'].includes(r.direction));
- const recordDay=r=>{const trusted=trustedReceiptDate(r);return trusted?Number(trusted.slice(8,10)):new Date(r.occurredAt).getDate()};
  // Current months stop at today, except explicitly dated future records. Past months use the full month.
  const lastDay=month<current?days:Math.max(month===current?now.getDate():1,...(aggregated?aggregated.map(r=>r.day):eligible.map(recordDay)));
  const mode=filter==='income'?'income':'expense',name=mode==='income'?'累计收入':'累计支出',values=Array(lastDay).fill(0n);
