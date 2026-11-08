@@ -272,6 +272,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 serviceProvider=previous.serviceProvider ?: incoming.serviceProvider,
                 receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
                 sourceApp=previous.sourceApp ?: incoming.sourceApp,
+                recognition=previous.recognition ?: incoming.recognition,
                 bank=previous.bank ?: incoming.bank,
                 time=previous.time?.takeIf { it.accountingAt==result.bill.occurredAt }
                     ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })

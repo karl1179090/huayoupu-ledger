@@ -25,6 +25,7 @@ object ReceiptEvidenceCodec {
             .put("transactionDescription", field(evidence.transactionDescription)).put("orderRemark", field(evidence.orderRemark))
             .put("serviceProvider", field(evidence.serviceProvider)).put("receiptIssuer", field(evidence.receiptIssuer))
             .put("sourceApp", field(evidence.sourceApp)).put("bank", bank)
+            .also { json -> evidence.recognition?.let { json.put("recognition",RecognitionEvidenceCodec.json(it)) } }
             .put("time", evidence.time?.let { time -> JSONObject()
                 .put("rawText",time.rawText).put("accountingAt",time.accountingAt).put("localDate",time.localDate)
                 .put("zoneId",time.zoneId).put("precision",time.precision).put("source",time.source)
@@ -39,7 +40,7 @@ object ReceiptEvidenceCodec {
 
     fun decode(obj: JSONObject): ReceiptEvidence {
         require(obj.toString().toByteArray(Charsets.UTF_8).size <= MAX_BYTES)
-        require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId", "time") }) { "凭证字段不支持" }
+        require(obj.keys().asSequence().toSet().all { it in fields || it in setOf("version", "blockId", "time", "recognition") }) { "凭证字段不支持" }
         require(obj.get("version") is Int && obj.getInt("version") == 1) { "凭证版本不支持" }
         fun text(value: JSONObject, key: String) = value.get(key) as? String ?: error("凭证字段类型错误：$key")
         fun field(key: String, parent: JSONObject = obj): ReceiptField? {
@@ -66,6 +67,7 @@ object ReceiptEvidenceCodec {
         return ReceiptEvidence(version=obj.getInt("version"), blockId=text(obj, "blockId"),
             merchant=field("merchant"), productDescription=field("productDescription"),
             transactionDescription=field("transactionDescription"), orderRemark=field("orderRemark"),
-            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time)
+            serviceProvider=field("serviceProvider"), receiptIssuer=field("receiptIssuer"), sourceApp=field("sourceApp"), bank=bank, time=time,
+            recognition=if(obj.isNull("recognition"))null else RecognitionEvidenceCodec.decode(obj.getJSONObject("recognition")))
     }
 }

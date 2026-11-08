@@ -49,19 +49,23 @@ class LocalRecognitionClient(context: android.content.Context) {
                 ?: throw RecognitionException("图片无法读取，请重新截图")
             try {
                 // A cancelled task never reaches persistence; the backend owns resources until inference ends.
+                val ocrAt=android.os.SystemClock.elapsedRealtime()
                 val ocr = LocalOcr(context).use { it.recognize(bitmap) }
+                val ocrMillis=android.os.SystemClock.elapsedRealtime()-ocrAt
                 checkAllowed()
                 val lines = ocr.lines.map { line ->
                     val box = line.box
                     LocalOcrLine(line.text, box?.left ?: 0, box?.top ?: 0, box?.right ?: 0, box?.bottom ?: 0)
                 }
+                val parseAt=android.os.SystemClock.elapsedRealtime()
                 val bill = LocalOcrBillParser.parse(lines, ocr.width, ocr.height, time.recognitionAt, livePaymentAt, policy, origin, time)
+                val timings=mapOf("ocr" to ocrMillis,"parse" to android.os.SystemClock.elapsedRealtime()-parseAt)
                 // Completed refunds, including a zero net amount, continue to storage association.
                 // Only closed, pending or failed transactions stop this pipeline.
                 net.ankio.ledger.core.TransactionRejection.reason(ocr.rawText)?.let { reason ->
-                    return@run RecognitionResult(ocr.rawText.take(16_384),null,screenshot=submitted,skipReason=reason)
+                    return@run RecognitionResult(ocr.rawText.take(16_384),null,screenshot=submitted,skipReason=reason,phaseTimingsMs=timings)
                 }
-                if (bill == null) return@run RecognitionResult(ocr.rawText.take(16_384), null, screenshot = submitted)
+                if (bill == null) return@run RecognitionResult(ocr.rawText.take(16_384), null, screenshot = submitted,phaseTimingsMs=timings)
                 checkAllowed()
                 val icon = LocalIconLocator.locate(bitmap, ocr, bill.merchant)
                 // A plausible image near unrelated text must not become this merchant's shared icon.
@@ -73,7 +77,7 @@ class LocalRecognitionClient(context: android.content.Context) {
                 checkAllowed()
                 RecognitionResult(ocr.rawText.take(16_384), bill, submitted, region, crop?.bytes,
                     if (crop?.bytes != null) "saved" else if (crop != null) "crop_rejected" else "not_located",
-                    "method=local_geometry_and_ocr_v1; reason=${if (icon.selected != null && selected == null) "merchant_anchor_mismatch" else icon.reason}; ${crop?.details.orEmpty()}")
+                    "method=local_geometry_and_ocr_v1; reason=${if (icon.selected != null && selected == null) "merchant_anchor_mismatch" else icon.reason}; ${crop?.details.orEmpty()}",phaseTimingsMs=timings)
             } finally {
                 bitmap.recycle()
             }

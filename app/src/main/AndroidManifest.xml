@@ -9,7 +9,7 @@
         <package android:name="com.eg.android.AlipayGphone" />
         <package android:name="com.taobao.taobao" />
     </queries>
-    <application android:name=".LedgerApp" android:label="花有谱" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
+    <application android:name=".LedgerApp" android:label="${ledgerApplicationLabel}" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme" android:allowBackup="false" android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true">
         <activity android:name=".ui.MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
@@ -41,7 +41,7 @@
             </intent-filter>
         </receiver>
         <service android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService" android:exported="true"
-            android:label="花有谱 · 页面识别" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            android:label="${ledgerCaptureServiceLabel}" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
             <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service" />
         </service>
