@@ -1633,6 +1633,39 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
 
     @Synchronized fun classificationMigrationBaseline():ClassificationSnapshot = ClassificationStorage.migrationBaseline(readableDatabase)
     @Synchronized fun classificationRules():ClassificationSnapshot = ClassificationStorage.configuration(readableDatabase)
+    @Synchronized fun previewClassification(input:ClassificationInput,draftRule:ClassificationRule?=null):ClassificationTestResult {
+        if(input.direction !in listOf(Direction.EXPENSE,Direction.INCOME))
+            throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
+        val prepared=draftRule?.let { ClassificationStorage.prepared(readableDatabase,it) }
+        val preview=ClassificationEngine.preview(prepared?.first ?: classificationRules(),input)
+        return ClassificationTestResult(preview,CategoryDirectory.requireCategory(readableDatabase,requireNotNull(preview.decision.categoryId),input.direction),prepared?.second?.id)
+    }
+    private fun classificationTestRecord(recordId:Long):LedgerRecord {
+        val record=get(recordId) ?: throw ClassificationException("RULE_INPUT","账单已不存在，请重新选择")
+        if(record.bill.direction !in listOf(Direction.EXPENSE,Direction.INCOME))
+            throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
+        return record
+    }
+    @Synchronized fun previewClassification(recordId:Long,draftRule:ClassificationRule?=null):ClassificationTestResult {
+        val record=classificationTestRecord(recordId)
+        return previewClassification(ClassificationInput.from(record.bill,record.capture),draftRule)
+    }
+    @Synchronized fun classificationRuleDraftFromBill(recordId:Long):ClassificationRuleDraft {
+        val record=classificationTestRecord(recordId)
+        val input=ClassificationInput.from(record.bill,record.capture)
+        val category=categoryFor(record) ?: throw ClassificationException("RULE_TARGET","账单分类已失效，请先选择有效分类")
+        val conditions=buildList {
+            input.merchant?.takeIf(ClassificationCodec::validKeyword)?.let { add(ClassificationCondition(ClassificationField.MERCHANT,ClassificationOperator.EQUALS,it)) }
+            input.orderContent.firstOrNull(ClassificationCodec::validKeyword)?.let { add(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.EQUALS,it)) }
+        }
+        val source=when(input.captureSource) {
+            Source.OCR -> "LIVE"+(input.sourcePackage?.let { ":$it" } ?: "")
+            Source.IMAGE -> "IMAGE"+(input.platform?.let { ":$it" } ?: "")
+            else -> null
+        }
+        val name=(input.merchant.orEmpty().filterNot(Char::isISOControl).trim().take(76).ifBlank { "来自账单" })+"规则"
+        return ClassificationRuleDraft(recordId,input,ClassificationRule("",name,true,input.direction,category.id,0,conditions,source=source))
+    }
     @Synchronized fun saveClassificationRule(rule:ClassificationRule):ClassificationRule = classificationTransaction { ClassificationStorage.save(it,rule) }
     @Synchronized fun deleteClassificationRule(id:String) = classificationTransaction { ClassificationStorage.delete(it,id) }
     @Synchronized fun reorderClassificationRules(direction:Direction,ids:List<String>) = classificationTransaction { ClassificationStorage.reorder(it,direction,ids) }

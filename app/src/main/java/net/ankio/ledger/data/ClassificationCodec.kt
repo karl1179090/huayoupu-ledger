@@ -69,11 +69,14 @@ object ClassificationCodec {
             conflictReason=if(input.isNull("conflictReason"))null else text("conflictReason",200)).also(::validateRule)
     }
 
+    internal fun validKeyword(value:String):Boolean = value.length<=200 && ClassificationEngine.normalized(value).isNotBlank() &&
+        value.none { it.isISOControl() && !it.isWhitespace() }
+
     fun validateRule(rule: ClassificationRule, requireId: Boolean = false) {
         if(rule.name.isBlank() || rule.name.length>80 || rule.name.any(Char::isISOControl) ||
             rule.id.length>160 || requireId && rule.id.isBlank() || rule.order !in 0..1_000_000 ||
             rule.categoryId.isBlank() || rule.categoryId.length>160 || rule.direction !in listOf(Direction.EXPENSE,Direction.INCOME) ||
-            (rule.conflictReason?.length ?: 0)>200 || !ClassificationSources.valid(rule.source) || rule.conditions.size !in 1..20 || rule.conditions.any { it.value.length>200 || ClassificationEngine.normalized(it.value).isBlank() || it.value.any { char -> char.isISOControl() && !char.isWhitespace() } })
+            (rule.conflictReason?.length ?: 0)>200 || !ClassificationSources.valid(rule.source) || rule.conditions.size !in 1..20 || rule.conditions.any { !validKeyword(it.value) })
             throw ClassificationException("RULE_INVALID", "请填写规则名称、有效关键词、收支方向及目标分类")
     }
 

@@ -15,6 +15,9 @@ class CompoundClassificationMatrixTest(private val field:ClassificationField,pri
             else ClassificationInput(Direction.EXPENSE,null,values)
         val result=ClassificationEngine.classify(ClassificationSnapshot("matrix",listOf(rule),emptyList()),input)
         assertEquals(expectedId,result.ruleId)
+        val preview=ClassificationEngine.preview(ClassificationSnapshot("matrix",listOf(rule),emptyList()),input)
+        assertEquals(expectedId,preview.decision.ruleId)
+        assertEquals(expectedId!=null,preview.rules.single().conditions.single().matched)
         assertEquals(if(field==ClassificationField.MERCHANT)values.singleOrNull() else null,input.merchant)
         assertEquals(if(field==ClassificationField.ORDER_CONTENT)values else emptyList<String>(),input.orderContent)
     }
