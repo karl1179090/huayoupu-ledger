@@ -276,6 +276,31 @@ html,body{height:100%;overscroll-behavior:none}body.native-app{background:var(--
 @media(max-width:340px){.receipt-field{grid-template-columns:60px minmax(0,1fr);column-gap:8px}}
 .no-flex-gap .receipt-heading>*+*,.no-flex-gap .receipt-evidence-toggle>*+*,.no-flex-gap .receipt-evidence-meta>*+*{margin-left:8px}
 
+.receipt-provenance-card{margin-bottom:8px;padding:8px 10px;border-radius:10px;background:#f3f7f9;border:1px solid #e5edf0;min-width:0}
+.receipt-provenance-header{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:4px}
+.receipt-route-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.4}
+.receipt-route-badge.route-node{background:#e8f3ef;color:#2e785f}
+.receipt-route-badge.route-ocr{background:#eef2f7;color:#3b658d}
+.receipt-provenance-badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:6px;background:#fff;border:1px solid #dbe6ec;font-size:10px;font-weight:500;color:#526170;white-space:nowrap}
+.receipt-provenance-note{margin:0;font-size:11px;line-height:1.45;color:#6c7d8c;overflow-wrap:anywhere;word-break:break-word}
+.receipt-evidence-diagnostics{margin-top:6px;padding:8px 10px;border-radius:10px;background:#f8fafb;border:1px solid #edf2f5;min-width:0}
+.receipt-diag-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:11px;font-weight:600;color:#495765}
+.receipt-diag-header small{font-size:10px;color:#8a94a0;font-weight:500}
+.receipt-diag-list{margin:0;padding:0;display:grid;row-gap:4px;min-width:0}
+.receipt-diag-row{display:grid;grid-template-columns:68px minmax(0,1fr);align-items:baseline;column-gap:8px;font-size:11px;line-height:1.4;min-width:0}
+.receipt-diag-row dt{margin:0;color:#7b8794;font-size:11px;font-weight:500;white-space:nowrap}
+.receipt-diag-row dd{margin:0;min-width:0;color:#182230;font-weight:500;text-align:right;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.receipt-timings-section{margin-top:8px;padding-top:6px;border-top:1px dashed #e6edf2;min-width:0}
+.receipt-timings-title{font-size:11px;font-weight:600;color:#495765;margin-bottom:5px}
+.receipt-timings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:5px;min-width:0}
+.receipt-timing-pill{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 7px;border-radius:6px;background:#fff;border:1px solid #e5edf0;font-size:10px;line-height:1.4}
+.receipt-timing-name{color:#6c7d8c;font-weight:500}
+.receipt-timing-ms{color:#2e785f;font-weight:600;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.receipt-timings-disclaimer{margin:6px 0 0;font-size:10px;line-height:1.4;color:#8a94a0}
+.large-text .receipt-diag-row{grid-template-columns:1fr;row-gap:2px}
+.large-text .receipt-diag-row dd{text-align:left}
+@media(max-width:340px){.receipt-diag-row{grid-template-columns:60px minmax(0,1fr);column-gap:6px}.receipt-timings-grid{grid-template-columns:1fr}}
+
 /* Unified category directory management and icon picker. */
 .category-manager-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px}
 .category-manager-header .segmented{flex:1;margin:0}
