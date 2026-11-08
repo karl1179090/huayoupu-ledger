@@ -284,6 +284,28 @@ class BankReceiptAcceptanceTest {
         assertEquals(before,balances())
     }
 
+    @Test fun contradictoryBankDirectionStaysPendingUntilHumanConfirmsIt() = runBlocking {
+        app.taskRecovery.await()
+        val card=account("bank","0007");account("wechat");val cash=account("cash");app.store.setDefaultWallet(cash.uid)
+        val before=balances();val id="SYNTHETIC-DIRECTION-CONFLICT-${UUID.randomUUID()}"
+        val original=(recognize("交易类型：网上快捷支付","交易卡号：尾号0007",id=id) as IngestResult.Saved).record
+        assertEquals(mapOf(card.uid to -1200L),original.walletEffects)
+        recognize("交易类型：工资入账","交易卡号：尾号0007",id=id)
+        val pending=app.store.get(original.id)!!
+        assertEquals(RecordState.REVIEW,pending.state)
+        assertNull(pending.bill.direction)
+        assertEquals("BANK_DIRECTION_REQUIRED",pending.wallet!!.reviewCode)
+        assertTrue(pending.walletEffects.isEmpty())
+        assertEquals(before,balances())
+        recognize("交易类型：工资入账","交易卡号：尾号0007",id=id)
+        val repeated=app.store.get(original.id)!!
+        assertEquals(RecordState.REVIEW,repeated.state)
+        assertEquals(before,balances())
+        val confirmed=app.store.saveEdited(repeated.copy(bill=repeated.bill.copy(direction=Direction.INCOME)),card.uid,true)
+        assertEquals(mapOf(card.uid to 1200L),confirmed.walletEffects)
+        assertEquals(before+(card.uid to 11200L),balances())
+    }
+
     @Test fun explicitTailMismatchKeepsEveryBalanceUntouchedUntilOneManualConfirmation() = runBlocking {
         app.taskRecovery.await()
         val card = account("bank", "1234"); account("wechat"); val cash = account("cash")

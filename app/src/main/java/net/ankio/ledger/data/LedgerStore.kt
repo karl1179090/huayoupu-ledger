@@ -610,6 +610,16 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     evidence.feeCents!=null && details.feeCents!=null && evidence.feeCents!=details.feeCents ||
                         evidence.feeMode!=null && details.feeMode!=null && evidence.feeCents!=0L && evidence.feeMode!=details.feeMode
                 } } == true
+                if(directionConflict && bill.direction!=null && bill.receipt?.bank!=null && identified.wallet?.manualLocked!=true) {
+                    val presentation=enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                    val pending=presentation.copy(bill=presentation.bill.copy(direction=null),state=RecordState.REVIEW,
+                        reason="银行交易方向证据冲突，请确认收支方向后入账")
+                    check(db.update("records",values(pending),"id=?",arrayOf(pending.id.toString()))==1)
+                    appendPaymentScreenshot(db,pending,capture,screenshot,"identity_conflict")
+                    val reviewed=syncWallet(db,pending,incomingEvidence=bill.paymentMethod)
+                    db.setTransactionSuccessful()
+                    return IngestResult.Saved(reviewed,supplemented=true)
+                }
                 if(amountConflict || directionConflict || feeConflict) {
                     val linked=identified.wallet?.copy(reviewCode="TRANSFER_IDENTITY_CONFLICT",revision=identified.wallet.revision+1)
                     if(linked!=null)WalletAccounting.saveLink(db,linked)
