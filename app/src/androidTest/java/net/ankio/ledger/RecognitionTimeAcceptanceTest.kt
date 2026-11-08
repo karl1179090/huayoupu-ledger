@@ -219,4 +219,48 @@ class RecognitionTimeAcceptanceTest {
         } } finally { app.deleteDatabase(name) }
     }
 
+    @Test fun delayedRecognitionFallbackStillLetsExplicitDetailCompleteOneNativePaymentWithoutSecondDebit() = runBlocking {
+        app.taskRecovery.await()
+        val oldDefault=app.store.walletSettings().defaultAccountUid
+        val wallet=app.store.saveAccount(LedgerAccount(name="合成排队延迟钱包",amountCents=10000,kind="cash"))
+        app.store.setDefaultWallet(wallet.uid)
+        val task=app.tasks.create(Source.OCR,"payment_auto:com.tencent.mm")
+        val eventAt=System.currentTimeMillis()
+        app.tasks.diagnose(task,"capture_context","payment_success_result:$eventAt")
+        val first=RecognitionTimeContext(eventAt+300000,"Asia/Shanghai")
+        val merchant="合成排队延迟${UUID.randomUUID().toString().replace(Regex("[0-9-]"),"字")}"
+        val raw="支付成功\n付款金额：12.00元\n商户名称：$merchant"
+        val backend=RecognitionBackend { image,prepared,_,liveAt,policy,origin ->
+            prepared(image)
+            RecognitionResult(raw,LocalOcrBillParser.parse(raw.lines().map(::LocalOcrLine),0,0,first.recognitionAt,liveAt,
+                policy,origin,first),screenshot=image)
+        }
+        try {
+            val initial=(CaptureProcessor(app,OcrClient(app,backend),recognitionClock={first})
+                .processPrepared("synthetic-delay".toByteArray(),Source.OCR,PaymentApps.WECHAT,task) { true } as IngestResult.Saved).record
+            assertEquals(merchant,initial.bill.merchant)
+            assertEquals(first.recognitionAt,initial.bill.occurredAt)
+            assertEquals(eventAt,initial.capture.receivedAt)
+            assertEquals("RECOGNITION_FALLBACK",initial.bill.receipt!!.time!!.source)
+            assertEquals(8800L,app.store.getAccount(wallet.id)!!.amountCents)
+            val printed=java.time.Instant.ofEpochMilli(eventAt).atZone(first.zone)
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+            val detail="$raw\n付款时间：$printed\n交易单号：SYNTHETIC-DELAY-$task"
+            val explicit=LocalOcrBillParser.parse(detail.lines().map(::LocalOcrLine),0,0,first.recognitionAt,
+                origin=PaymentApps.WECHAT,timeContext=first)!!
+            val completed=app.coordinator.acceptRecognition(Capture(Source.IMAGE,PaymentApps.WECHAT,detail,eventAt+1000),explicit) { true }
+            assertTrue(completed is IngestResult.Saved || completed==IngestResult.DuplicateSkipped)
+            val records=app.store.all().filter { it.bill.merchant==merchant }
+            assertEquals(1,records.size)
+            assertEquals(initial.uid,records.single().uid)
+            assertEquals("SYNTHETIC-DELAY-$task",records.single().bill.transactionId)
+            assertEquals(8800L,app.store.getAccount(wallet.id)!!.amountCents)
+            assertEquals(1,app.store.walletMovements(wallet.uid).count { it.recordUid==initial.uid })
+        } finally {
+            app.store.all().filter { it.bill.merchant==merchant || it.wallet?.accountUid==wallet.uid }.forEach { app.store.delete(it.id) }
+            app.tasks.delete(task);app.store.setDefaultWallet(oldDefault)
+            app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(wallet.uid));app.store.deleteAccount(wallet.id)
+        }
+    }
+
 }

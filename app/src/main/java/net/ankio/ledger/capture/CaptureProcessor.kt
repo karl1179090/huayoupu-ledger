@@ -73,7 +73,9 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 if(recognized.iconDetails.isNotBlank())app.tasks.diagnose(it,"icon_details",recognized.iconDetails)
                 app.tasks.diagnose(it,"stage","save_result")
             }
-            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText, recognitionTime().recognitionAt), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), classificationSnapshot=classification, allowed=guard).outcome
+            // The acquisition clock may corroborate the same live payment later; it never supplies missing accounting time.
+            val capturedAt=taskId?.let(app.tasks::livePaymentAt) ?: recognitionTime().recognitionAt
+            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText, capturedAt), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), classificationSnapshot=classification, allowed=guard).outcome
             if(result==IngestResult.Ignored&&!guard())throw CancellationException("识别已停止")
             taskId?.let { id ->
                 // Explain REVIEW without exporting the model response or financial fields.
@@ -96,7 +98,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                         app.tasks.update(id,if(review)"REVIEW" else "SUCCEEDED",message,result.record.id)
                     }
                     IngestResult.DuplicateSkipped -> {
-                        val capture=Capture(source,origin,recognized.rawText,recognitionTime().recognitionAt)
+                        val capture=Capture(source,origin,recognized.rawText,capturedAt)
                         // The primary legacy field may still be a Taobao order ID;
                         // resolve an Alipay/WeChat alias through the scoped index first.
                         val original=operationKey?.let(app.store::committedCapture)?.record

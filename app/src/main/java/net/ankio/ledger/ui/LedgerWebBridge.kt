@@ -302,7 +302,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
         }
         val enteredMerchant = string(input, "merchant", 1024).trim()
         val categoryName = string(input, "category", 1024).trim().ifBlank { "其他" }
-        val occurredAt = integer(input, "occurredAt", 1, MAX_TIME)
+        val requestedOccurredAt = integer(input, "occurredAt", 1, MAX_TIME)
+        val timeEdited=if(input.has("timeEdited"))input.get("timeEdited") as? Boolean
+            ?: throw InvalidInput("时间修改参数无效") else null
         val note = string(input, "note", 500).trim()
         val confirmed = if (input.has("confirmDuplicate")) {
             input.get("confirmDuplicate") as? Boolean ?: throw InvalidInput("重复确认参数无效")
@@ -316,6 +318,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
             }
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
+            // A minute-only editor must not truncate the saved seconds/millis when the user did not edit time.
+            val occurredAt=if(original!=null && timeEdited==false)original.bill.occurredAt else requestedOccurredAt
             val merchant = enteredMerchant.ifBlank { if(original?.bill?.receipt!=null) "" else "未填写商户" }
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")

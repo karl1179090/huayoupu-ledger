@@ -61,9 +61,11 @@ data class ReceiptTimeEvidence(
 /** Only transaction-local labels establish a date; viewer, status bar and notification clocks do not. */
 object TransactionTimeResolver {
     private val label = Regex("^(?:原(?:支付|付款|交易|转账)(?:时间|日期)|(?:支付|付款|交易|转账|充值|提现|到账|完成)(?:时间|日期))[：:]?")
-    private val fullDate = Regex("(?<![0-9])([0-9]{4})[年/.-]([0-9]{1,2})[月/.-]([0-9]{1,2})日?(?![0-9])")
-    private val monthDay = Regex("(?<![0-9])([0-9]{1,2})[月/.-]([0-9]{1,2})日?(?![0-9])")
+    // A lost space is repairable for printed DDHH or an explicit 日 boundary. Short digit runs are ambiguous.
+    private val fullDate = Regex("(?<![0-9])([0-9]{4})[年/.-]([0-9]{1,2})[月/.-]([0-9]{1,2})日?(?:(?![0-9:：])|(?<=日)(?=[0-9]{1,2}[:：])|(?<=[0-9]{2})(?=[0-9]{2}[:：]))")
+    private val monthDay = Regex("(?<![0-9])([0-9]{1,2})[月/.-]([0-9]{1,2})日?(?:(?![0-9:：])|(?<=日)(?=[0-9]{1,2}[:：])|(?<=[0-9]{2})(?=[0-9]{2}[:：]))")
     private val clock = Regex("(?<![0-9])([0-9]{1,2})[:：]([0-9]{2})(?:[:：]([0-9]{2}))?(?![0-9])")
+    private fun clockText(value:String) = value.replace(fullDate, "").replace(monthDay, "")
     private fun normalized(value: String) = Normalizer.normalize(value, Normalizer.Form.NFKC)
         .replace(Regex("(?<=[0-9])\\s+(?=[0-9][月/.-])"), "")
 
@@ -86,7 +88,7 @@ object TransactionTimeResolver {
                     .sortedBy { it.left }
                 val established=normalized((listOf(inline)+row.map { it.text }).joinToString(" "))
                 val hasDate=fullDate.containsMatchIn(established) || monthDay.containsMatchIn(established)
-                val hasClock=clock.containsMatchIn(established)
+                val hasClock=clock.containsMatchIn(clockText(established))
                 val end=(row.lastOrNull() ?: line).bottom
                 val below=if(hasDate && hasClock)emptyList() else scoped.filter { candidate ->
                     candidate.top>=end && candidate.top-end<=h*2 && timeValue(candidate.text) &&
@@ -103,7 +105,7 @@ object TransactionTimeResolver {
         }
         val dateValues=values.filter { fullDate.containsMatchIn(normalized(it.first)) || monthDay.containsMatchIn(normalized(it.first)) }
         val clockValues=values.filter { clock.matches(normalized(it.first).trim()) }.distinctBy { normalized(it.first).trim() }
-        val candidates=if(dateValues.size==1 && !clock.containsMatchIn(normalized(dateValues.single().first)) && clockValues.size==1) {
+        val candidates=if(dateValues.size==1 && !clock.containsMatchIn(clockText(normalized(dateValues.single().first))) && clockValues.size==1) {
             val date=dateValues.single();val time=clockValues.single()
             listOf("${date.first} ${time.first}" to "${date.second}\n${time.second}")
         } else values
@@ -125,7 +127,7 @@ object TransactionTimeResolver {
                             if(md.isValidYear(year))md.atYear(year).takeIf { it <= context.referenceDate } else null
                         }
                     }
-                val time = clock.find(normalized)
+                val time = clock.find(clockText(normalized))
                 val instant = if (time == null) day.atStartOfDay(context.zone).toInstant() else {
                     val g = time.groupValues
                     LocalDateTime.of(day, LocalTime.of(g[1].toInt(), g[2].toInt(), g[3].toIntOrNull() ?: 0))
