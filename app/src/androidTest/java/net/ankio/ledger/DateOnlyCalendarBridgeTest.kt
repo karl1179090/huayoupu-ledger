@@ -454,4 +454,39 @@ class DateOnlyCalendarBridgeTest {
         } finally { TimeZone.setDefault(previous);app.deleteDatabase(name) }
     }
 
+    @Test fun refundCandidatesExposeTimeBasisWithoutReparsingLegacyReceiptsOrMutatingFunds()=runBlocking {
+        app.taskRecovery.await();val previous=TimeZone.getDefault();val created=mutableListOf<Long>()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"))
+            val suffix=UUID.randomUUID().toString()
+            val (capture,bill)=parsed("SYNTHETIC-REFUND-DATE-$suffix","100.00","2026-11-05")
+            val date=LedgerRecord(capture=capture,bill=bill,state=RecordState.POSTED)
+            val (legacyCapture,legacyBill)=parsed("SYNTHETIC-REFUND-LEGACY-$suffix","100.00","2026-11-05 00:00:00")
+            val legacy=LedgerRecord(capture=legacyCapture,bill=legacyBill.copy(receipt=null),state=RecordState.POSTED)
+            val pending=LedgerRecord(capture=Capture(Source.IMAGE,"image","微信支付\n合成成功退款凭证",context.recognitionAt),
+                bill=ParsedBill(null,Direction.EXPENSE,"合成待选择退款","其他",context.recognitionAt,null,false,"请选择原账单",
+                    standaloneRefund=StandaloneRefundEvidence("wechat",1000,"SYNTHETIC-REFUND-$suffix")),state=RecordState.REVIEW)
+            assertEquals(3,app.store.merge(listOf(date,legacy,pending)))
+            val saved=app.store.all().filter { it.uid in setOf(date.uid,legacy.uid,pending.uid) };created+=saved.map { it.id }
+            val byUid=saved.associateBy { it.uid };val original=byUid.getValue(date.uid);val old=byUid.getValue(legacy.uid);val review=byUid.getValue(pending.uid)
+            val expected=app.store.refundCandidates(review.id).map { it.id }
+            assertTrue(original.id in expected && old.id in expected)
+            val wallet=app.store.walletSnapshot()
+            ActivityScenario.launch(MainActivity::class.java).use { scenario -> scenario.onActivity { activity ->
+                val result=JSONObject(LedgerWebBridge(activity).refundCandidates(review.id));assertTrue(result.toString(),result.getBoolean("ok"))
+                val array=result.getJSONArray("candidates");val candidates=(0 until array.length()).map { array.getJSONObject(it) }
+                assertEquals(expected,candidates.map { it.getLong("id") })
+                val shown=candidates.single { it.getLong("id")==original.id }
+                val receipt=shown.getJSONObject("receipt");assertEquals(setOf("time"),receipt.keys().asSequence().toSet())
+                val time=receipt.getJSONObject("time")
+                assertEquals("DATE",time.getString("precision"));assertEquals("2026-11-05",time.getString("localDate"))
+                assertEquals(original.bill.occurredAt,time.getLong("accountingAt"));assertEquals("EXPLICIT",time.getString("source"))
+                assertEquals("Asia/Shanghai",time.getString("zoneId"));assertEquals(original.bill.occurredAt,shown.getLong("occurredAt"))
+                assertFalse(candidates.single { it.getLong("id")==old.id }.has("receipt"))
+            } }
+            assertEquals(wallet,app.store.walletSnapshot())
+            assertEquals(original,app.store.get(original.id));assertEquals(old,app.store.get(old.id));assertEquals(review,app.store.get(review.id))
+        } finally { created.forEach { app.store.delete(it) };TimeZone.setDefault(previous) }
+    }
+
 }

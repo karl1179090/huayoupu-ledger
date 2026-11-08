@@ -13,6 +13,7 @@ import net.ankio.ledger.core.Money
 import net.ankio.ledger.core.AccountMoney
 import net.ankio.ledger.core.BankCodes
 import net.ankio.ledger.core.ParsedBill
+import net.ankio.ledger.core.ReceiptEvidence
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.core.Source
 import net.ankio.ledger.core.PaymentApps
@@ -408,9 +409,14 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(id in 1..MAX_SAFE_INTEGER, "账单编号无效")
         val candidates = JSONArray()
         app.store.refundCandidates(id).forEach { record ->
-            candidates.put(JSONObject().put("id", record.id).put("merchant", record.bill.merchant)
+            val candidate=JSONObject().put("id", record.id).put("merchant", record.bill.merchant)
                 .put("occurredAt", record.bill.occurredAt).put("amountCents", record.bill.amountCents ?: JSONObject.NULL)
-                .put("originalAmountCents", record.bill.refund?.originalAmountCents ?: record.bill.amountCents ?: JSONObject.NULL))
+                .put("originalAmountCents", record.bill.refund?.originalAmountCents ?: record.bill.amountCents ?: JSONObject.NULL)
+            record.bill.receipt?.time?.let { time ->
+                val evidence=ReceiptEvidenceCodec.json(ReceiptEvidence(time=time)) as JSONObject
+                candidate.put("receipt",JSONObject().put("time",evidence.getJSONObject("time")))
+            }
+            candidates.put(candidate)
         }
         JSONObject().put("ok", true).put("candidates", candidates).toString()
     } catch (error: Exception) {
