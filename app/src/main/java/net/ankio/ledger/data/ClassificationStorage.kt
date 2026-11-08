@@ -27,9 +27,9 @@ internal object ClassificationStorage {
         ClassificationCodec.readSnapshot(payload.toString())
         db.update("classification_configuration",ContentValues().apply { put("payload",payload.toString()) },"singleton=1",null)
     }
-    private fun write(db:SQLiteDatabase,snapshot:ClassificationSnapshot) {
-        writePayload(db,ClassificationCodec.snapshot(snapshot).put("categoryReplacements",CategoryReplacementStorage.encode(CategoryReplacementStorage.entries(db))))
-    }
+    private fun payload(db:SQLiteDatabase,snapshot:ClassificationSnapshot)=ClassificationCodec.snapshot(snapshot)
+        .put("categoryReplacements",CategoryReplacementStorage.encode(CategoryReplacementStorage.entries(db)))
+    private fun write(db:SQLiteDatabase,snapshot:ClassificationSnapshot) { writePayload(db,payload(db,snapshot)) }
     private fun changed(db:SQLiteDatabase,snapshot:ClassificationSnapshot) = write(db,snapshot.copy(version=UUID.randomUUID().toString()))
     private fun target(db:SQLiteDatabase,rule:ClassificationRule) {
         try { CategoryDirectory.requireCategory(db,rule.categoryId,rule.direction) }
@@ -46,7 +46,7 @@ internal object ClassificationStorage {
         val rules=current.customRules.filterNot { it.id==rule.id }+rule
         if(rules.size>2_000)throw ClassificationException("RULE_INVALID","分类规则数量过多")
         val snapshot=current.copy(customRules=rules)
-        ClassificationCodec.snapshot(snapshot)
+        ClassificationCodec.readSnapshot(payload(db,snapshot).toString())
         return snapshot to rule
     }
     fun save(db:SQLiteDatabase,input:ClassificationRule):ClassificationRule {

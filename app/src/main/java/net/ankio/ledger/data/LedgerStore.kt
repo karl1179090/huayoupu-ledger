@@ -1638,7 +1638,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
         val prepared=draftRule?.let { ClassificationStorage.prepared(readableDatabase,it) }
         val preview=ClassificationEngine.preview(prepared?.first ?: classificationRules(),input)
-        return ClassificationTestResult(preview,CategoryDirectory.requireCategory(readableDatabase,requireNotNull(preview.decision.categoryId),input.direction),prepared?.second?.id)
+        val category=CategoryDirectory.requireCategory(readableDatabase,
+            CategoryReplacementStorage.resolve(readableDatabase,requireNotNull(preview.decision.categoryId)),input.direction)
+        return ClassificationTestResult(preview.copy(decision=preview.decision.copy(categoryId=category.id)),category,prepared?.second?.id)
     }
     private fun classificationTestRecord(recordId:Long):LedgerRecord {
         val record=get(recordId) ?: throw ClassificationException("RULE_INPUT","账单已不存在，请重新选择")

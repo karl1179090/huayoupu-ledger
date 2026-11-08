@@ -20,7 +20,7 @@ import java.util.UUID
 class ClassificationPreviewBridgeTest {
     private val app=ApplicationProvider.getApplicationContext<LedgerApp>()
 
-    @Test fun bridgeTestsManualAndBillInputsAndRejectsInvalidRequestsWithoutMutatingAnyState()=runBlocking {
+    @Test fun bridgeTestsManualAndBillInputsAndRejectsInvalidRequestsWithoutMutatingAnyState()=runBlocking<Unit> {
         app.taskRecovery.await()
         val merchant="合成预览桥接${UUID.randomUUID()}"
         val rule=app.store.saveClassificationRule(ClassificationRule("",merchant,true,Direction.EXPENSE,"cat:expense:dining",0,
