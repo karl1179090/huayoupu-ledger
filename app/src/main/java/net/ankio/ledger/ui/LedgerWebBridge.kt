@@ -591,6 +591,18 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val rule=ClassificationCodec.readRule(JSONObject(json))
         synchronized(app.store) { app.store.saveClassificationRule(rule);app.changed();classificationResponse().toString() }
     } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun setBuiltinClassificationRuleEnabled(json:String):String=try {
+        checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
+        val input=JSONObject(json)
+        val id=(input.get("id") as? String)?.takeIf { it.length in 1..160 }
+            ?: throw ClassificationException("RULE_INVALID","内置规则标识无效")
+        val enabled=input.get("enabled") as? Boolean ?: throw ClassificationException("RULE_INVALID","规则启停状态无效")
+        synchronized(app.store) { app.store.setBuiltinClassificationRuleEnabled(id,enabled);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun copyBuiltinClassificationRule(id:String):String=try {
+        val draft=app.store.copyBuiltinClassificationRule(id)
+        JSONObject().put("ok",true).put("rule",ClassificationCodec.rule(draft).put("id",JSONObject.NULL)).toString()
+    } catch(error:Exception) { ruleFailure(error) }
     @JavascriptInterface fun deleteClassificationRule(id:String):String=try {
         synchronized(app.store) { app.store.deleteClassificationRule(id);app.changed();classificationResponse().toString() }
     } catch(error:Exception) { ruleFailure(error) }

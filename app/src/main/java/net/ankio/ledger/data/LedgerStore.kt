@@ -1636,6 +1636,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun saveClassificationRule(rule:ClassificationRule):ClassificationRule = classificationTransaction { ClassificationStorage.save(it,rule) }
     @Synchronized fun deleteClassificationRule(id:String) = classificationTransaction { ClassificationStorage.delete(it,id) }
     @Synchronized fun reorderClassificationRules(direction:Direction,ids:List<String>) = classificationTransaction { ClassificationStorage.reorder(it,direction,ids) }
+    @Synchronized fun setBuiltinClassificationRuleEnabled(id:String,enabled:Boolean) = classificationTransaction { ClassificationStorage.setBuiltinEnabled(it,id,enabled) }
+    @Synchronized fun copyBuiltinClassificationRule(id:String):ClassificationRule = ClassificationStorage.copyBuiltin(readableDatabase,id)
     @Synchronized fun holdClassificationSnapshot(key:String,snapshot:ClassificationSnapshot?=null,taskDatabase:String?=null):ClassificationSnapshot = classificationTransaction {
         ClassificationStorage.hold(it,key,snapshot ?: ClassificationStorage.configuration(it),taskDatabase)
     }
@@ -1647,9 +1649,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val db=writableDatabase;db.beginTransaction()
         return try { action(db).also { db.setTransactionSuccessful() } } finally { db.endTransaction() }
     }
-    @Synchronized fun classify(bill:ParsedBill,snapshot:ClassificationSnapshot):ParsedBill {
+    @Synchronized fun classify(bill:ParsedBill,snapshot:ClassificationSnapshot,capture:Capture?=null):ParsedBill {
         val direction=bill.direction?.takeIf { it in listOf(Direction.EXPENSE,Direction.INCOME) } ?: return bill
-        val decision=ClassificationEngine.classify(snapshot,ClassificationInput(direction,bill.merchant),bill.categoryDecision)
+        val decision=ClassificationEngine.classify(snapshot,ClassificationInput.from(bill,capture),bill.categoryDecision)
         val category=CategoryDirectory.requireCategory(readableDatabase,CategoryReplacementStorage.resolve(readableDatabase,requireNotNull(decision.categoryId)),direction)
         return bill.copy(category=category.name,categoryDecision=decision.copy(categoryId=category.id))
     }
