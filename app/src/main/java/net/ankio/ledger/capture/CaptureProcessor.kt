@@ -31,13 +31,13 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
         val route=snapshot?.let { nodeRegistry.select(it,taskId?.let(app.tasks::automatic)==true,time) }
         taskId?.let { id ->
             app.tasks.recordRoute(id,route,snapshot,if(imported)"image_import" else null)
-            app.tasks.phaseTiming(id,"route",android.os.SystemClock.elapsedRealtime()-routeAt)
+            app.tasks.phaseTiming(id,"route",(android.os.SystemClock.elapsedRealtime()-routeAt-(route?.parseMillis ?: 0)).coerceAtLeast(0))
             route?.parseMillis?.let { app.tasks.phaseTiming(id,"parse",it) }
         }
         route?.candidate?.let { candidate ->
             if(!guard())throw CancellationException("识别已停止")
             taskId?.let { app.tasks.prepared(it,image) }
-            return net.ankio.ledger.ocr.RecognitionResult(snapshot!!.texts.joinToString("\n"),candidate.bill,image,
+            return net.ankio.ledger.ocr.RecognitionResult(requireNotNull(route.rawText),candidate.bill,image,
                 iconStatus="cached_or_default",iconDetails="method=verified_node; no_new_crop")
         }
         val prepared:(ByteArray)->Unit={ bytes -> taskId?.let { app.tasks.prepared(it,bytes);app.changed() } }

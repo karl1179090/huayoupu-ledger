@@ -421,11 +421,17 @@ open class ScreenCaptureService:AccessibilityService() {
                 ledger.tasks.diagnose(task,"stage","screenshot")
                 ledger.tasks.diagnose(task,"window","$pkg; id=${target.id}; automatic=$automatic")
                 val screenshotAt=SystemClock.elapsedRealtime()
-                bitmap=withTimeoutOrNull(4_000) { screenshotProvider(if(Build.VERSION.SDK_INT>=34)target.id else null) {
+                bitmap=try { withTimeoutOrNull(4_000) { screenshotProvider(if(Build.VERSION.SDK_INT>=34)target.id else null) {
                     allowed() && trigger.freshAt(SystemClock.elapsedRealtime()) && captureContentGeneration(target.id)==snapshot.generation &&
                         (automatic || screenUnlocked() && foregroundSwitch.get()==observed?.switchGeneration)
                 } }
                     ?:throw ScreenshotAcquisitionException(ScreenshotFailureReason.TIMEOUT,"系统截图响应超时，请检查无障碍状态后重试")
+                } catch(error:ScreenshotAcquisitionException) {
+                    // Keep the existing protected-page privacy refusal: no financial attempt,
+                    // silent automatic probes, and an explanation for an explicit request.
+                    if(error.reason==ScreenshotFailureReason.PROTECTED)throw PrivacyBlocked(error.userMessage)
+                    throw error
+                }
                 ledger.tasks.phaseTiming(task,"screenshot",SystemClock.elapsedRealtime()-screenshotAt)
                 if(!allowed())throw CancellationException()
                 // A specified-window frame belongs to the validated target even if the user has

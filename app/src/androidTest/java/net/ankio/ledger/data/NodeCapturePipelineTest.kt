@@ -72,6 +72,63 @@ class NodeCapturePipelineTest {
             app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(wallet.uid));app.store.deleteAccount(wallet.id)
         }
     }
+    @Test fun qualifiedProductionAdapterUsesFrozenClassificationAndOnlyTheActualWechatWallet()=runBlocking {
+        app.taskRecovery.await()
+        val settings=app.store.walletSettings()
+        val wallet=app.store.saveAccount(LedgerAccount(name="合成已验证零钱",amountCents=10000,kind="wechat"))
+        val cash=app.store.saveAccount(LedgerAccount(name="合成不应扣款现金",amountCents=20000,kind="cash"))
+        app.store.setDefaultWallet(cash.uid);app.store.setAppWallet(PaymentApps.WECHAT,wallet.uid)
+        val merchant="合成结构商家-${UUID.randomUUID()}"
+        val rule=app.store.saveClassificationRule(ClassificationRule("","合成节点固定规则",true,Direction.EXPENSE,"cat:expense:dining",0,
+            listOf(ClassificationCondition(value=merchant))))
+        val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm");val operation=app.tasks.operationKey(task)!!
+        val version=app.tasks.classificationSnapshot(task)!!.version
+        app.store.saveClassificationRule(rule.copy(enabled=false,categoryId="cat:expense:shopping"))
+        val bitmap=android.graphics.Bitmap.createBitmap(100,200,android.graphics.Bitmap.Config.ARGB_8888)
+        val image=try { OcrClient(app).prepareScreenshot(bitmap) } finally { bitmap.recycle() }
+        var calls=0;var saved:Long?=null
+        val backend=RecognitionBackend { _,_,_,_,_,_->calls++;error("qualified production layout must skip OCR") }
+        try {
+            assertTrue(app.tasks.queued(task,image,QualifiedWechatNodeFixture.page(merchant=merchant)))
+            assertNull(app.tasks.recognitionTime(task))
+            val processor=CaptureProcessor(app,OcrClient(app,backend),{time})
+            val result=processor.processPrepared(image,Source.OCR,PaymentApps.WECHAT,task) { true } as IngestResult.Saved
+            saved=result.record.id
+            assertEquals(0,calls);assertEquals(RecordState.POSTED,result.record.state)
+            assertEquals("餐饮",result.record.bill.category);assertEquals(version,result.record.bill.categoryDecision!!.ruleVersion)
+            assertEquals(8766L,app.store.getAccount(wallet.id)!!.amountCents);assertEquals(20000L,app.store.getAccount(cash.id)!!.amountCents)
+            assertEquals("合成扣费服务商",result.record.bill.receipt!!.serviceProvider!!.value)
+            assertEquals("合成停车费",result.record.bill.receipt!!.transactionDescription!!.value)
+            assertEquals(time.recognitionAt,result.record.bill.occurredAt);assertEquals("RECOGNITION_FALLBACK",result.record.bill.receipt!!.time!!.source)
+            assertFalse(result.record.capture.text.contains("订单已关闭"));assertFalse(result.record.capture.text.contains("按时支付"))
+            assertEquals("f754a6a2-b387-4339-9ece-296b5e122fe2",result.record.bill.receipt!!.recognition!!.adapter!!.comparisonId)
+            assertArrayEquals(image,app.store.screenshot(saved!!))
+            RecognitionTasks(app).use { reopened -> assertEquals(time,reopened.recognitionTime(task));assertNotNull(reopened.nodeSnapshot(task)) }
+            assertEquals(IngestResult.DuplicateSkipped,CaptureProcessor(app,OcrClient(app,backend),{time.copy(recognitionAt=time.recognitionAt+172800000)})
+                .processPrepared(image,Source.OCR,PaymentApps.WECHAT,task) { true })
+            assertEquals(0,calls);assertEquals(8766L,app.store.getAccount(wallet.id)!!.amountCents)
+            assertEquals(1,app.store.walletMovements(wallet.uid).count { it.recordUid==result.record.uid })
+            app.tasks.delete(task)
+            androidx.test.core.app.ActivityScenario.launch(net.ankio.ledger.ui.MainActivity::class.java).use { scenario ->
+                scenario.onActivity { activity ->
+                    val bridge=net.ankio.ledger.ui.LedgerWebBridge(activity)
+                    val detail=org.json.JSONObject(bridge.recordDetails(result.record.id)).getJSONObject("record")
+                    assertEquals("NODE",detail.getJSONObject("recognitionEvidence").getString("route"))
+                    val rows=org.json.JSONObject(bridge.snapshot()).getJSONArray("records")
+                    val row=(0 until rows.length()).map { rows.getJSONObject(it) }.single { it.getLong("id")==result.record.id }
+                    assertEquals("NODE",row.getJSONObject("recognitionEvidence").getString("route"))
+                }
+            }
+        } finally {
+            saved?.let(app.store::delete);app.store.writableDatabase.delete("wallet_submissions","token=?",arrayOf(operation))
+            app.tasks.delete(task);app.store.deleteClassificationRule(rule.id)
+            app.store.setDefaultWallet(settings.defaultAccountUid);app.store.setAppWallet(PaymentApps.WECHAT,settings.appBindings[PaymentApps.WECHAT])
+            listOf(wallet,cash).forEach { account ->
+                app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(account.uid));app.store.deleteAccount(account.id)
+            }
+        }
+    }
+
     @Test fun anotherImageCannotBorrowSavedNodeAuthorizationOrCreateAnOcrFallbackBill()=runBlocking {
         app.taskRecovery.await()
         val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm")

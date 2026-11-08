@@ -55,14 +55,21 @@ data class NodeLayoutVerification(val id:String,val packageName:String,val appVe
         appVersionCode==snapshot.environment.appVersionCode && system==snapshot.environment.system && device==snapshot.environment.device &&
         snapshot.activity in activities && (!automatic || this.automatic)
 }
-class NodeLayoutAdapter(val verification:NodeLayoutVerification,val matches:(NodeSnapshot)->Boolean,
-    val parse:(NodeSnapshot,RecognitionTimeContext)->List<TransactionCandidate>)
+class NodeLayoutAdapter private constructor(val verification:NodeLayoutVerification,val matches:(NodeSnapshot)->Boolean,
+    val parse:(NodeSnapshot,RecognitionTimeContext)->List<TransactionCandidate>,val rawText:(NodeSnapshot)->String) {
+    constructor(verification:NodeLayoutVerification,matches:(NodeSnapshot)->Boolean,parse:(NodeSnapshot,RecognitionTimeContext)->List<TransactionCandidate>):
+        this(verification,matches,parse,{it.texts.joinToString("\n")})
+    companion object {
+        fun scoped(verification:NodeLayoutVerification,matches:(NodeSnapshot)->Boolean,parse:(NodeSnapshot,RecognitionTimeContext)->List<TransactionCandidate>,
+            rawText:(NodeSnapshot)->String)=NodeLayoutAdapter(verification,matches,parse,rawText)
+    }
+}
 enum class NodeRouteReason { VERIFIED_LAYOUT, UNKNOWN_LAYOUT, INVALID_CANDIDATE, CONFLICTING_CANDIDATES }
-data class NodeRoute(val reason:NodeRouteReason,val candidate:TransactionCandidate?=null,val verification:NodeLayoutVerification?=null,val parseMillis:Long?=null)
+data class NodeRoute(val reason:NodeRouteReason,val candidate:TransactionCandidate?=null,val verification:NodeLayoutVerification?=null,val parseMillis:Long?=null,val rawText:String?=null)
 
 /** Injection is for synthetic boundary tests. Production registrations require real comparison evidence. */
 class NodeRecognitionRegistry(adapters:List<NodeLayoutAdapter>) {
-    private val adapters=adapters.map { NodeLayoutAdapter(it.verification.copy(activities=Collections.unmodifiableSet(it.verification.activities.toSet())),it.matches,it.parse) }
+    private val adapters=adapters.map { NodeLayoutAdapter.scoped(it.verification.copy(activities=Collections.unmodifiableSet(it.verification.activities.toSet())),it.matches,it.parse,it.rawText) }
     fun select(snapshot:NodeSnapshot,automatic:Boolean,time:()->RecognitionTimeContext):NodeRoute {
         if(!CapturePrivacy.manualAllowed(snapshot.page()))return NodeRoute(NodeRouteReason.INVALID_CANDIDATE)
         val matching=adapters.filter { it.verification.matches(snapshot,automatic) && runCatching { it.matches(snapshot) }.getOrDefault(false) }
@@ -86,10 +93,12 @@ class NodeRecognitionRegistry(adapters:List<NodeLayoutAdapter>) {
         val evidence=receipt.copy(merchant=node(receipt.merchant),productDescription=node(receipt.productDescription),transactionDescription=node(receipt.transactionDescription),
             orderRemark=node(receipt.orderRemark),serviceProvider=node(receipt.serviceProvider),receiptIssuer=node(receipt.receiptIssuer),sourceApp=node(receipt.sourceApp),
             bank=receipt.bank?.copy(transactionType=node(receipt.bank?.transactionType)),time=resolved)
-        return NodeRoute(NodeRouteReason.VERIFIED_LAYOUT,candidate.copy(bill=candidate.bill.copy(occurredAt=resolved.accountingAt,timeExplicit=resolved.explicit,receipt=evidence)),adapter.verification,parseMillis)
+        val raw=runCatching { adapter.rawText(snapshot) }.getOrNull()?.takeIf { it.isNotBlank() && it.length<=32_768 }
+            ?:return NodeRoute(NodeRouteReason.INVALID_CANDIDATE,parseMillis=parseMillis)
+        return NodeRoute(NodeRouteReason.VERIFIED_LAYOUT,candidate.copy(bill=candidate.bill.copy(occurredAt=resolved.accountingAt,timeExplicit=resolved.explicit,receipt=evidence)),adapter.verification,parseMillis,raw)
     }
     companion object {
-        /** No real same-page comparison has qualified a layout in this source revision. */
-        val production=NodeRecognitionRegistry(emptyList())
+        /** Exact manual scope qualified by a real production-service snapshot/image comparison. */
+        val production=NodeRecognitionRegistry(listOf(VerifiedWechatBalanceDebitLayout.adapter))
     }
 }

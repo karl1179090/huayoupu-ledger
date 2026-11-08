@@ -128,6 +128,18 @@ class ShakeWhitelistCaptureTest {
         assertEquals(2,(taskIds()-previousTasks).size)
     }
 
+    @Test fun protectedPixelFailureRetainsTheExistingPrivacyRefusalWithoutATaskOrBill() {
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.PROTECTED,"合成受保护页面，未截图") }
+        try {
+            service.captureOnShake()
+            await { app.channels.lastStatus().contains("合成受保护页面") }
+            assertEquals(previousTasks,taskIds())
+            assertEquals(0,calls.get());assertTrue(app.store.all().none { it.bill.merchant.startsWith(merchant) })
+        } finally { service.screenshotProvider=provider }
+    }
+
     @Test fun contentChangeWhilePixelsArePendingCannotFallBackIntoOcrOrCreateABill() {
         val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
         startFixture("safe")
