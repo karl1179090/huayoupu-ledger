@@ -27,6 +27,7 @@ data class ReceiptEvidence(
     val receiptIssuer: ReceiptField? = null,
     val sourceApp: ReceiptField? = null,
     val time: ReceiptTimeEvidence? = null,
+    val recognition: RecognitionEvidence? = null,
 ) {
     init {
         require(version == 1 && Regex("[A-Za-z0-9_-]{1,80}").matches(blockId))

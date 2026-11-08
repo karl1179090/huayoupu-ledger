@@ -114,6 +114,11 @@ class ShakeWhitelistCaptureTest {
             val record=app.store.all().single { it.bill.merchant.startsWith(merchant) }
             assertEquals(record.reason,RecordState.POSTED,record.state);assertEquals(-1234L,record.wallet!!.appliedCents)
             assertNotNull(app.store.screenshot(record.id));assertEquals(1,calls.get())
+            val captured=app.tasks.nodeSnapshot((taskIds()-previousTasks).single())
+            assertNotNull("production traversal must retain the exact validated node evidence",captured)
+            assertEquals(fixturePackage,captured!!.packageName)
+            assertTrue(captured.nodes.any { it.parentId!=null && it.bounds.bottom>it.bounds.top })
+            assertTrue(captured.environment.system.contains("/api"))
         }
         // The previous result banner is an accessibility overlay. Removing it for a
         // second frame must not be mistaken for a switch away from the selected app.
@@ -121,6 +126,30 @@ class ShakeWhitelistCaptureTest {
         await { calls.get()==2 && app.captureQueue.size()==0 }
         assertEquals(screenshots+2,service.screenshotRequests)
         assertEquals(2,(taskIds()-previousTasks).size)
+    }
+
+    @Test fun contentChangeWhilePixelsArePendingCannotFallBackIntoOcrOrCreateABill() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,allowed ->
+            entered.complete(Unit);release.await()
+            if(!allowed())throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"合成采集期间交易改变")
+            android.graphics.Bitmap.createBitmap(100,200,android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        try {
+            service.captureOnShake();await { entered.isCompleted }
+            val event=android.view.accessibility.AccessibilityEvent.obtain(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            event.packageName=fixturePackage
+            // Some platform content events omit a window ID. They cannot certify that
+            // an in-flight frame still belongs to the previously checked transaction.
+            try { InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onAccessibilityEvent(event) } }
+            finally { event.recycle() }
+            release.complete(Unit)
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it)=="FAILED" }==true }
+            assertEquals(0,calls.get());assertTrue(app.store.all().none { it.bill.merchant.startsWith(merchant) })
+            assertTrue((taskIds()-previousTasks).all { app.tasks.image(it)==null })
+        } finally { release.complete(Unit);service.screenshotProvider=provider }
     }
 
     @Test fun sensitiveEditableAndUnreadablePagesNeverRequestPixelsOrCreateTasks() {

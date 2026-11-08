@@ -133,6 +133,12 @@ class ClassificationCapacityTest {
     @Test fun maximumConfigurationSurvivesActualQueuedTaskAndReopenWhileOversizedHoldIsAtomic() {
         val name="classification-capacity-queue-${UUID.randomUUID()}.db"
         val taskName="classification-capacity-tasks-${UUID.randomUUID()}.db"
+        val nodeEvidence=NodeSnapshot("com.tencent.mm",7,"com.tencent.mm.SyntheticDetail",1,100,110,1_799_400_000_000,
+            NodeEnvironment("synthetic",1,"synthetic-api34","synthetic-device"),List(200) { index ->
+                CaptureNode(index,if(index==0)null else if(index<=3)0 else index%3+1,if(index==0)0 else if(index<=3)1 else 2,
+                    NodeBounds(0,index*10,100,index*10+10),"合".repeat(70),className="c".repeat(256),resourceId="r".repeat(256))
+            })
+        assertTrue(bytes(NodeSnapshotCodec.json(nodeEvidence).toString())>100_000)
         try {
             lateinit var expected:ClassificationSnapshot
             var taskId=0L
@@ -145,9 +151,10 @@ class ClassificationCapacityTest {
                 LedgerBackup.restore(store,seed.copy(classification=ClassificationBackup(expected,emptyList())))
                 assertEquals(expected,store.classificationRules())
                 RecognitionTasks(app,taskName,classificationStore=store).use { tasks ->
-                    taskId=tasks.create(Source.IMAGE,"image")
+                    taskId=tasks.create(Source.OCR,"shake:com.tencent.mm")
                     assertEquals(expected,tasks.classificationSnapshot(taskId))
-                    assertTrue(tasks.queued(taskId,"synthetic-capacity-image".toByteArray()))
+                    assertTrue(tasks.queued(taskId,"synthetic-capacity-image".toByteArray(),nodeEvidence))
+                    assertEquals(nodeEvidence.fingerprint,tasks.nodeSnapshot(taskId)!!.fingerprint)
                 }
                 val before=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
                 val oversized=expected.copy(version=expected.version+"x".repeat(overhead+1))
@@ -157,7 +164,9 @@ class ClassificationCapacityTest {
             LedgerStore(app,name).use { reopened -> RecognitionTasks(app,taskName,classificationStore=reopened).use { tasks ->
                 assertEquals(expected,reopened.classificationRules())
                 assertEquals(expected,tasks.classificationSnapshot(taskId))
-                assertEquals(listOf(taskId to "image"),tasks.pendingQueued())
+                assertEquals(listOf(taskId to "shake:com.tencent.mm"),tasks.pendingQueued())
+                assertEquals(nodeEvidence.fingerprint,tasks.nodeSnapshot(taskId)!!.fingerprint)
+                assertEquals(1,tasks.snapshot().length())
                 assertEquals(expected,reopened.classificationBackup().snapshots.single().snapshot)
                 tasks.delete(taskId)
             } }

@@ -236,7 +236,7 @@ class RecognitionCommitRecoveryTest {
                 db.version = 4
             }
             val operation = RecognitionTasks(app, name).use { tasks ->
-                assertEquals(7, tasks.readableDatabase.version)
+                assertEquals(8, tasks.readableDatabase.version)
                 val existing = tasks.operationKey(1)!!
                 val newer = tasks.create(Source.IMAGE, "image")
                 assertNotEquals(existing, tasks.operationKey(newer)); existing

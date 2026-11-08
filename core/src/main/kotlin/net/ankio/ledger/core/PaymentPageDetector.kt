@@ -1,6 +1,6 @@
 package net.ankio.ledger.core
 
-data class PaymentPage(val packageName: String, val windowId: Int, val activity: String, val texts: List<String>, val editable: Boolean = false)
+data class PaymentPage(val packageName: String, val windowId: Int, val activity: String, val texts: List<String>, val editable: Boolean = false, val snapshot: NodeSnapshot? = null)
 data class PaymentMatch(val signature: String, val transactionId: String?, val packageName: String, val windowId: Int, val activity: String, val eventIdentity: String = signature,
     val transfer: TransferEvidence? = null)
 

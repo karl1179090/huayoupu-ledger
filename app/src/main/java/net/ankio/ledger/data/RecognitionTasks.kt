@@ -12,7 +12,7 @@ import java.util.UUID
 
 /** Recognition attempts are durable local data, independently of a valid financial transaction. */
 class RecognitionTasks(context:Context,private val name:String="recognition.db",private val screenshots:ScreenshotStore=ScreenshotStore.get(context),
-    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,7) {
+    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,8) {
     // Read the immutable ledger migration baseline before SQLiteOpenHelper acquires its own lock.
     private val migrationBaseline=classificationStore?.classificationMigrationBaseline() ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
     private var classificationsReconciled=false
@@ -46,7 +46,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, origin TEXT NOT NULL,
         created_at INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL,
         record_id INTEGER, image BLOB, diagnostic TEXT NOT NULL DEFAULT '{}', shake_authorization TEXT,operation_uid TEXT NOT NULL,classification_snapshot TEXT NOT NULL,
-        recognition_at INTEGER,recognition_zone TEXT,trusted_original_capture_date TEXT)""")
+        recognition_at INTEGER,recognition_zone TEXT,trusted_original_capture_date TEXT,node_snapshot TEXT,node_image_hash TEXT,recognition_evidence TEXT)""")
         db.execSQL("CREATE UNIQUE INDEX tasks_operation_uid ON tasks(operation_uid)")
     }
     override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int) {
@@ -67,6 +67,11 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             db.execSQL("ALTER TABLE tasks ADD COLUMN recognition_at INTEGER")
             db.execSQL("ALTER TABLE tasks ADD COLUMN recognition_zone TEXT")
             db.execSQL("ALTER TABLE tasks ADD COLUMN trusted_original_capture_date TEXT")
+        }
+        if(oldVersion<8) {
+            db.execSQL("ALTER TABLE tasks ADD COLUMN node_snapshot TEXT")
+            db.execSQL("ALTER TABLE tasks ADD COLUMN node_image_hash TEXT")
+            db.execSQL("ALTER TABLE tasks ADD COLUMN recognition_evidence TEXT")
         }
     }
     /** Null until the engine actually begins processing; old records/tasks are never backfilled. */
@@ -160,7 +165,61 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     }
     @Synchronized fun prepared(id:Long,image:ByteArray) { storeImage(id,image,"RECOGNIZING","正在识别记账中") }
     /** Save first, then expose a resumable queue entry. */
-    @Synchronized fun queued(id:Long,image:ByteArray):Boolean = storeImage(id,image,"QUEUED","已获取截图，等待识别")
+    @Synchronized fun queued(id:Long,image:ByteArray,snapshot:net.ankio.ledger.core.NodeSnapshot?=null):Boolean {
+        require(image.isNotEmpty() && image.size<=5*1024*1024)
+        if(snapshot!=null) {
+            require(net.ankio.ledger.core.CapturePrivacy.manualAllowed(snapshot.page()))
+            val origin=readableDatabase.rawQuery("SELECT source,origin FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+                if(!it.moveToFirst() || it.getString(0)!=Source.OCR.name)return false
+                it.getString(1)
+            }
+            require(origin in setOf("shake:${snapshot.packageName}","shortcut:${snapshot.packageName}","payment_auto:${snapshot.packageName}"))
+            if(writableDatabase.update("tasks",ContentValues().apply { put("node_snapshot",NodeSnapshotCodec.json(snapshot).toString());put("node_image_hash",imageHash(image)) },
+                "id=? AND status IN ('CAPTURING','QUEUED','RECOGNIZING')",arrayOf(id.toString()))!=1)return false
+        }
+        return storeImage(id,image,"QUEUED","已获取截图，等待识别")
+    }
+    private fun imageHash(image:ByteArray)=java.security.MessageDigest.getInstance("SHA-256").digest(image).joinToString("") { "%02x".format(it) }
+    fun nodeSnapshot(id:Long,image:ByteArray?=null):net.ankio.ledger.core.NodeSnapshot?=readableDatabase.rawQuery("SELECT node_snapshot,node_image_hash FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+        if(!it.moveToFirst() || it.isNull(0))null else {
+            check(image==null || imageHash(image)==it.getString(1)) { "节点与截图证据不一致" }
+            NodeSnapshotCodec.decode(it.getString(0))
+        }
+    }
+    private fun storedRecognitionEvidence(id:Long):JSONObject?=readableDatabase.rawQuery("SELECT recognition_evidence FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+        if(!it.moveToFirst() || it.isNull(0))null else JSONObject(it.getString(0))
+    }
+    fun recognitionEvidence(id:Long):JSONObject?=storedRecognitionEvidence(id)?.takeIf { it.has("route") }
+    /** Bounded provenance only; node content is kept in a separate private column. */
+    @Synchronized fun recordRoute(id:Long,route:net.ankio.ledger.core.NodeRoute?,snapshot:net.ankio.ledger.core.NodeSnapshot?,reason:String?=null) {
+        val current=storedRecognitionEvidence(id) ?: JSONObject().put("version",1).put("screenshot",JSONObject().put("state","AVAILABLE").put("reason",JSONObject.NULL))
+            .put("phaseTimingsMs",JSONObject())
+        current.put("route",if(route?.candidate!=null)"NODE" else "OCR")
+            .put("reason",reason ?: route?.reason?.name?.lowercase() ?: "legacy_image")
+            .put("adapter",route?.verification?.let(NodeSnapshotCodec::verification) ?: JSONObject.NULL)
+            .put("snapshot",snapshot?.let(NodeSnapshotCodec::summary) ?: JSONObject.NULL)
+        if(snapshot!=null)current.getJSONObject("phaseTimingsMs").put("nodeRead",snapshot.readCompletedMs-snapshot.readStartedMs)
+        writeRecognitionEvidence(id,current)
+    }
+    @Synchronized fun phaseTiming(id:Long,phase:String,millis:Long) {
+        require(phase in setOf("nodeRead","screenshot","route","ocr","parse","save") && millis>=0)
+        val current=storedRecognitionEvidence(id) ?: JSONObject().put("version",1).put("phaseTimingsMs",JSONObject())
+            .put("screenshot",JSONObject().put("state","AVAILABLE").put("reason",JSONObject.NULL))
+        current.getJSONObject("phaseTimingsMs").put(phase,millis);writeRecognitionEvidence(id,current)
+    }
+    private fun writeRecognitionEvidence(id:Long,evidence:JSONObject) {
+        require(evidence.toString().toByteArray().size<=8192)
+        writableDatabase.update("tasks",ContentValues().apply { put("recognition_evidence",evidence.toString()) },"id=?",arrayOf(id.toString()))
+    }
+    /** Explicit private backup seam. Portable identity is operationKey + stable ledger UID, never a row/media owner. */
+    fun portableNodeEvidence():JSONArray=readableDatabase.rawQuery("SELECT id,record_id,node_snapshot,recognition_evidence,node_image_hash FROM tasks WHERE node_snapshot IS NOT NULL ORDER BY id",null).use { c ->
+        JSONArray().apply { while(c.moveToNext()) {
+            val id=c.getLong(0)
+            put(JSONObject().put("operationKey",operationKey(id)).put("recordUid",if(c.isNull(1))JSONObject.NULL else classificationStore?.get(c.getLong(1))?.uid ?: JSONObject.NULL)
+                .put("snapshot",JSONObject(c.getString(2))).put("imageFingerprint",c.getString(4))
+                .put("recognitionEvidence",if(c.isNull(3))JSONObject.NULL else JSONObject(c.getString(3))))
+        } }
+    }
     private fun storeImage(id:Long,image:ByteArray,status:String,message:String):Boolean {
         require(image.isNotEmpty()&&image.size<=5*1024*1024)
         val createdAt=readableDatabase.rawQuery("SELECT created_at FROM tasks WHERE id=? AND status IN ('CAPTURING','QUEUED','RECOGNIZING')",arrayOf(id.toString())).use {
@@ -232,7 +291,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         if(ids.isEmpty())return JSONArray()
         require(ids.all { it>0 })
         return readableDatabase.rawQuery("SELECT record_id,origin,diagnostic,MAX(id) FROM tasks WHERE record_id IN (${ids.joinToString(",")}) GROUP BY record_id",null).use { c ->
-            JSONArray().apply { while(c.moveToNext())put(JSONObject().put("recordId",c.getLong(0)).put("origin",c.getString(1)).put("diagnostic",JSONObject(c.getString(2)))) }
+            JSONArray().apply { while(c.moveToNext())put(JSONObject().put("recordId",c.getLong(0)).put("origin",c.getString(1)).put("diagnostic",JSONObject(c.getString(2))).put("recognitionEvidence",recognitionEvidence(c.getLong(3)) ?: JSONObject.NULL)) }
         }
     }
     @Synchronized fun reassignRecord(fromId:Long,toId:Long,message:String="已更新原账单退款") {
@@ -252,7 +311,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         JSONArray().apply { while(c.moveToNext()) put(JSONObject().put("id",c.getLong(0)).put("source",c.getString(1))
             .put("origin",c.getString(2)).put("createdAt",c.getLong(3)).put("status",c.getString(4)).put("message",c.getString(5))
             .put("recordId",if(c.isNull(6))JSONObject.NULL else c.getLong(6)).put("hasScreenshot",screenshots.contains(imageOwner(c.getLong(0))))
-            .put("diagnostic",JSONObject(c.getString(8)))) }
+            .put("diagnostic",JSONObject(c.getString(8))).put("recognitionEvidence",recognitionEvidence(c.getLong(0)) ?: JSONObject.NULL)) }
     }
     fun diagnosticExport():JSONArray=readableDatabase.rawQuery("SELECT id,source,created_at,status,diagnostic FROM tasks ORDER BY id DESC LIMIT 100",null).use { c ->
         JSONArray().apply { while(c.moveToNext())put(JSONObject().put("id",c.getLong(0)).put("source",c.getString(1))

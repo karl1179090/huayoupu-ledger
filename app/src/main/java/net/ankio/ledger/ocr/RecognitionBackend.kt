@@ -7,7 +7,8 @@ import net.ankio.ledger.core.TransactionCandidate
 
 data class RecognitionResult(val rawText:String,val bill:ParsedBill?,val screenshot:ByteArray?=null,
     val iconRegion:MerchantIconRegion?=null,val merchantIcon:ByteArray?=null,
-    val iconStatus:String="not_bill",val iconDetails:String="",val skipReason:String?=null) {
+    val iconStatus:String="not_bill",val iconDetails:String="",val skipReason:String?=null,
+    val phaseTimingsMs:Map<String,Long> = emptyMap()) {
     /** Adapt legacy single-result recognizers without a second, potentially inconsistent bill field. */
     val candidates:List<TransactionCandidate>
         get() = bill?.let { listOf(TransactionCandidate(CandidateId.SINGLE,it)) } ?: emptyList()

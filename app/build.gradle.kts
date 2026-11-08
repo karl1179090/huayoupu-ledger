@@ -2,6 +2,8 @@ import org.gradle.api.tasks.PathSensitivity
 
 plugins { id("com.android.application"); kotlin("android") }
 
+val nodeDiagnostic = providers.gradleProperty("ledgerNodeDiagnostic").getOrElse("false").toBooleanStrict()
+providers.gradleProperty("ledgerAppBuildDir").orNull?.let { layout.buildDirectory.set(file(it)) }
 val ledgerAbi = providers.gradleProperty("ledgerAbi").getOrElse("arm64-v8a")
 require(ledgerAbi in listOf("arm64-v8a", "x86_64")) { "Unsupported ledger ABI" }
 
@@ -60,6 +62,10 @@ android {
         targetSdk = 36
         versionCode = 97
         versionName = "0.5.91-v6"
+        buildConfigField("boolean", "NODE_DIAGNOSTIC", "false")
+        manifestPlaceholders["nodeDiagnosticsEnabled"] = "false"
+        manifestPlaceholders["ledgerApplicationLabel"] = "花有谱"
+        manifestPlaceholders["ledgerCaptureServiceLabel"] = "花有谱 · 页面识别"
         buildConfigField("String", "LOCAL_OCR_ENGINE", "\"paddle-v6-tiny\"")
         buildConfigField("String", "LOCAL_OCR_LABEL", "\"PaddleOCR V6 Tiny\"")
         testInstrumentationRunner = providers.gradleProperty("ledgerTestRunner").getOrElse("androidx.test.runner.AndroidJUnitRunner")
@@ -74,6 +80,15 @@ android {
     // Every variant consumes one generated copy: no duplicate asset overlays and no source rewriting.
     sourceSets.getByName("main").assets.setSrcDirs(emptyList<String>())
     buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "NODE_DIAGNOSTIC", nodeDiagnostic.toString())
+            manifestPlaceholders["nodeDiagnosticsEnabled"] = nodeDiagnostic.toString()
+            if (nodeDiagnostic) {
+                applicationIdSuffix = ".nodediagnostic"
+                manifestPlaceholders["ledgerApplicationLabel"] = "@string/node_diagnostic_app_name"
+                manifestPlaceholders["ledgerCaptureServiceLabel"] = "@string/node_diagnostic_accessibility_service_label"
+            }
+        }
         release {
             isDebuggable = false
             isJniDebuggable = false

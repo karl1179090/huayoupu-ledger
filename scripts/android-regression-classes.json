@@ -89,6 +89,7 @@
     "net.ankio.ledger.CategoryDeletionBridgeTest",
     "net.ankio.ledger.data.CategoryReplacementTest",
     "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
+    "net.ankio.ledger.data.NodeCapturePipelineTest",
     "net.ankio.ledger.data.ClassificationCapacityTest"
   ],
   "api34": [
@@ -131,6 +132,7 @@
     "net.ankio.ledger.CategoryDeletionBridgeTest",
     "net.ankio.ledger.data.CategoryReplacementTest",
     "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
+    "net.ankio.ledger.data.NodeCapturePipelineTest",
     "net.ankio.ledger.data.ClassificationCapacityTest"
   ],
   "api36": [
