@@ -7,7 +7,7 @@ import org.json.JSONObject
 class ClassificationException(val code: String, message: String): IllegalArgumentException(message)
 
 data class StoredClassificationSnapshot(val operationKey: String, val snapshot: ClassificationSnapshot, val active: Boolean,val taskDatabase:String?=null)
-data class ClassificationBackup(val configuration: ClassificationSnapshot, val snapshots: List<StoredClassificationSnapshot>)
+data class ClassificationBackup(val configuration: ClassificationSnapshot, val snapshots: List<StoredClassificationSnapshot>, val replacements:List<CategoryReplacement> = emptyList())
 
 /** One bounded wire format for durable task snapshots, bridge data and backups. */
 object ClassificationCodec {
@@ -107,6 +107,7 @@ object ClassificationCodec {
     }
 
     fun backup(value: ClassificationBackup): JSONObject = JSONObject().put("configuration",snapshot(value.configuration))
+        .put("categoryReplacements",CategoryReplacementStorage.encode(value.replacements))
         .put("snapshots",JSONArray().apply { value.snapshots.forEach { put(JSONObject().put("operationKey",it.operationKey)
             .put("active",it.active).put("taskDatabase",it.taskDatabase ?: JSONObject.NULL).put("snapshot",snapshot(it.snapshot))) } })
 
@@ -117,6 +118,6 @@ object ClassificationCodec {
             val entry=snapshots.getJSONObject(index);val key=entry.getString("operationKey")
             require(key.length in 1..200 && keys.add(key)) { "分类快照任务标识无效" }
             StoredClassificationSnapshot(key,readSnapshot(entry.getJSONObject("snapshot")),entry.get("active") as? Boolean ?: error("快照状态无效"),if(entry.isNull("taskDatabase"))null else entry.getString("taskDatabase").also { require(it.length in 1..200) })
-        })
+        },CategoryReplacementStorage.decode(input.optJSONArray("categoryReplacements")))
     }
 }

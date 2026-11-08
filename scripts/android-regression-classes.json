@@ -85,6 +85,9 @@
     "net.ankio.ledger.ocr.RecognitionTimeGateTest",
     "net.ankio.ledger.data.RecognitionTimeProcessRestartTest",
     "net.ankio.ledger.DateOnlyCalendarBridgeTest",
+    "net.ankio.ledger.CategoryDeletionBridgeTest",
+    "net.ankio.ledger.data.CategoryReplacementTest",
+    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
     "net.ankio.ledger.data.CompoundClassificationTest",
     "net.ankio.ledger.CompoundClassificationBridgeTest"
   ],
@@ -124,6 +127,9 @@
     "net.ankio.ledger.ocr.RecognitionTimeGateTest",
     "net.ankio.ledger.data.RecognitionTimeProcessRestartTest",
     "net.ankio.ledger.DateOnlyCalendarBridgeTest",
+    "net.ankio.ledger.CategoryDeletionBridgeTest",
+    "net.ankio.ledger.data.CategoryReplacementTest",
+    "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
     "net.ankio.ledger.data.CompoundClassificationTest",
     "net.ankio.ledger.CompoundClassificationBridgeTest"
   ],

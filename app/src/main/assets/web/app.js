@@ -715,6 +715,232 @@ function drawCategories(){
 document.querySelectorAll('#manual-type button').forEach(b=>b.onclick=()=>{manualType=b.dataset.type;if(manualType==='transfer'){manualCategory='钱包转账';manualCategoryId=null}else{const first=findCategoryItem(manualType,null,manualType==='income'?'工资':'餐饮');manualCategory=first.name;manualCategoryId=first.id}drawCategories();remember()});
 $('manual-form').oninput=()=>{$('manual-note-count').textContent=$('manual-note').value.length+'/500';remember()};
 $('manual-form').onsubmit=e=>{e.preventDefault();if(manualType==='transfer'&&!validTransfer('manual'))return;const amount=$('manual-amount').value;if(!/^\d+(\.\d{1,2})?$/.test(amount)||Number(amount)<=0){notify('请输入大于零、最多两位小数的金额');$('manual-amount').focus();return}if(!native){notify('请在 Android 应用中保存账单');return}const direction=manualType==='transfer'?'TRANSFER':manualType==='income'?'INCOME':'EXPENSE',resolvedCat=manualType==='transfer'?null:findCategoryItem(direction,manualCategoryId,manualCategory),catName=manualType==='transfer'?'钱包转账':(resolvedCat?.name||manualCategory),catId=manualType==='transfer'?null:(resolvedCat?.id||manualCategoryId);const result=JSON.parse(native.save(JSON.stringify({id:0,amount,direction,merchant:catName,category:catName,...(catId?{categoryId:catId}:{}),occurredAt:new Date($('manual-occurred-at').value||localTime(Date.now())).getTime(),note:$('manual-note').value,confirmDuplicate:false,submissionToken:manualSubmissionToken||(manualSubmissionToken=submissionToken()),...(manualType==='transfer'?{transfer:readTransfer('manual')}:(manualWalletSelected?{walletAccountUid:manualWalletUid,manualWalletSelected:true}:{}))})));if(!result.ok){notify(result.error||'保存失败');return}month=localMonth(Date.now());filter=manualType;$('manual-form').reset();refresh();go('ledger');notify(result.state==='REVIEW'?'已保存，请选择钱包后入账':'保存成功')};
+function openCategoryDeletion(targetItem,manageDir){
+ const isFallback=!!targetItem.isFallback||String(targetItem.name||'').trim()==='其他';
+ if(isFallback){
+  notify('系统兜底分类不能删除');
+  return;
+ }
+ if(!native?.previewCategoryDeletion){
+  notify('请在 Android 应用中删除分类');
+  return;
+ }
+ let previewRes;
+ try{
+  previewRes=JSON.parse(native.previewCategoryDeletion(targetItem.id));
+ }catch(_){
+  notify('无法获取分类删除影响，请重试');
+  return;
+ }
+ if(!previewRes.ok){
+  notify(previewRes.error||'无法获取分类删除影响');
+  return;
+ }
+ let currentPreview=previewRes.deletionPreview;
+ let selectedReplacementId='';
+ let formError='';
+ let isStale=false;
+
+ const renderDeletionPreview=()=>{
+  const reqReplacement=!!currentPreview.requiresReplacement;
+  const isIncome=targetItem.direction==='INCOME';
+  const dirLabel=isIncome?'收入':'支出';
+  const replacements=Array.isArray(currentPreview.replacements)?currentPreview.replacements:[];
+
+  if(selectedReplacementId&&!replacements.some(r=>r.id===selectedReplacementId)){
+   selectedReplacementId='';
+  }
+
+  const impactHtml=`
+   <div class="category-impact-summary" id="category-impact-summary">
+    <div class="category-impact-stat" data-impact="bills">
+     <strong class="impact-stat-number" id="preview-bill-count">${currentPreview.billCount}</strong>
+     <span class="impact-stat-label">笔关联账单</span>
+    </div>
+    <div class="category-impact-stat" data-impact="rules">
+     <strong class="impact-stat-number" id="preview-rule-count">${currentPreview.ruleCount}</strong>
+     <span class="impact-stat-label">条规则目标</span>
+    </div>
+    <div class="category-impact-stat" data-impact="tasks">
+     <strong class="impact-stat-number" id="preview-task-count">${currentPreview.queuedConfigurationCount}</strong>
+     <span class="impact-stat-label">个排队任务</span>
+    </div>
+    ${(currentPreview.replacementCount>0)?`
+    <div class="category-impact-stat" data-impact="replacements">
+     <strong class="impact-stat-number" id="preview-replacement-count">${currentPreview.replacementCount}</strong>
+     <span class="impact-stat-label">个既有替代</span>
+    </div>`:''}
+   </div>
+  `;
+
+  const copyHtml=`
+   <p class="sheet-copy category-delete-notice" id="category-delete-notice">
+    删除此分类将一次性完成分类移除与关联归属迁移。金额、时间、方向、钱包与账户余额均保持不变；排队中的任务保留原有匹配条件和顺序，改用替代分类入账。操作不可单独撤销。
+   </p>
+  `;
+
+  const replacementHtml=reqReplacement?`
+   <div class="category-replacement-card" id="category-replacement-card">
+    <label class="sheet-copy" for="category-replacement-select">
+     <b>选择同方向替代分类（必填）</b>
+    </label>
+    <select class="month-input" id="category-replacement-select" aria-label="选择同方向替代分类" aria-required="true">
+     <option value="">请选择同方向${dirLabel}替代分类…</option>
+     ${replacements.map(r=>`
+      <option value="${escapeText(r.id)}" ${r.id===selectedReplacementId?'selected':''}>
+       ${escapeText(r.name)}${r.isFallback?'（兜底）':''}
+      </option>
+     `).join('')}
+    </select>
+    <p class="sheet-copy replacement-field-hint" id="replacement-field-hint">
+     只能选择存在且同为${dirLabel}的其他分类；已排除待删除分类本身。
+    </p>
+   </div>
+  `:`
+   <div class="category-replacement-card category-zero-ref-card" id="category-zero-ref-card">
+    <p class="sheet-copy" id="zero-reference-hint">当前分类暂无关联账单、规则或排队任务，无需选择替代分类，可直接确认删除。</p>
+   </div>
+  `;
+
+  const staleHtml=isStale?`
+   <div class="category-stale-alert" id="category-stale-alert" role="alert">
+    <b>分类引用已变化</b>
+    <span>引用数量与目标列表已更新，请重新核对后再确认删除。</span>
+   </div>
+  `:'';
+
+  const contentHtml=`
+   <div class="category-delete-preview-view" id="category-delete-preview-view">
+    <div class="category-delete-target-row">
+     ${categoryBadge(targetItem.name,targetItem.direction,targetItem.icon)}
+     <div class="category-delete-target-info">
+      <b id="delete-target-name">${escapeText(targetItem.name)}</b>
+      <span class="category-manage-meta">${dirLabel}分类 · ${reqReplacement?'有引用待迁移':'无关联引用'}</span>
+     </div>
+    </div>
+    ${staleHtml}
+    ${impactHtml}
+    ${copyHtml}
+    ${replacementHtml}
+    <p class="category-field-error" id="category-delete-error" role="alert" ${formError?'':'hidden'}>${escapeText(formError)}</p>
+    <div class="sheet-actions">
+     <button type="button" id="cancel-category-delete">取消</button>
+     <button type="button" class="danger" id="confirm-category-delete">确认删除</button>
+    </div>
+   </div>
+  `;
+
+  showSheet('删除分类 · '+targetItem.name,contentHtml);
+
+  const repSelect=$('category-replacement-select');
+  if(repSelect){
+   repSelect.onchange=()=>{
+    selectedReplacementId=repSelect.value;
+    formError='';
+    const errEl=$('category-delete-error');
+    if(errEl)errEl.hidden=true;
+    repSelect.removeAttribute('aria-invalid');
+   };
+  }
+
+  $('cancel-category-delete').onclick=()=>{
+   openCategoryManager(manageDir);
+   setTimeout(()=>{
+    document.querySelector(`[data-delete-category="${targetItem.id}"]`)?.focus();
+   },50);
+  };
+
+  $('confirm-category-delete').onclick=()=>{
+   if(currentPreview.requiresReplacement&&!selectedReplacementId){
+    formError='该分类仍有引用，请选择同方向的替代分类';
+    const errEl=$('category-delete-error');
+    if(errEl){
+     errEl.textContent=formError;
+     errEl.hidden=false;
+    }
+    const selectEl=$('category-replacement-select');
+    if(selectEl){
+     selectEl.setAttribute('aria-invalid','true');
+     selectEl.focus();
+    }
+    notify(formError);
+    return;
+   }
+
+   const payload={
+    id:targetItem.id,
+    replacementId:currentPreview.requiresReplacement?selectedReplacementId:null,
+    previewToken:currentPreview.previewToken
+   };
+
+   let res;
+   try{
+    res=JSON.parse(native.confirmCategoryDeletion(JSON.stringify(payload)));
+   }catch(_){
+    formError='分类删除失败，请重试';
+    const errEl=$('category-delete-error');
+    if(errEl){errEl.textContent=formError;errEl.hidden=false;}
+    notify(formError);
+    return;
+   }
+
+   if(!res.ok){
+    if(res.code==='CATEGORY_PREVIEW_STALE'){
+     isStale=true;
+     formError=res.error||'分类引用已变化，请核对最新影响后再确认删除';
+     if(res.deletionPreview){
+      currentPreview=res.deletionPreview;
+      if(!currentPreview.replacements?.some(r=>r.id===selectedReplacementId)){
+       selectedReplacementId='';
+      }
+     }
+     renderDeletionPreview();
+     notify(formError);
+     return;
+    }
+    formError=res.error||'删除失败';
+    const errEl=$('category-delete-error');
+    if(errEl){
+     errEl.textContent=formError;
+     errEl.hidden=false;
+    }
+    notify(formError);
+    return;
+   }
+
+   if(res.categoryDirectory)categoryDirectory=res.categoryDirectory;
+   if(res.categoryIconOptions)categoryIconOptions=res.categoryIconOptions;
+   if(res.classificationRules&&typeof applyClassificationRules==='function'){
+    applyClassificationRules(res.classificationRules);
+   }
+   viewKey='';dataRevision='';loadedScope='';
+   if(periodStats&&native?.statistics){
+    try{
+     const latest=JSON.parse(native.statistics(statsPeriod));
+     if(latest.ok)periodStats=latest;
+    }catch(_){}
+   }
+   refresh();
+   drawCategories();
+   if(page==='stats')drawStats();
+   if(draft)updateEditor();
+   if(manualCategoryId===targetItem.id){
+    manualCategoryId=selectedReplacementId||null;
+    const rep=findCategoryItem(manualType,selectedReplacementId,null);
+    if(rep)manualCategory=rep.name;
+   }
+   if(draft&&draft.categoryId===targetItem.id){
+    draft.categoryId=selectedReplacementId||null;
+    const rep=findCategoryItem(draft.direction||'EXPENSE',selectedReplacementId,null);
+    if(rep){draft.category=rep.name;draft.categoryIcon=rep.icon;}
+   }
+   notify('分类已删除');
+   openCategoryManager(manageDir);
+  };
+ };
+
+ renderDeletionPreview();
+}
 function openCategoryManager(initialDirection){
  let manageDir=String(initialDirection||manualType||'expense').toLowerCase()==='income'?'income':'expense',editingItem=null,selectedIcon='tag';
  const syncFromNative=()=>{if(!native?.getCategoryDirectory)return;try{const res=JSON.parse(native.getCategoryDirectory());if(res.ok){if(res.categoryDirectory)categoryDirectory=res.categoryDirectory;if(res.categoryIconOptions)categoryIconOptions=res.categoryIconOptions}}catch(_){}};
@@ -724,8 +950,9 @@ function openCategoryManager(initialDirection){
  selectedIcon=defaultIcon(manageDir);
  const renderManager=()=>{
   const items=directoryItems(manageDir),expCount=directoryItems('expense').length,incCount=directoryItems('income').length,dirLabel=manageDir==='income'?'收入':'支出',icons=activeIconOptions();
+  const hasPreview=!!native?.previewCategoryDeletion;
   if(!icons.some(o=>o.key===selectedIcon))selectedIcon=safeIconKey(editingItem?.icon)||defaultIcon(manageDir);
-  showSheet('分类管理',`<div class="category-manager-header"><div class="segmented" id="category-manage-tabs" role="tablist" aria-label="收支分类方向"><button type="button" data-manage-dir="expense" class="${manageDir==='expense'?'active':''}" aria-pressed="${manageDir==='expense'}">支出分类 (${expCount})</button><button type="button" data-manage-dir="income" class="${manageDir==='income'?'active':''}" aria-pressed="${manageDir==='income'}">收入分类 (${incCount})</button></div>${editingItem?'<button type="button" id="reset-category-form" class="category-add-btn">+ 新增分类</button>':''}</div><div class="category-editor-card" id="category-editor-card"><h4 id="category-editor-title">${editingItem?(editingItem.isFallback?`修改「${escapeText(editingItem.name)}」图标`:`编辑${dirLabel}分类 · ${escapeText(editingItem.name)}`):`新增${dirLabel}分类`}</h4><label class="sheet-copy" for="new-category-name">${editingItem?.isFallback?'系统兜底分类「其他」不可改名或删除，可调整下方图标与排序':`新增或修改${dirLabel}分类名称（最多 40 字）`}</label><input class="month-input" id="new-category-name" maxlength="40" value="${escapeText(editingItem?editingItem.name:'')}" placeholder="分类名称，例如：咖啡、数码、兼职" ${editingItem?.isFallback?'disabled readonly aria-disabled="true"':''}/><div class="category-icon-picker" id="category-icon-picker" role="radiogroup" aria-label="选择分类图标">${icons.map(opt=>`<button type="button" class="category-icon-option" data-icon-key="${escapeText(opt.key)}" aria-pressed="${opt.key===selectedIcon}" title="${escapeText(opt.label)}"><i class="fa-solid fa-${escapeText(opt.key)}" aria-hidden="true"></i><span>${escapeText(opt.label)}</span></button>`).join('')}</div><p class="category-field-error" id="category-form-error" role="alert" hidden></p><div class="sheet-actions">${editingItem?'<button type="button" id="cancel-category-edit">取消编辑</button>':'<button type="button" onclick="closeSheet()">关闭</button>'}<button type="button" class="primary" id="save-category">${editingItem?'保存修改':'添加分类'}</button></div></div><p class="sheet-copy">上下移动可调整手动记账、账单编辑与筛选统计的顺序；已关联账单的分类受保护，需先处理关联账单后才能删除。</p><div class="category-manage-list" id="category-manage-list">${items.map((item,idx)=>{const meta=item.isFallback?`系统兜底分类 · 不可删除或改名${item.referenceCount>0?` · 已关联 ${item.referenceCount} 笔账单`:''}`:!item.canDelete||item.referenceCount>0?`已关联 ${item.referenceCount} 笔账单 · 暂不可删除（请先处理关联账单）`:'未关联账单 · 可改名、排序或删除';return `<div class="category-manage-row" data-category-row="${escapeText(item.id)}" data-category-name="${escapeText(item.name)}">${categoryBadge(item.name,item.direction,item.icon)}<div class="category-manage-info"><b>${escapeText(item.name)}${item.isFallback?' <small class="tag">兜底</small>':''}</b><span class="category-manage-meta">${escapeText(meta)}</span></div><div class="category-manage-actions"><button type="button" class="category-action-btn" data-move-up="${escapeText(item.id)}" aria-label="上移${escapeText(item.name)}" ${idx===0?'disabled':''}>↑</button><button type="button" class="category-action-btn" data-move-down="${escapeText(item.id)}" aria-label="下移${escapeText(item.name)}" ${idx===items.length-1?'disabled':''}>↓</button><button type="button" class="category-action-btn" data-edit-category="${escapeText(item.id)}" aria-label="${item.isFallback?'修改'+escapeText(item.name)+'图标':'编辑'+escapeText(item.name)}">${item.isFallback?'图标':'编辑'}</button>${item.canDelete&&!item.isFallback?`<button type="button" class="category-action-btn danger-btn" data-delete-category="${escapeText(item.id)}" data-remove-category="${escapeText(item.name)}" aria-label="删除${escapeText(item.name)}">删除</button>`:''}</div></div>`}).join('')}</div>`);
+  showSheet('分类管理',`<div class="category-manager-header"><div class="segmented" id="category-manage-tabs" role="tablist" aria-label="收支分类方向"><button type="button" data-manage-dir="expense" class="${manageDir==='expense'?'active':''}" aria-pressed="${manageDir==='expense'}">支出分类 (${expCount})</button><button type="button" data-manage-dir="income" class="${manageDir==='income'?'active':''}" aria-pressed="${manageDir==='income'}">收入分类 (${incCount})</button></div>${editingItem?'<button type="button" id="reset-category-form" class="category-add-btn">+ 新增分类</button>':''}</div><div class="category-editor-card" id="category-editor-card"><h4 id="category-editor-title">${editingItem?(editingItem.isFallback?`修改「${escapeText(editingItem.name)}」图标`:`编辑${dirLabel}分类 · ${escapeText(editingItem.name)}`):`新增${dirLabel}分类`}</h4><label class="sheet-copy" for="new-category-name">${editingItem?.isFallback?'系统兜底分类「其他」不可改名或删除，可调整下方图标与排序':`新增或修改${dirLabel}分类名称（最多 40 字）`}</label><input class="month-input" id="new-category-name" maxlength="40" value="${escapeText(editingItem?editingItem.name:'')}" placeholder="分类名称，例如：咖啡、数码、兼职" ${editingItem?.isFallback?'disabled readonly aria-disabled="true"':''}/><div class="category-icon-picker" id="category-icon-picker" role="radiogroup" aria-label="选择分类图标">${icons.map(opt=>`<button type="button" class="category-icon-option" data-icon-key="${escapeText(opt.key)}" aria-pressed="${opt.key===selectedIcon}" title="${escapeText(opt.label)}"><i class="fa-solid fa-${escapeText(opt.key)}" aria-hidden="true"></i><span>${escapeText(opt.label)}</span></button>`).join('')}</div><p class="category-field-error" id="category-form-error" role="alert" hidden></p><div class="sheet-actions">${editingItem?'<button type="button" id="cancel-category-edit">取消编辑</button>':'<button type="button" onclick="closeSheet()">关闭</button>'}<button type="button" class="primary" id="save-category">${editingItem?'保存修改':'添加分类'}</button></div></div>${hasPreview?'<p class="sheet-copy">上下移动可调整手动记账、账单编辑与筛选统计的顺序；删除非兜底分类时可预览影响并指定替代分类，一次完成迁移。</p>':'<p class="sheet-copy">上下移动可调整手动记账、账单编辑与筛选统计的顺序；已关联账单的分类受保护，需先处理关联账单后才能删除。</p>'}<div class="category-manage-list" id="category-manage-list">${items.map((item,idx)=>{const meta=item.isFallback?`系统兜底分类 · 不可删除或改名${item.referenceCount>0?` · 已关联 ${item.referenceCount} 笔账单`:''}`:hasPreview?(item.referenceCount>0?`已关联 ${item.referenceCount} 笔账单 · 删除时将迁移引用`:'未关联账单 · 可改名、排序或删除'):(!item.canDelete||item.referenceCount>0?`已关联 ${item.referenceCount} 笔账单 · 暂不可删除（请先处理关联账单）`:'未关联账单 · 可改名、排序或删除');const canShowDelete=hasPreview?!item.isFallback:(item.canDelete&&!item.isFallback);return `<div class="category-manage-row" data-category-row="${escapeText(item.id)}" data-category-name="${escapeText(item.name)}">${categoryBadge(item.name,item.direction,item.icon)}<div class="category-manage-info"><b>${escapeText(item.name)}${item.isFallback?' <small class="tag">兜底</small>':''}</b><span class="category-manage-meta">${escapeText(meta)}</span></div><div class="category-manage-actions"><button type="button" class="category-action-btn" data-move-up="${escapeText(item.id)}" aria-label="上移${escapeText(item.name)}" ${idx===0?'disabled':''}>↑</button><button type="button" class="category-action-btn" data-move-down="${escapeText(item.id)}" aria-label="下移${escapeText(item.name)}" ${idx===items.length-1?'disabled':''}>↓</button><button type="button" class="category-action-btn" data-edit-category="${escapeText(item.id)}" aria-label="${item.isFallback?'修改'+escapeText(item.name)+'图标':'编辑'+escapeText(item.name)}">${item.isFallback?'图标':'编辑'}</button>${canShowDelete?`<button type="button" class="category-action-btn danger-btn" data-delete-category="${escapeText(item.id)}" data-remove-category="${escapeText(item.name)}" aria-label="删除${escapeText(item.name)}">删除</button>`:''}</div></div>`}).join('')}</div>`);
   const showError=msg=>{const el=$('category-form-error');if(el){el.textContent=msg||'';el.hidden=!msg}};
   document.querySelectorAll('[data-manage-dir]').forEach(b=>b.onclick=()=>{manageDir=b.dataset.manageDir;editingItem=null;selectedIcon=defaultIcon(manageDir);syncFromNative();renderManager()});
   if($('reset-category-form'))$('reset-category-form').onclick=()=>{editingItem=null;selectedIcon=defaultIcon(manageDir);renderManager()};
@@ -767,6 +994,11 @@ function openCategoryManager(initialDirection){
   document.querySelectorAll('[data-delete-category]').forEach(b=>b.onclick=()=>{
    const found=items.find(c=>c.id===b.dataset.deleteCategory);if(!found)return;
    if(!native){notify('请在 Android 应用中删除分类');return}
+   if(native.previewCategoryDeletion){
+    if(editingItem?.id===found.id)editingItem=null;
+    openCategoryDeletion(found,manageDir);
+    return;
+   }
    try{
     const result=JSON.parse(native.removeCategory?native.removeCategory(found.id):native.deleteCategory(found.name,manageDir));
     if(!result.ok){if(result.code==='CATEGORY_REFERENCED'){syncFromNative();renderManager()}showError(result.error||'删除失败');notify(result.error||'删除失败');return}
