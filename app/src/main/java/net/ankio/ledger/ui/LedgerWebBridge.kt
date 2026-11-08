@@ -21,6 +21,8 @@ import net.ankio.ledger.data.LedgerAccount
 import net.ankio.ledger.data.AccountType
 import net.ankio.ledger.data.AccountBanks
 import net.ankio.ledger.data.CustomCategory
+import net.ankio.ledger.data.CategoryDeletionPreview
+import net.ankio.ledger.data.CategoryPreviewStale
 import net.ankio.ledger.data.ClassificationCodec
 import net.ankio.ledger.data.ClassificationException
 import net.ankio.ledger.data.CategoryDirectory
@@ -655,6 +657,33 @@ class LedgerWebBridge(private val activity: MainActivity) {
             ?: throw CategoryException("CATEGORY_INVALID", "分类顺序无效") }
         synchronized(app.store) { app.store.reorderCategories(categoryDirection(direction), ids); app.changed(); directoryResponse().toString() }
     } catch (error: Exception) { categoryFailure(error) }
+
+    private fun deletionPreviewJson(value:CategoryDeletionPreview)=JSONObject().put("category",categoryJson(value.category))
+        .put("billCount",value.billCount).put("ruleCount",value.ruleCount).put("queuedConfigurationCount",value.queuedConfigurationCount)
+        .put("replacementCount",value.replacementCount).put("requiresReplacement",value.requiresReplacement).put("previewToken",value.previewToken)
+        .put("replacements",JSONArray().apply { value.replacements.forEach { put(categoryJson(it)) } })
+
+    @JavascriptInterface fun previewCategoryDeletion(id:String):String=try {
+        synchronized(app.store) { JSONObject().put("ok",true).put("deletionPreview",deletionPreviewJson(app.store.previewCategoryDeletion(id))).toString() }
+    } catch(error:Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun confirmCategoryDeletion(json:String):String=try {
+        if(json.length>MAX_INPUT_LENGTH)throw CategoryException("CATEGORY_INVALID","分类删除数据无效")
+        val input=JSONObject(json)
+        fun text(key:String)=((input.get(key) as? String)?.takeIf { it.length in 1..160 })
+            ?: throw CategoryException("CATEGORY_INVALID","分类删除数据无效")
+        val id=text("id");val token=text("previewToken")
+        val replacement=if(input.isNull("replacementId"))null else text("replacementId")
+        synchronized(app.store) {
+            app.store.confirmCategoryDeletion(id,replacement,token);app.changed()
+            directoryResponse().put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules())).toString()
+        }
+    } catch(error:CategoryPreviewStale) {
+        failure(error.message ?: "分类引用已变化，请核对最新影响后再确认删除","CATEGORY_PREVIEW_STALE")
+            .put("deletionPreview",deletionPreviewJson(error.preview)).toString()
+    } catch(error:CategoryException) { categoryFailure(error) }
+    catch(_:org.json.JSONException) { failure("分类删除数据无效","CATEGORY_INVALID").toString() }
+    catch(_:Exception) { failure("分类删除失败，所有更改均已回滚","CATEGORY_DELETE_FAILED").toString() }
 
     @JavascriptInterface fun removeCategory(id: String): String = try {
         synchronized(app.store) { app.store.removeCategory(id); app.changed(); directoryResponse().toString() }

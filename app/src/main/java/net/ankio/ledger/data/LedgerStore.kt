@@ -1652,10 +1652,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun classify(bill:ParsedBill,snapshot:ClassificationSnapshot,capture:Capture?=null):ParsedBill {
         val direction=bill.direction?.takeIf { it in listOf(Direction.EXPENSE,Direction.INCOME) } ?: return bill
         val decision=ClassificationEngine.classify(snapshot,ClassificationInput.from(bill,capture),bill.categoryDecision)
-        val category=CategoryDirectory.requireCategory(readableDatabase,requireNotNull(decision.categoryId),direction)
-        return bill.copy(category=category.name,categoryDecision=decision)
+        val category=CategoryDirectory.requireCategory(readableDatabase,CategoryReplacementStorage.resolve(readableDatabase,requireNotNull(decision.categoryId)),direction)
+        return bill.copy(category=category.name,categoryDecision=decision.copy(categoryId=category.id))
     }
     private fun guardClassificationReferences(db:SQLiteDatabase,id:String) {
+        if(CategoryDirectory.find(db,id)?.isFallback==true)throw CategoryException("CATEGORY_SYSTEM","系统兜底分类不能删除")
         val count=ClassificationStorage.references(db,id)
         if(count>0)throw CategoryException("CATEGORY_REFERENCED","该分类仍被分类规则或识别任务引用，请先处理后再删除",count)
     }
@@ -1680,6 +1681,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
 
     @Synchronized fun reorderCategories(direction: Direction, ids: List<String>) = categoryTransaction {
         CategoryDirectory.reorder(it, direction, ids)
+    }
+
+    @Synchronized fun previewCategoryDeletion(id:String):CategoryDeletionPreview = CategoryReplacementStorage.preview(readableDatabase,id)
+    @Synchronized fun confirmCategoryDeletion(id:String,replacementId:String?,previewToken:String):CategoryDeletionPreview = categoryTransaction {
+        CategoryReplacementStorage.delete(it,id,replacementId,previewToken)
     }
 
     @Synchronized fun removeCategory(id: String) = categoryTransaction { guardClassificationReferences(it,id); CategoryDirectory.remove(it, id) }
@@ -1900,17 +1906,23 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     private fun values(r: LedgerRecord) = ContentValues().apply {
+        val category=r.bill.direction?.takeIf { it in setOf(Direction.EXPENSE,Direction.INCOME) }?.let { direction ->
+            val originalId=r.bill.categoryDecision?.categoryId
+            val resolvedId=originalId?.let { CategoryReplacementStorage.resolve(writableDatabase,it) }
+            if(resolvedId!=null && resolvedId!=originalId)CategoryDirectory.requireCategory(writableDatabase,resolvedId,direction)
+            else CategoryDirectory.ensure(writableDatabase,direction,r.bill.category)
+        }
         put("uid", r.uid); put("source", r.capture.source.name); put("origin", r.capture.origin)
         put("raw_text", r.capture.text); put("received_at", r.capture.receivedAt)
         put("amount", r.bill.amountCents); put("direction", r.bill.direction?.name)
-        put("merchant", r.bill.merchant); put("category", r.bill.category)
-        put("category_id", CategoryDirectory.ensure(writableDatabase, r.bill.direction, r.bill.category)?.id)
+        put("merchant", r.bill.merchant); put("category", category?.name ?: r.bill.category)
+        put("category_id", category?.id)
         put("occurred_at", r.bill.occurredAt); put("transaction_id", r.bill.transactionId)
         put("reliable", if (r.bill.reliable) 1 else 0); put("time_explicit", if (r.bill.timeExplicit) 1 else 0)
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)
         put("note", r.note);put("standalone_refund",encodeStandaloneRefund(r.bill.standaloneRefund))
         put("receipt_evidence",ReceiptEvidenceCodec.encode(r.bill.receipt))
-        put("category_decision",r.bill.categoryDecision?.let { ClassificationCodec.decision(it.copy(categoryId=CategoryDirectory.ensure(writableDatabase,r.bill.direction,r.bill.category)?.id)).toString() })
+        put("category_decision",r.bill.categoryDecision?.let { ClassificationCodec.decision(it.copy(categoryId=category?.id)).toString() })
         put("transaction_identities",TransactionIdentities.encode(identities(r)))
         put("refund_provider", r.bill.refund?.provider);put("refund_original", r.bill.refund?.originalAmountCents)
         put("refund_amount", r.bill.refund?.refundedCents);put("refund_mode",r.bill.refund?.mode);put("refund_id",r.bill.refund?.refundId)
