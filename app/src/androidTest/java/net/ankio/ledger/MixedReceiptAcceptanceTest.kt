@@ -311,6 +311,8 @@ class MixedReceiptAcceptanceTest {
             .put("categoryId",saved.bill.categoryDecision?.categoryId ?: JSONObject.NULL)
             .put("categoryRuleId",saved.bill.categoryDecision?.ruleId ?: JSONObject.NULL)
             .put("walletEffects",JSONObject(saved.walletEffects)).toString(2))
+        java.io.File(directory,"$name.backup.json").writeText(LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)))
+        java.io.File(directory,"$name.backup.zip").outputStream().use { LedgerArchive.write(app.store,net.ankio.ledger.capture.ChannelSettings(app),it) }
     }
 
     @Test fun bundledPixelOcrKeepsTheRealDebitSeparateFromServicePendingBalanceAndMarketingText()=runBlocking {
@@ -333,6 +335,8 @@ class MixedReceiptAcceptanceTest {
             assertEquals("午餐",saved.bill.receipt!!.productDescription!!.value)
             assertEquals("MIXED_DEBIT",saved.bill.receipt!!.blockOrigin!!.kind)
             assertEquals(time.recognitionAt,saved.bill.occurredAt)
+            assertNotNull("IMAGE OCR route must survive the batch receipt",saved.bill.receipt!!.recognition)
+            assertEquals("OCR",saved.bill.receipt!!.recognition!!.route)
             assertEquals("cat:expense:dining",saved.bill.categoryDecision!!.categoryId)
             assertNotEquals(ruleId,saved.bill.categoryDecision!!.ruleId)
             assertEquals(mapOf(wechat.uid to -1234L),saved.walletEffects)
@@ -451,6 +455,14 @@ class MixedReceiptAcceptanceTest {
             for(unrelated in listOf("上卡","888","2020","查看订单详情"))assertFalse(unrelated,saved.capture.text.contains(unrelated))
             assertTrue(app.tasks.recognitionEvidence(task)!!.getJSONObject("phaseTimingsMs").has("save"))
             LedgerStore(app).use { assertEquals(saved,it.get(saved.id)) }
+            androidx.test.core.app.ActivityScenario.launch(net.ankio.ledger.ui.MainActivity::class.java).use { scenario ->
+                lateinit var bridge:net.ankio.ledger.ui.LedgerWebBridge
+                scenario.onActivity { bridge=net.ankio.ledger.ui.LedgerWebBridge(it) }
+                val detail=JSONObject(bridge.recordDetails(saved.id)).getJSONObject("record")
+                assertEquals("OCR",detail.getJSONObject("recognitionEvidence").getString("route"))
+                val receipt=ReceiptEvidenceCodec.decode(detail.getJSONObject("receipt"))
+                assertEquals(saved.bill.receipt,receipt);assertEquals("MIXED_DEBIT",receipt.blockOrigin!!.kind)
+            }
             val name="synthetic-image3-roundtrip-${UUID.randomUUID()}.db"
             try { LedgerStore(app,name).use { target ->
                 LedgerBackup.restore(target,LedgerBackup.decode(LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).byteInputStream()))
@@ -475,10 +487,44 @@ class MixedReceiptAcceptanceTest {
         assertNull(saved.bill.receipt!!.merchant);assertNull(saved.bill.receipt!!.transactionDescription)
         assertEquals(time.recognitionAt,saved.bill.occurredAt);assertEquals("RECOGNITION_FALLBACK",saved.bill.receipt!!.time!!.source)
         assertEquals("NESTED_BANK",saved.bill.receipt!!.blockOrigin!!.kind)
+        assertEquals("OCR",saved.bill.receipt!!.recognition!!.route)
         assertNull(saved.wallet!!.accountUid);assertTrue(saved.walletEffects.isEmpty())
         assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
         for(unrelated in listOf("2021","777","地铁","推荐","关注"))assertFalse(unrelated,saved.capture.text.contains(unrelated))
         assertArrayEquals(bytes,app.store.screenshot(saved.id))
         pixelEvidence("user-image1",task,saved,bytes)
+    }
+
+    @Test fun titlelessExecutedBalancePixelWithNoMatchingWalletStaysReviewAndRoundtripsWithoutCashEffects()=runBlocking {
+        app.store.setAppWallet(PaymentApps.WECHAT,null)
+        app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(wechat.uid))
+        app.store.deleteAccount(wechat.id);wallets.remove(wechat)
+        val before=app.store.accounts().associate { it.uid to it.amountCents }
+        val bytes=userLayoutImage(false)
+        val (task,result)=realUserLayout("user-image3-no-wallet",bytes)
+        val saved=record(result)
+        assertEquals(BatchCounts(0,0,1,0),(result as IngestResult.Batch).result.counts)
+        assertEquals(1,app.store.all().count { it.id !in baseline })
+        assertEquals(RecordState.REVIEW,saved.state);assertNull(saved.wallet!!.accountUid)
+        assertEquals("ACTUAL_ACCOUNT_REQUIRED",saved.wallet!!.reviewCode)
+        assertTrue(saved.bill.paymentMethod!!.executed);assertEquals("WECHAT_BALANCE",saved.bill.paymentMethod!!.medium)
+        assertTrue(saved.walletEffects.isEmpty());assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
+        assertEquals(50000L,app.store.getAccount(cash.id)!!.amountCents)
+        assertTrue(app.store.walletMovements(cash.uid).none { it.recordUid==saved.uid })
+        val json=LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).toByteArray()
+        val zip=java.io.ByteArrayOutputStream().use { LedgerArchive.write(app.store,net.ankio.ledger.capture.ChannelSettings(app),it);it.toByteArray() }
+        for(data in listOf(json,zip)) {
+            val name="synthetic-image3-unmatched-${UUID.randomUUID()}.db"
+            try { LedgerStore(app,name).use { target -> LedgerArchive.read(data.inputStream(),app.cacheDir).use { prepared ->
+                LedgerArchive.restore(target,prepared)
+                val restored=target.all().single { it.uid==saved.uid }
+                assertEquals(RecordState.REVIEW,restored.state);assertNull(restored.wallet!!.accountUid)
+                assertTrue(restored.bill.paymentMethod!!.executed);assertEquals(saved.bill.receipt,restored.bill.receipt)
+                assertTrue(restored.walletEffects.isEmpty());assertEquals(before,target.accounts().associate { it.uid to it.amountCents })
+                val movements=target.walletSnapshot().movements
+                assertEquals(0,LedgerArchive.restore(target,prepared));assertEquals(movements,target.walletSnapshot().movements)
+            } } } finally { app.deleteDatabase(name) }
+        }
+        pixelEvidence("user-image3-no-wallet",task,saved,bytes)
     }
 }

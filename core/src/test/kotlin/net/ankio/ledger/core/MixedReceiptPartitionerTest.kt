@@ -111,8 +111,9 @@ class MixedReceiptPartitionerTest {
             LocalOcrLine("扣费服务",100,980,300,1015),LocalOcrLine("合成地铁服务方",360,980,880,1015),
             LocalOcrLine("扣费内容",100,1040,300,1075),LocalOcrLine("午餐套餐",360,1040,880,1075),
             LocalOcrLine("查看订单详情",100,1120,600,1155))
-        for(origin in listOf("shake:com.tencent.mm","image")) {
-            val candidate=TransactionPageParser.parse((upper+lower).reversed(),1080,1800,time,origin=origin).single()
+        for(origin in listOf("shake:com.tencent.mm","image")) for(contentLabel in listOf("扣费内容","扣费內容")) {
+            val observed=lower.map { if(it.text=="扣费内容")it.copy(text=contentLabel) else it }
+            val candidate=TransactionPageParser.parse((upper+observed).reversed(),1080,1800,time,origin=origin).single()
             val bill=candidate.bill;val receipt=bill.receipt!!
             assertEquals(origin,1234L,bill.amountCents);assertEquals("合成下卡咖啡",bill.merchant)
             assertEquals("合成地铁服务方",receipt.serviceProvider!!.value)

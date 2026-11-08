@@ -87,7 +87,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
             val recognitionTime = { frozenTime ?: (taskId?.let { app.tasks.beginRecognition(it,recognitionClock) }
                 ?: recognitionClock()).also { frozenTime=it } }
             val extracted = recognize(guard,recognitionTime)
-            val provenance=taskId?.let(app.tasks::recognitionEvidence)?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::decode)?.takeIf { it.route=="NODE" || it.snapshot!=null }
+            val provenance=taskId?.let(app.tasks::recognitionEvidence)?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::decode)
             val recognized=if(provenance==null)extracted else extracted.copy(candidates=extracted.candidates.map { candidate ->
                 candidate.copy(bill=candidate.bill.copy(receipt=(candidate.bill.receipt ?: net.ankio.ledger.core.ReceiptEvidence()).copy(recognition=provenance)))
             })

@@ -44,5 +44,7 @@ class ExecutedPaymentWalletTest {
         val evidence=PaymentMethodParser.parse(listOf(LocalOcrLine("通过零钱扣款")),Direction.EXPENSE,"image")!!
         val previous=WalletResolution("cash","IMPORT")
         assertEquals(previous,WalletResolver.resolve(listOf(WalletCandidate("cash",kind="cash")),evidence=evidence,existing=previous))
+        assertEquals(previous,WalletResolver.resolve(listOf(WalletCandidate("cash",kind="cash")),
+            evidence=PaymentMethodEvidence("UNKNOWN","DEBIT",ambiguous=true,reason="ACTUAL_ACCOUNT_REQUIRED"),existing=previous))
     }
 }
