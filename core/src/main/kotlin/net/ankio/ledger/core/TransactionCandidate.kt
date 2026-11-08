@@ -11,4 +11,4 @@ data class CandidateId(val value: String) {
 }
 
 /** One extracted transaction; the existing ParsedBill continues to own its financial evidence. */
-data class TransactionCandidate(val id: CandidateId, val bill: ParsedBill)
+data class TransactionCandidate(val id: CandidateId, val bill: ParsedBill, val rawText:String?=null)
