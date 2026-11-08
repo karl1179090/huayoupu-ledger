@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TransferEvidenceParserTest {
+    @Test fun transferKeepsBusinessEvidenceWithoutPresentingItsSyntheticTitleAsAMerchant() {
+        val result = bill(topup("手续费 ¥0.00", "交易说明：自用充值", "服务商：合成支付"))!!
+        assertEquals(Direction.TRANSFER, result.direction)
+        assertTrue(result.reliable)
+        val receipt = requireNotNull(result.receipt)
+        assertNull(receipt.merchant)
+        assertEquals("自用充值", receipt.transactionDescription!!.value)
+        assertEquals("合成支付", receipt.serviceProvider!!.value)
+        assertEquals(PaymentApps.WECHAT, receipt.sourceApp!!.value)
+    }
     private val now = 1_793_937_600_000L
     private fun topup(vararg rest: String) = listOf("充值成功", "充值金额 ¥100.00", "付款方式 招商银行储蓄卡（0007）", "到账账户 微信零钱") + rest
     private fun parsed(text: List<String>, origin: String = PaymentApps.WECHAT) = TransferEvidenceParser.parse(text.map(::LocalOcrLine), origin)!!

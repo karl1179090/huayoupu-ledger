@@ -56,7 +56,7 @@ class LocalScreenshotValidationTest {
             InstrumentationRegistry.getArguments().getString("expectedCents")?.toLong()?.let { expected ->
                 assertEquals("Actual price from the supplied receipt",expected,record.bill.amountCents)
             }
-            assertTrue(record.bill.merchant.isNotBlank())
+            if(record.bill.merchant.isBlank())assertNull(record.bill.receipt!!.merchant)
             InstrumentationRegistry.getArguments().getString("expectedMerchant")?.let { expected ->
                 assertEquals("Merchant from the supplied receipt",expected,record.bill.merchant)
             }

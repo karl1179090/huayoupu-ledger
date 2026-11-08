@@ -221,7 +221,7 @@ class LocalRecognitionClientTest {
             val record=(result as IngestResult.Saved).record
             assertEquals(RecordState.POSTED,record.state)
             assertEquals(2850L,record.bill.amountCents)
-            assertTrue(record.bill.merchant.isNotBlank());assertFalse(record.bill.timeExplicit)
+            assertEquals("",record.bill.merchant);assertNull(record.bill.receipt!!.merchant);assertFalse(record.bill.timeExplicit)
             assertTrue(record.bill.occurredAt in started..System.currentTimeMillis())
         } finally {
             app.tasks.delete(task);app.store.all().filter { it.id !in before }.forEach { app.store.delete(it.id) }

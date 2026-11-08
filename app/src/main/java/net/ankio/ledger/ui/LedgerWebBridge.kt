@@ -26,6 +26,7 @@ import net.ankio.ledger.data.CategoryException
 import net.ankio.ledger.data.LedgerCategory
 import net.ankio.ledger.data.LedgerReadView
 import net.ankio.ledger.data.WalletReadModel
+import net.ankio.ledger.data.ReceiptEvidenceCodec
 import net.ankio.ledger.data.WalletException
 import net.ankio.ledger.data.paymentProvider
 import net.ankio.ledger.ledger
@@ -128,6 +129,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("id", record.id)
                 put("uid", record.uid)
                 put("merchant", record.bill.merchant)
+                put("receipt", ReceiptEvidenceCodec.json(record.bill.receipt))
                 put("category", record.bill.category)
                 app.store.categoryFor(record).let { category ->
                     put("categoryId", category?.id ?: JSONObject.NULL); put("categoryIcon", category?.icon ?: "tag")
@@ -228,6 +230,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("refundCandidateCount",if((record.bill.refund!=null||record.bill.standaloneRefund!=null)&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
             .put("categoryId",app.store.categoryFor(record)?.id ?: JSONObject.NULL).put("categoryIcon",app.store.categoryFor(record)?.icon ?: "tag")
+            .put("receipt",ReceiptEvidenceCodec.json(record.bill.receipt))
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
