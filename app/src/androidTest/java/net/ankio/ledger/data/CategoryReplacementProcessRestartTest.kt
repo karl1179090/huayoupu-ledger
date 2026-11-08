@@ -31,7 +31,7 @@ class CategoryReplacementProcessRestartTest {
         val original=app.store.saveCategory(name="合成恢复原用途${UUID.randomUUID().toString().take(8)}",direction=Direction.EXPENSE)
         val middle=app.store.saveCategory(name="合成恢复中间${UUID.randomUUID().toString().take(8)}",direction=Direction.EXPENSE)
         val final=app.store.saveCategory(name="合成恢复替代${UUID.randomUUID().toString().take(8)}",direction=Direction.EXPENSE)
-        val rule=app.store.saveClassificationRule(ClassificationRule("","合成替代恢复规则",true,Direction.EXPENSE,original.id,0,listOf(ClassificationCondition(value=merchant))))
+        val rule=app.store.saveClassificationRule(ClassificationRule("","合成替代恢复规则",true,Direction.EXPENSE,original.id,0,listOf(ClassificationCondition(value=merchant),ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.NOT_CONTAINS,"打车")),source="IMAGE:wechat"))
         val task=app.tasks.create(Source.IMAGE,"image");assertTrue(app.tasks.queued(task,"synthetic-restart".toByteArray()))
         val version=app.tasks.classificationSnapshot(task)!!.version
         app.store.confirmCategoryDeletion(original.id,middle.id,app.store.previewCategoryDeletion(original.id).previewToken)
@@ -39,7 +39,8 @@ class CategoryReplacementProcessRestartTest {
         assertEquals(1L,second.queuedConfigurationCount)
         app.store.confirmCategoryDeletion(middle.id,final.id,second.previewToken)
         // Future mutable rules cannot affect the still-frozen queued task.
-        app.store.saveClassificationRule(rule.copy(enabled=false,categoryId="cat:expense:shopping"))
+        app.store.saveClassificationRule(rule.copy(enabled=false,categoryId="cat:expense:shopping",matchMode=ClassificationMatchMode.ANY,source="IMAGE:alipay",
+            conditions=listOf(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.EQUALS,"未来条件"))))
         assertTrue(state.edit().putLong("task",task).putString("rule",rule.id).putString("merchant",merchant).putString("version",version)
             .putString("original",original.id).putString("target",final.id).putString("targetName",final.name).putString("wallet",wallet.uid).putString("oldDefault",old).putInt("pid",Process.myPid()).commit())
     }
@@ -51,12 +52,17 @@ class CategoryReplacementProcessRestartTest {
         val key=app.tasks.operationKey(task)!!
         try {
             assertEquals("QUEUED",app.tasks.status(task))
-            val backend=RecognitionBackend { image,prepared,_,_,_,_ -> prepared(image);RecognitionResult("合成替代恢复支付",ParsedBill(700,Direction.EXPENSE,merchant,"其他",1_798_776_000_000,"SYNTHETIC-REPLACEMENT-$task",true,"",true),screenshot=image) }
+            val backend=RecognitionBackend { image,prepared,_,_,_,_ -> prepared(image);RecognitionResult("合成替代恢复支付",ParsedBill(700,Direction.EXPENSE,merchant,"其他",1_798_776_000_000,"SYNTHETIC-REPLACEMENT-$task",true,"",true,
+                receipt=ReceiptEvidence(productDescription=ReceiptField("合成午餐","商品说明：合成午餐"),receiptIssuer=ReceiptField("微信支付","支付机构：微信支付"))),screenshot=image) }
             val result=CaptureProcessor(app,OcrClient(app,backend)).processPrepared(app.tasks.image(task)!!,Source.IMAGE,"image",task) { true } as IngestResult.Saved
             assertEquals(state.getString("targetName",null),result.record.bill.category)
             assertEquals(state.getString("target",null),result.record.bill.categoryDecision!!.categoryId)
             assertEquals(CategorySource.CUSTOM_RULE,result.record.bill.categoryDecision!!.source)
             assertEquals(state.getString("original",null),app.tasks.classificationSnapshot(task)!!.customRules.single { it.id==state.getString("rule",null) }.categoryId)
+            val frozen=app.tasks.classificationSnapshot(task)!!.customRules.single { it.id==state.getString("rule",null) }
+            assertEquals(frozen,result.record.bill.categoryDecision!!.rule)
+            assertEquals("IMAGE:wechat",frozen.source);assertEquals(ClassificationMatchMode.ALL,frozen.matchMode)
+            assertEquals(2,frozen.conditions.size)
             assertEquals(state.getString("version",null),result.record.bill.categoryDecision!!.ruleVersion)
             assertEquals(5300L,app.store.getAccount(wallet.id)!!.amountCents)
             assertEquals(IngestResult.DuplicateSkipped,CaptureProcessor(app,OcrClient(app,backend)).processPrepared("synthetic-retry".toByteArray(),Source.IMAGE,"image",task) { true })

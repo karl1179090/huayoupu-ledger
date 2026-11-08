@@ -26,12 +26,19 @@ class CategoryReplacementTest {
                 first=source.saveCategory(name="合成原用途",direction=Direction.EXPENSE)
                 val middle=source.saveCategory(name="合成中间用途",direction=Direction.EXPENSE)
                 final=source.saveCategory(name="合成最终用途",direction=Direction.EXPENSE)
-                source.saveClassificationRule(rule(first.id));frozen=source.holdClassificationSnapshot("synthetic-chain")
+                val originalRule=source.saveClassificationRule(rule(first.id));frozen=source.holdClassificationSnapshot("synthetic-chain")
+                val record=(source.ingest(Capture(Source.IMAGE,"image","合成历史规则凭证"),source.classify(bill(),frozen)) as IngestResult.Saved).record
+                assertEquals(originalRule,record.bill.categoryDecision!!.rule)
                 oldBackup=LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream())
                 delete(source,first.id,middle.id);delete(source,middle.id,final.id)
                 assertEquals(final.id,source.classify(bill(),frozen).categoryDecision!!.categoryId)
                 assertEquals(frozen,source.classificationBackup().snapshots.single().snapshot)
                 assertEquals(2,source.classificationBackup().replacements.size)
+                val migrated=source.get(record.id)!!
+                assertEquals(final.id,migrated.bill.categoryDecision!!.categoryId)
+                assertEquals(originalRule,migrated.bill.categoryDecision!!.rule)
+                assertEquals(record.bill.categoryDecision!!.explanation,migrated.bill.categoryDecision!!.explanation)
+                assertEquals(record.bill.categoryDecision!!.ruleVersion,migrated.bill.categoryDecision!!.ruleVersion)
             }
             LedgerStore(app,sourceName).use { source -> LedgerStore(app,targetName).use { target ->
                 assertEquals(final.name,source.classify(bill(),frozen).category)
@@ -41,6 +48,10 @@ class CategoryReplacementTest {
                 assertEquals(localFinal.id,target.classify(bill(),frozen).categoryDecision!!.categoryId)
                 assertEquals(frozen,target.classificationBackup().snapshots.single().snapshot)
                 assertEquals(2,target.classificationBackup().replacements.size)
+                val restored=target.all().single()
+                assertEquals(localFinal.id,restored.bill.categoryDecision!!.categoryId)
+                assertEquals(first.id,restored.bill.categoryDecision!!.rule!!.categoryId)
+                assertEquals(frozen.customRules.single(),restored.bill.categoryDecision!!.rule)
                 // A same-name fresh category cannot steal an old stable ID's explicit replacement.
                 val recreated=target.saveCategory(name=first.name,direction=Direction.EXPENSE)
                 assertNotEquals(first.id,recreated.id)
@@ -142,6 +153,32 @@ class CategoryReplacementTest {
             val oversized=(0 until 2100).map { CategoryReplacement("synthetic:capacity:$it","合".repeat(1024),Direction.EXPENSE,"cat:expense:other") }
             assertNotNull(runCatching { LedgerBackup.restore(target,backup.copy(classification=backup.classification!!.copy(replacements=oversized))) }.exceptionOrNull())
             assertEquals(initial,target.classificationBackup());assertEquals(categories,target.categoryDirectory());assertTrue(target.all().isEmpty())
+        } } } finally { app.deleteDatabase(sourceName);app.deleteDatabase(targetName) }
+    }
+
+    @Test fun builtinReplacementPreservesHistoricalDefinitionEnableStateAndCopiedConditions() {
+        val sourceName="replace-builtin-source-${UUID.randomUUID()}.db";val targetName="replace-builtin-target-${UUID.randomUUID()}.db"
+        try { LedgerStore(app,sourceName).use { source -> LedgerStore(app,targetName).use { target ->
+            val original=source.classificationRules().builtinRules.single { it.conditions.single().value=="咖啡" }
+            val frozen=source.holdClassificationSnapshot("synthetic-builtin-replacement")
+            val replacement=source.saveCategory(name="合成内置替代",direction=Direction.EXPENSE)
+            source.setBuiltinClassificationRuleEnabled(original.id,false)
+            val preview=source.previewCategoryDeletion("cat:expense:dining")
+            assertTrue(preview.ruleCount>0);assertEquals(1L,preview.queuedConfigurationCount)
+            source.confirmCategoryDeletion("cat:expense:dining",replacement.id,preview.previewToken)
+            val current=source.classificationRules().builtinRules.single { it.id==original.id }
+            assertEquals(original.copy(enabled=false,categoryId=replacement.id),current)
+            val copied=source.copyBuiltinClassificationRule(original.id)
+            assertEquals(replacement.id,copied.categoryId);assertEquals(original.conditions,copied.conditions)
+            assertTrue(copied.enabled);assertTrue(copied.id.isEmpty())
+            val receipt=bill().copy(merchant="合成咖啡")
+            val decision=source.classify(receipt,frozen).categoryDecision!!
+            assertEquals(CategorySource.BUILTIN_RULE,decision.source);assertEquals(replacement.id,decision.categoryId);assertEquals(original,decision.rule)
+            assertEquals(CategorySource.FALLBACK,source.classify(receipt,source.classificationRules()).categoryDecision!!.source)
+            assertEquals(frozen,source.classificationBackup().snapshots.single().snapshot)
+            LedgerBackup.restore(target,LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream()))
+            assertEquals(decision,target.classify(receipt,frozen).categoryDecision)
+            assertEquals(current,target.classificationRules().builtinRules.single { it.id==original.id })
         } } } finally { app.deleteDatabase(sourceName);app.deleteDatabase(targetName) }
     }
 
