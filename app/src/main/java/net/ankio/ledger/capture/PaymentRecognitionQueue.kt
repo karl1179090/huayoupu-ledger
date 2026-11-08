@@ -84,7 +84,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         app.changed();resume();return true
     }
     private fun stoppedMessage(id:Long,fallback:String):String = app.tasks.operationKey(id)?.let(app.store::recognitionBatch)
-        ?.let { it.message+" · 未完成项已停止" } ?: fallback
+        ?.stoppedMessage(fallback) ?: fallback
 
     /** A model response and an old duplicate message are not proof of a live bill. */
     internal fun completedMessage(id:Long,result:IngestResult):String = when(result) {
@@ -132,21 +132,21 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
     @Synchronized fun cancelAutomatic(pkg:String?=null) {
         jobs.values.filter { it.automatic && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
         app.tasks.pendingQueued().filter { (_,origin)->origin.startsWith("payment_auto:") && (pkg==null || origin=="payment_auto:$pkg") }
-            .forEach { app.tasks.update(it.first,"CANCELLED","自动识别已关闭，未新增账单") }
+            .forEach { app.tasks.update(it.first,"CANCELLED",stoppedMessage(it.first,"自动识别已关闭，未新增账单")) }
     }
     @Synchronized fun cancelShake(pkg:String?=null) {
         jobs.values.filter { !it.automatic && !it.shortcut && !it.imageImport && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
-        app.tasks.pendingShake(pkg).forEach { app.tasks.update(it,"CANCELLED","摇一摇授权已关闭，未新增账单") }
+        app.tasks.pendingShake(pkg).forEach { app.tasks.update(it,"CANCELLED",stoppedMessage(it,"摇一摇授权已关闭，未新增账单")) }
     }
     @Synchronized fun cancelShortcut(pkg:String?=null) {
         jobs.values.filter { it.shortcut && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
-        app.tasks.pendingShortcut(pkg).forEach { app.tasks.update(it,"CANCELLED","快捷方式识别授权已关闭，未新增账单") }
+        app.tasks.pendingShortcut(pkg).forEach { app.tasks.update(it,"CANCELLED",stoppedMessage(it,"快捷方式识别授权已关闭，未新增账单")) }
     }
     @Synchronized fun cancelAll() {
         cancelAutomatic();cancelShake();cancelShortcut()
         jobs.values.filter { it.imageImport }.forEach { it.job.cancel() }
         app.tasks.pendingQueued().filter { app.tasks.isImageImport(it.first) }
-            .forEach { app.tasks.update(it.first,"CANCELLED","识别已停止，可以重新导入截图") }
+            .forEach { app.tasks.update(it.first,"CANCELLED",stoppedMessage(it.first,"识别已停止，可以重新导入截图")) }
     }
     companion object { const val MAX_PENDING=8 }
 }

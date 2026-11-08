@@ -15,6 +15,18 @@ data class RecognitionBatchResult(val operationUID:String,val items:List<BatchIt
         items.count { it.status=="REVIEW" },items.count { it.status=="FAILED" })
     val message get()="新增 ${counts.added} · 跳过 ${counts.skipped} · 待确认 ${counts.review} · 失败 ${counts.failed}"
     val taskStatus get()=when { !complete->"FAILED";counts.review>0->"REVIEW";counts.added>0->"SUCCEEDED";else->"SKIPPED" }
+    /** Cancellation cannot erase already saved POSTED/REVIEW records or their frozen outcomes. */
+    fun stoppedMessage(fallback:String):String {
+        if(items.none { it.recordUID!=null })return fallback
+        val explanation=when {
+            fallback.startsWith("摇一摇授权已关闭")->"摇一摇授权已关闭，已保存的账单已保留"
+            fallback.startsWith("快捷方式识别授权已关闭")->"快捷方式识别授权已关闭，已保存的账单已保留"
+            fallback.startsWith("识别授权已关闭")->"识别授权已关闭，已保存的账单已保留"
+            fallback.startsWith("自动识别已关闭")->"自动识别已关闭，已保存的账单已保留"
+            else->"已停止后续识别，已保存的账单已保留"
+        }
+        return "$message · $explanation"
+    }
     fun json()=JSONObject().put("operationUID",operationUID).put("complete",complete)
         .put("counts",JSONObject().put("added",counts.added).put("skipped",counts.skipped).put("review",counts.review).put("failed",counts.failed))
         .put("items",JSONArray(items.map { item -> JSONObject().put("candidateId",item.candidateId.value)
