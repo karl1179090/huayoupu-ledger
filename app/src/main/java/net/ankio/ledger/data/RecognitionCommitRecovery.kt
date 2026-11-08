@@ -2,12 +2,13 @@ package net.ankio.ledger.data
 
 import net.ankio.ledger.core.Money
 import net.ankio.ledger.core.RecordState
+import net.ankio.ledger.core.CandidateId
 
 /** Rebuild task feedback from ledger.db after a crash between the two database commits. */
 object RecognitionCommitRecovery {
     fun recover(tasks:RecognitionTasks,ledger:LedgerStore,taskId:Long):Boolean {
         val operation=tasks.operationKey(taskId) ?: return false
-        val committed=ledger.committedCapture(operation)
+        val committed=ledger.committedCandidate(operation,CandidateId.SINGLE)
             ?: tasks.paymentIdentity(taskId)?.let(ledger::committedPaymentEvent) ?: return false
         val record=committed.record
         val conflict=record?.state==RecordState.POSTED && record.wallet?.reviewCode?.startsWith("TRANSFER_")==true
