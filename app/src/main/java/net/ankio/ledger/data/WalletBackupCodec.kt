@@ -144,10 +144,16 @@ internal object WalletBackupCodec {
         snapshot.links.forEach { link->
             val record=byRecord.getValue(link.recordUid);val details=transfers[link.recordUid];reference(link.accountUid)
             require(link.revision>=0 && link.selectionSource in sources+null && link.reviewCode in reviews+null)
-            require(link.accountUid!=null || link.selectionSource in setOf(null,"IMPORT") || link.eligibility!=WalletEligibility.ACTIVE && link.accountReference!=null)
+            val payment=link.paymentEvidence?.let { evidence(JSONObject(it)) }
+            val pendingPaymentAccount=record.state==RecordState.REVIEW && link.eligibility==WalletEligibility.ACTIVE &&
+                link.selectionSource=="PAYMENT_METHOD" && !link.manualLocked && snapshot.effects[record.uid].orEmpty().isEmpty() &&
+                (payment?.medium=="BANK_CARD" && record.bill.receipt?.bank!=null &&
+                    link.reviewCode in setOf("BANK_DIRECTION_REQUIRED","PAYMENT_METHOD_UNMATCHED","PAYMENT_METHOD_AMBIGUOUS","PAYMENT_EVIDENCE_CONFLICT") ||
+                    payment?.medium=="UNKNOWN" && payment.ambiguous && payment.reason=="ACTUAL_ACCOUNT_REQUIRED" && link.reviewCode=="ACTUAL_ACCOUNT_REQUIRED")
+            require(link.accountUid!=null || link.selectionSource in setOf(null,"IMPORT") ||
+                link.eligibility!=WalletEligibility.ACTIVE && link.accountReference!=null || pendingPaymentAccount)
             require((link.selectionSource=="MANUAL")==link.manualLocked)
             link.accountReference?.let { BackupValues.reference(JSONObject(it)) }
-            val payment=link.paymentEvidence?.let { evidence(JSONObject(it)) }
             require(record.bill.paymentMethod==payment) { "付款方式与钱包证据不一致" }
             if(link.evidenceFingerprint!=null)require(payment!=null && link.evidenceFingerprint==WalletResolver.fingerprint(payment))
             val isTransfer=record.bill.direction==Direction.TRANSFER
