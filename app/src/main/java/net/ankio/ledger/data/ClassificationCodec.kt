@@ -11,8 +11,14 @@ data class ClassificationBackup(val configuration: ClassificationSnapshot, val s
 
 /** One bounded wire format for durable task snapshots, bridge data and backups. */
 object ClassificationCodec {
-    private const val MAX_SNAPSHOT_LENGTH = 2_000_000
+    // SQLite text occupies UTF-8 bytes in Android's 2 MiB CursorWindow. Leave room for
+    // the other selected columns and row metadata; never grow the window to fit data.
+    private const val MAX_PAYLOAD_BYTES = 2_000_000
     private const val MAX_RULES = 2_000
+    internal fun requirePayloadFits(json:String) {
+        if(json.toByteArray(Charsets.UTF_8).size>MAX_PAYLOAD_BYTES)
+            throw ClassificationException("RULE_INVALID","分类规则配置过大，请减少规则或条件后重试")
+    }
     fun rule(rule: ClassificationRule): JSONObject = JSONObject().put("id", rule.id).put("name", rule.name)
         .put("enabled", rule.enabled).put("direction", rule.direction.name).put("categoryId", rule.categoryId)
         .put("order", rule.order).put("matchMode", rule.matchMode.name).put("source", rule.source ?: JSONObject.NULL)
@@ -38,9 +44,13 @@ object ClassificationCodec {
         return JSONObject().put("formatVersion", 1).put("version", value.version)
             .put("customRules", JSONArray().apply { value.customRules.forEach { put(rule(it)) } })
             .put("builtinRules", JSONArray().apply { value.builtinRules.forEach { put(rule(it)) } }).also {
-                if(it.toString().length>MAX_SNAPSHOT_LENGTH)throw ClassificationException("RULE_INVALID","分类规则配置过大，请减少规则或条件后重试")
+                requirePayloadFits(it.toString())
             }
     }
+
+    /** Replacement history shares the configuration row and must fit together with rules. */
+    internal fun configuration(value:ClassificationSnapshot,replacements:List<CategoryReplacement>):JSONObject =
+        snapshot(value).put("categoryReplacements",CategoryReplacementStorage.encode(replacements)).also { requirePayloadFits(it.toString()) }
 
     fun readRule(input: JSONObject): ClassificationRule {
         fun text(key: String, max: Int): String = (input.get(key) as? String)?.takeIf { it.length <= max }
@@ -81,11 +91,11 @@ object ClassificationCodec {
     }
 
     fun readSnapshot(json: String): ClassificationSnapshot {
-        require(json.length<=MAX_SNAPSHOT_LENGTH) { "分类快照过大" }
+        requirePayloadFits(json)
         return readSnapshot(JSONObject(json))
     }
     fun readSnapshot(input: JSONObject): ClassificationSnapshot {
-        require(input.toString().length<=MAX_SNAPSHOT_LENGTH) { "分类快照过大" }
+        requirePayloadFits(input.toString())
         require(input.getInt("formatVersion")==1) { "分类快照版本不支持" }
         val version=input.getString("version")
         fun rules(key:String):List<ClassificationRule> {
@@ -109,10 +119,13 @@ object ClassificationCodec {
             it.get("manual") as? Boolean ?: error("分类人工状态无效"),optional("ruleId"),optional("ruleVersion"),explanation,if(it.isNull("rule"))null else readRule(it.getJSONObject("rule")).also { value -> validateRule(value,true) })
     }
 
-    fun backup(value: ClassificationBackup): JSONObject = JSONObject().put("configuration",snapshot(value.configuration))
-        .put("categoryReplacements",CategoryReplacementStorage.encode(value.replacements))
-        .put("snapshots",JSONArray().apply { value.snapshots.forEach { put(JSONObject().put("operationKey",it.operationKey)
-            .put("active",it.active).put("taskDatabase",it.taskDatabase ?: JSONObject.NULL).put("snapshot",snapshot(it.snapshot))) } })
+    fun backup(value: ClassificationBackup): JSONObject {
+        configuration(value.configuration,value.replacements)
+        return JSONObject().put("configuration",snapshot(value.configuration))
+            .put("categoryReplacements",CategoryReplacementStorage.encode(value.replacements))
+            .put("snapshots",JSONArray().apply { value.snapshots.forEach { put(JSONObject().put("operationKey",it.operationKey)
+                .put("active",it.active).put("taskDatabase",it.taskDatabase ?: JSONObject.NULL).put("snapshot",snapshot(it.snapshot))) } })
+    }
 
     fun readBackup(input:JSONObject):ClassificationBackup {
         val snapshots=input.getJSONArray("snapshots");require(snapshots.length()<=100_000)
@@ -121,6 +134,8 @@ object ClassificationCodec {
             val entry=snapshots.getJSONObject(index);val key=entry.getString("operationKey")
             require(key.length in 1..200 && keys.add(key)) { "分类快照任务标识无效" }
             StoredClassificationSnapshot(key,readSnapshot(entry.getJSONObject("snapshot")),entry.get("active") as? Boolean ?: error("快照状态无效"),if(entry.isNull("taskDatabase"))null else entry.getString("taskDatabase").also { require(it.length in 1..200) })
-        },CategoryReplacementStorage.decode(input.optJSONArray("categoryReplacements")))
+        },CategoryReplacementStorage.decode(input.optJSONArray("categoryReplacements"))).also {
+            configuration(it.configuration,it.replacements)
+        }
     }
 }

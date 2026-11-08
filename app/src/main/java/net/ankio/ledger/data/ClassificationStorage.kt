@@ -24,11 +24,12 @@ internal object ClassificationStorage {
         check(it.moveToFirst());ClassificationCodec.readSnapshot(it.getString(0))
     }
     internal fun writePayload(db:SQLiteDatabase,payload:org.json.JSONObject) {
-        ClassificationCodec.readSnapshot(payload.toString())
-        db.update("classification_configuration",ContentValues().apply { put("payload",payload.toString()) },"singleton=1",null)
+        val serialized=payload.toString()
+        ClassificationCodec.readSnapshot(serialized)
+        db.update("classification_configuration",ContentValues().apply { put("payload",serialized) },"singleton=1",null)
     }
-    private fun payload(db:SQLiteDatabase,snapshot:ClassificationSnapshot)=ClassificationCodec.snapshot(snapshot)
-        .put("categoryReplacements",CategoryReplacementStorage.encode(CategoryReplacementStorage.entries(db)))
+    private fun payload(db:SQLiteDatabase,snapshot:ClassificationSnapshot)=
+        ClassificationCodec.configuration(snapshot,CategoryReplacementStorage.entries(db))
     private fun write(db:SQLiteDatabase,snapshot:ClassificationSnapshot) { writePayload(db,payload(db,snapshot)) }
     private fun changed(db:SQLiteDatabase,snapshot:ClassificationSnapshot) = write(db,snapshot.copy(version=UUID.randomUUID().toString()))
     private fun target(db:SQLiteDatabase,rule:ClassificationRule) {
@@ -118,6 +119,7 @@ internal object ClassificationStorage {
 
     fun validateBackup(backup:ClassificationBackup,categories:List<LedgerCategory>) {
         CategoryReplacementStorage.validate(backup.replacements,categories)
+        ClassificationCodec.configuration(backup.configuration,backup.replacements)
         val targets=categories.associateBy { it.id }
         fun validate(snapshot:ClassificationSnapshot,requireTargets:Boolean) {
             ClassificationCodec.snapshot(snapshot)

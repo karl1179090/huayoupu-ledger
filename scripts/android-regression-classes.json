@@ -85,6 +85,7 @@
     "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
     "net.ankio.ledger.data.CompoundClassificationTest",
     "net.ankio.ledger.CompoundClassificationBridgeTest",
+    "net.ankio.ledger.data.ClassificationCapacityTest",
     "net.ankio.ledger.data.ClassificationPreviewTest",
     "net.ankio.ledger.ClassificationPreviewBridgeTest"
   ],
@@ -124,6 +125,7 @@
     "net.ankio.ledger.data.CategoryReplacementProcessRestartTest",
     "net.ankio.ledger.data.CompoundClassificationTest",
     "net.ankio.ledger.CompoundClassificationBridgeTest",
+    "net.ankio.ledger.data.ClassificationCapacityTest",
     "net.ankio.ledger.data.ClassificationPreviewTest",
     "net.ankio.ledger.ClassificationPreviewBridgeTest"
   ],
