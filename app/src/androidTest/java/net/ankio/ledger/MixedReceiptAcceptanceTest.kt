@@ -46,11 +46,11 @@ class MixedReceiptAcceptanceTest {
         }
     }
     private fun lines(vararg text:String,top:Int=100)=text.mapIndexed { i,s -> LocalOcrLine(s,100,top+i*50,900,top+i*50+35) }
-    private fun image(page:List<LocalOcrLine>):ByteArray {
+    private fun image(page:List<LocalOcrLine>,textSize:Float=28f):ByteArray {
         val bitmap=android.graphics.Bitmap.createBitmap(1080,1800,android.graphics.Bitmap.Config.ARGB_8888)
         val canvas=android.graphics.Canvas(bitmap);canvas.drawColor(android.graphics.Color.WHITE)
-        val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color=android.graphics.Color.BLACK;textSize=28f }
-        page.forEach { canvas.drawText(it.text,it.left.toFloat(),it.top+28f,paint) }
+        val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color=android.graphics.Color.BLACK;this.textSize=textSize }
+        page.forEach { canvas.drawText(it.text,it.left.toFloat(),it.top+textSize,paint) }
         return java.io.ByteArrayOutputStream().use { out ->
             bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,out);bitmap.recycle();out.toByteArray()
         }
@@ -102,6 +102,15 @@ class MixedReceiptAcceptanceTest {
         assertEquals(mapOf(wechat.uid to -1234L),saved.walletEffects)
         assertEquals(before+(wechat.uid to 48766L),app.store.accounts().associate { it.uid to it.amountCents })
         LedgerStore(app).use { reopened -> assertEquals(saved,reopened.get(saved.id)) }
+        androidx.test.core.app.ActivityScenario.launch(net.ankio.ledger.ui.MainActivity::class.java).use { scenario ->
+            lateinit var bridge:net.ankio.ledger.ui.LedgerWebBridge
+            scenario.onActivity { bridge=net.ankio.ledger.ui.LedgerWebBridge(it) }
+            val detail=JSONObject(bridge.recordDetails(saved.id)).getJSONObject("record")
+            assertEquals(saved.bill.receipt,ReceiptEvidenceCodec.decode(detail.getJSONObject("receipt")))
+            val rows=JSONObject(bridge.snapshotFirst("2026-11","","","")).getJSONArray("records")
+            val row=(0 until rows.length()).map { rows.getJSONObject(it) }.single { it.getLong("id")==saved.id }
+            assertEquals(saved.bill.receipt,ReceiptEvidenceCodec.decode(row.getJSONObject("receipt")))
+        }
     }
 
     @Test fun malformedBlockOriginsRejectTheEntireBackupBeforeWritingAnyRecordOrWallet()=runBlocking {
@@ -254,5 +263,111 @@ class MixedReceiptAcceptanceTest {
             assertTrue(restored.walletEffects.isEmpty());assertEquals(saved.bill.receipt,restored.bill.receipt)
             assertEquals(before,target.accounts().associate { it.uid to it.amountCents })
         } } finally { app.deleteDatabase(name) }
+    }
+
+    @Test fun serviceOnlyPagesSaveNothingAndExplicitShortcutCanReadTheNestedSummary()=runBlocking {
+        val before=app.store.accounts().associate { it.uid to it.amountCents }
+        val page=lines("先享后付服务通知","优先从零钱支付","服务费用：99.00元")+
+            lines("为你推荐","支付成功","交易金额：888.00元","通过微信零钱扣款",top=900)
+        for(origin in listOf("image","shake:com.tencent.mm")) {
+            val (_,result)=recognize(page,origin)
+            assertTrue(result==IngestResult.Ignored || result is IngestResult.Skipped)
+            assertEquals(baseline,app.store.all().map { it.id }.toSet())
+            assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
+        }
+        val (_,result)=recognize(nested(),"shortcut:com.tencent.mm")
+        val saved=record(result)
+        assertEquals(2345L,saved.bill.amountCents);assertEquals(RecordState.REVIEW,saved.state)
+        assertEquals("com.tencent.mm",saved.bill.receipt!!.sourceApp!!.value)
+        assertEquals("NESTED_BANK",saved.bill.receipt!!.blockOrigin!!.kind)
+        assertEquals(time.recognitionAt,saved.bill.occurredAt)
+        assertTrue(saved.walletEffects.isEmpty());assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
+    }
+
+    @Test fun sensitiveOuterPageStillStopsBeforeInferenceAndCannotUseTheIsolatedDebitCard()=runBlocking {
+        val before=app.store.accounts().associate { it.uid to it.amountCents }
+        val page=PaymentPage(PaymentApps.WECHAT,7,"synthetic.readonly.Viewer",mixed().map { it.text }+"请输入支付密码")
+        assertFalse(CapturePrivacy.manualAllowed(page))
+        val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm");tasks+=task
+        val error=runCatching { CaptureProcessor(app).processPrepared(image(mixed()),Source.OCR,"shake:com.tencent.mm",task) {
+            CapturePrivacy.manualAllowed(page)
+        } }.exceptionOrNull()
+        assertTrue(error is kotlinx.coroutines.CancellationException)
+        assertNull(app.tasks.recognitionTime(task));assertNull(app.tasks.image(task))
+        assertEquals(baseline,app.store.all().map { it.id }.toSet())
+        assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
+    }
+
+    private fun pixelRows(top:Int,vararg text:String)=text.mapIndexed { i,s -> LocalOcrLine(s,60,top+i*65,1020,top+i*65+55) }
+    private fun pixelEvidence(name:String,task:Long,saved:LedgerRecord,bytes:ByteArray) {
+        val directory=java.io.File(app.cacheDir,"synthetic-t11-evidence").apply { mkdirs() }
+        java.io.File(directory,"$name.png").writeBytes(bytes)
+        val batches=app.store.recognitionBatchBackup()
+        val frozen=(0 until batches.length()).map { batches.getJSONObject(it) }.single { it.getString("operationKey")==app.tasks.operationKey(task) }
+        java.io.File(directory,"$name.json").writeText(JSONObject().put("ocrPageText",frozen.getString("rawText"))
+            .put("selectedText",saved.capture.text).put("state",saved.state.name).put("amountCents",saved.bill.amountCents)
+            .put("merchant",saved.bill.merchant).put("direction",saved.bill.direction?.name ?: JSONObject.NULL)
+            .put("occurredAt",saved.bill.occurredAt).put("receipt",ReceiptEvidenceCodec.json(saved.bill.receipt))
+            .put("categoryId",saved.bill.categoryDecision?.categoryId ?: JSONObject.NULL)
+            .put("categoryRuleId",saved.bill.categoryDecision?.ruleId ?: JSONObject.NULL)
+            .put("walletEffects",JSONObject(saved.walletEffects)).toString(2))
+    }
+
+    @Test fun bundledPixelOcrKeepsTheRealDebitSeparateFromServicePendingBalanceAndMarketingText()=runBlocking {
+        val ruleId=app.store.saveClassificationRule(ClassificationRule("","合成广告隔离",true,Direction.EXPENSE,"cat:expense:transport",0,
+            listOf(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.CONTAINS,"地铁")))).id
+        val page=pixelRows(100,"先享后付服务通知","支付方式：优先从零钱支付","交易已关闭","待支付","交易金额：888.00元")+
+            pixelRows(650,"扣款成功","交易金额：12.34元","商户名称：合成咖啡","扣费服务商：合成扣费平台",
+                "银行作者：招商银行","商品说明：午餐","通过微信零钱扣款","账户余额：9999.00元","积分：12345")+
+            pixelRows(1400,"为你推荐","商品说明：地铁优惠广告","交易金额：777.00元")
+        val bytes=image(page,42f)
+        val task=app.tasks.create(Source.IMAGE,"image");tasks+=task
+        try {
+            val result=CaptureProcessor(app,recognitionClock={time}).processPrepared(bytes,Source.IMAGE,"image",task) { true }
+            val saved=record(result)
+            assertEquals(BatchCounts(1,0,0,0),(result as IngestResult.Batch).result.counts)
+            assertEquals(1,app.store.all().count { it.id !in baseline })
+            assertEquals(1234L,saved.bill.amountCents);assertEquals("合成咖啡",saved.bill.merchant)
+            assertEquals("合成扣费平台",saved.bill.receipt!!.serviceProvider!!.value)
+            assertEquals("招商银行",saved.bill.receipt!!.receiptIssuer!!.value)
+            assertEquals("午餐",saved.bill.receipt!!.productDescription!!.value)
+            assertEquals("MIXED_DEBIT",saved.bill.receipt!!.blockOrigin!!.kind)
+            assertEquals(time.recognitionAt,saved.bill.occurredAt)
+            assertEquals("cat:expense:dining",saved.bill.categoryDecision!!.categoryId)
+            assertNotEquals(ruleId,saved.bill.categoryDecision!!.ruleId)
+            assertEquals(mapOf(wechat.uid to -1234L),saved.walletEffects)
+            assertEquals(48766L,app.store.getAccount(wechat.id)!!.amountCents)
+            assertEquals(50000L,app.store.getAccount(cash.id)!!.amountCents)
+            assertFalse(saved.capture.text.contains("888.00"));assertFalse(saved.capture.text.contains("9999.00"))
+            assertFalse(saved.capture.text.contains("广告"));assertFalse(saved.capture.text.contains("待支付"))
+            assertArrayEquals(bytes,app.store.screenshot(saved.id))
+            pixelEvidence("mixed",task,saved,bytes)
+        } finally { app.store.deleteClassificationRule(ruleId) }
+    }
+
+    @Test fun bundledPixelOcrNestedBankAmountIgnoresOuterDatesAndKeepsUnknownDirectionAndAccountReview()=runBlocking {
+        val page=pixelRows(30,"图片查看器","交易时间：2020-01-01 08:00","账单记录时间：2019-01-01 09:00")+
+            pixelRows(450,"招商银行","交易金额：23.45元","账户余额：9999.00元","积分：12345")+
+            pixelRows(1100,"为你推荐","商户名称：合成火锅广告","商品说明：地铁优惠","交易金额：888.00元")
+        val bytes=image(page,42f)
+        val before=app.store.accounts().associate { it.uid to it.amountCents }
+        val task=app.tasks.create(Source.IMAGE,"image");tasks+=task
+        val result=CaptureProcessor(app,recognitionClock={time}).processPrepared(bytes,Source.IMAGE,"image",task) { true }
+        val saved=record(result)
+        assertEquals(BatchCounts(0,0,1,0),(result as IngestResult.Batch).result.counts)
+        assertEquals(1,app.store.all().count { it.id !in baseline })
+        assertEquals(2345L,saved.bill.amountCents);assertNull(saved.bill.direction);assertEquals("",saved.bill.merchant)
+        assertNull(saved.bill.receipt!!.merchant);assertNull(saved.bill.receipt!!.productDescription)
+        assertEquals("招商银行",saved.bill.receipt!!.receiptIssuer!!.value)
+        assertEquals("cmb",saved.bill.receipt!!.bank!!.bankCode);assertNull(saved.bill.receipt!!.sourceApp)
+        assertEquals("NESTED_BANK",saved.bill.receipt!!.blockOrigin!!.kind)
+        assertTrue(saved.bill.receipt!!.blockOrigin!!.top>300);assertTrue(saved.bill.receipt!!.blockOrigin!!.bottom<800)
+        assertEquals(time.recognitionAt,saved.bill.occurredAt)
+        assertEquals("RECOGNITION_FALLBACK",saved.bill.receipt!!.time!!.source)
+        assertNull(saved.wallet!!.accountUid);assertTrue(saved.walletEffects.isEmpty())
+        assertEquals(before,app.store.accounts().associate { it.uid to it.amountCents })
+        for(unrelated in listOf("2020","2019","9999","888","广告","积分"))assertFalse(unrelated,saved.capture.text.contains(unrelated))
+        assertArrayEquals(bytes,app.store.screenshot(saved.id))
+        pixelEvidence("nested",task,saved,bytes)
     }
 }
