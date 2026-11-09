@@ -288,6 +288,7 @@ class NodeCapturePipelineTest {
     /** Real task/receipt history through the packaged WebView, not a browser bridge fixture. */
     @Test fun missingNodeTaskAndBillViewsKeepSupplementalImagesAndDoNotChangeFunds()=runBlocking<Unit> {
         app.taskRecovery.await()
+        val uiTime=RecognitionTimeContext(System.currentTimeMillis(),"Asia/Shanghai")
         val settings=app.store.walletSettings()
         val cash=app.store.saveAccount(LedgerAccount(name="合成缺图界面现金",amountCents=30000,kind="cash"))
         val accounts=mutableListOf(cash);val tasks=mutableListOf<Long>();val records=mutableSetOf<Long>()
@@ -296,7 +297,7 @@ class NodeCapturePipelineTest {
             eraseColor(android.graphics.Color.rgb(50,140,110))
         }
         val image=try { java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }.toByteArray() } finally { bitmap.recycle() }
-        val processor=CaptureProcessor(app,OcrClient(app,RecognitionBackend { _,_,_,_,_,_->error("node UI acceptance must not invoke OCR") }),{time})
+        val processor=CaptureProcessor(app,OcrClient(app,RecognitionBackend { _,_,_,_,_,_->error("node UI acceptance must not invoke OCR") }),{uiTime})
         fun task()=app.tasks.create(Source.OCR,"shake:${PaymentApps.WECHAT}").also(tasks::add)
         fun readOnlyView(block:()->Unit) {
             val balances=app.store.accounts().associate { it.uid to it.amountCents }
@@ -360,7 +361,7 @@ class NodeCapturePipelineTest {
 
                 // The original missing capture remains missing; a later real image belongs to history item 2.
                 val (supplementTask,original)=missing.last()
-                val supplement=app.store.ingest(original.capture.copy(receivedAt=time.recognitionAt+1000),original.bill,screenshot=image) as IngestResult.Saved
+                val supplement=app.store.ingest(original.capture.copy(receivedAt=uiTime.recognitionAt+1000),original.bill,screenshot=image) as IngestResult.Saved
                 app.changed()
                 assertEquals(original.id,supplement.record.id)
                 assertEquals(listOf(false,true),app.store.captureHistory(original.id).map { it.hasScreenshot })
@@ -382,8 +383,8 @@ class NodeCapturePipelineTest {
                 assertTrue(app.tasks.queued(availableTask,image,availableSnapshot))
                 val available=(processor.processPrepared(image,Source.OCR,PaymentApps.WECHAT,availableTask) { true } as IngestResult.Saved).record
                 records+=available.id
-                val legacy=(app.store.ingest(Capture(Source.IMAGE,"image","合成历史无识别元数据",time.recognitionAt),
-                    ParsedBill(99,Direction.EXPENSE,"合成历史界面","其他",time.recognitionAt,"SYNTHETIC-LEGACY-${UUID.randomUUID()}",true,"",true),screenshot=image) as IngestResult.Saved).record
+                val legacy=(app.store.ingest(Capture(Source.IMAGE,"image","合成历史无识别元数据",uiTime.recognitionAt),
+                    ParsedBill(99,Direction.EXPENSE,"合成历史界面","其他",uiTime.recognitionAt,"SYNTHETIC-LEGACY-${UUID.randomUUID()}",true,"",true),screenshot=image) as IngestResult.Saved).record
                 records+=legacy.id
                 for((record,isLegacy) in listOf(available to false,legacy to true))readOnlyView {
                     open("openRecord(${record.id})");web.await("draft.id===${record.id}")
