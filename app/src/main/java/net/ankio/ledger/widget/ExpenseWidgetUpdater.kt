@@ -219,14 +219,13 @@ object ExpenseWidgetUpdater {
                 } else {
                     val body=RemoteViews(context.packageName,R.layout.widget_calendar)
                     val today=now.atZone(zone).toLocalDate()
-                    val compactHeight=height<=282
+                    val compactHeight=height<315
                     val dateFont=if(compactHeight)9.5f else 13f
                     val amountFont=if(compactHeight)6.5f else 8.5f
-                    val cellBottomPad=if(compactHeight)0 else (2.5f*context.resources.displayMetrics.density).toInt()
                     calendar.cells.forEachIndexed {index,cell->
                         val date=cell.date
                         body.setViewVisibility(calendarCellIds[index],if(date==null)View.INVISIBLE else View.VISIBLE)
-                        body.setViewPadding(calendarCellIds[index],0,0,0,cellBottomPad)
+                        body.setViewPadding(calendarCellIds[index],0,0,0,0)
                         val dayText=date?.dayOfMonth?.toString()?:""
                         val isToday=date==today
                         val isFuture=date!=null && date>today
