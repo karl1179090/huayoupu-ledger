@@ -27,6 +27,8 @@ C2 导出同时生成 JSON10 和 ZIP1；本轮跨进程组合恢复使用完整 
 - 产品 debug SHA256：`79385b9dcac33066201271876146b10bcdcb81b607a7babe1c5f23d23f2949e5`；release unsigned：`b5933d1c84836dfca4319e34d8241d213b998c124464697177f7abc6b4da8753`。最终只读 UI 阶段 test APK：`069f4e69d9f9e08afda0d5f71d92c10f3edd5bb67eef2982a9650f9869e8ff4d`。
 - debug APK 的 **20 个** tracked Web 资产、**41 个**生成资产与相应源码／生成目录逐字节一致。原生分期 APK、原始输出、输入、数据库与钱包差分及源文件哈希随本轮证据归档保存；不把早期测试 APK 的通过挪到最终测试 APK 上。
 
+C1 原生配置阶段的中间 test APK 未在当时单独封存，精确 SHA 未记录；该阶段只固定了产品 debug APK、构建和原始测试输出。不能用最终 test APK 的 SHA 声称它已在该阶段运行。C4、完整恢复 source／target 和最终只读 UI 阶段各自保留实际 test APK。
+
 复现普通检查：
 
 ```sh
