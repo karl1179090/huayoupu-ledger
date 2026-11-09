@@ -77,9 +77,11 @@ class CompleteBackupUiTest {
                 }
                 assertTrue(drawn.await(10,java.util.concurrent.TimeUnit.SECONDS))
                 val message=web.text("document.querySelector('.toast').textContent")
+                val metrics=web.text("JSON.stringify((()=>{const t=document.querySelector('.toast');return {clientWidth:t.clientWidth,scrollWidth:t.scrollWidth,text:t.textContent,display:getComputedStyle(t).display,whiteSpace:getComputedStyle(t).whiteSpace}})())")
+                if(kind=="applicationCleanup")assertTrue("Post-commit warning must fit visibly: $metrics",org.json.JSONObject(metrics).let { it.getInt("scrollWidth")<=it.getInt("clientWidth") })
                 if(kind !in setOf("invalid","pause"))assertFalse(message.contains("现有账单未修改"))
                 val output=File(app.filesDir,"t14-ui").apply { mkdirs() }
-                File(output,"$kind.txt").writeText(dialog+"\nRESULT: "+message)
+                File(output,"$kind.txt").writeText(dialog+"\nRESULT: "+message+"\nMETRICS: "+metrics)
                 instrumentation.uiAutomation.takeScreenshot().let { bitmap -> File(output,"$kind.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) };bitmap.recycle() }
                 if(kind in setOf("invalid","pause"))assertNull(app.store.all().find { it.uid==saved.uid })
                 else { assertNotNull(app.store.all().find { it.uid==saved.uid });assertEquals(4500L,app.store.getAccountByUid(wallet.uid)!!.amountCents) }
