@@ -40,12 +40,26 @@ class ExpenseWidgetHostProbeTest {
     }
     @Test fun explicitlyRequestedHostPhase() {
         val phase=InstrumentationRegistry.getArguments().getString("widgetHostPhase")
-        assumeTrue("Use scripts/verify-widget-host-lifecycle.py with an explicit phase",phase in setOf("setup","verify","cleanup"))
+        assumeTrue("Use scripts/verify-widget-host-lifecycle.py with an explicit phase",phase in setOf("setup","verify","cleanup","restore-initial"))
         assertTrue("Synthetic host probes only",android.os.Build.MODEL.contains("sdk_gphone"))
         val token=requireNotNull(InstrumentationRegistry.getArguments().getString("widgetHostToken"))
         UUID.fromString(token)
         val file=File(app.cacheDir,"widget-host-fixture.json")
         when(phase) {
+            "restore-initial" -> {
+                val id=requireNotNull(InstrumentationRegistry.getArguments().getString("widgetHostWidgetId")).toInt()
+                val manager=AppWidgetManager.getInstance(app)
+                val info=requireNotNull(manager.getAppWidgetInfo(id))
+                assertEquals(ComponentName(app,ExpenseWidgetProvider::class.java),info.provider)
+                val options=manager.getAppWidgetOptions(id).toString()
+                // Finish any startup publication before restoring an explicitly captured
+                // initial-layout host state. This does not create, resize or remove the pin.
+                ExpenseWidgetUpdater.request(app,intArrayOf(id))
+                await {ExpenseWidgetUpdater.measurement(id)!=null}
+                manager.updateAppWidget(id,android.widget.RemoteViews(app.packageName,info.initialLayout))
+                assertEquals(options,manager.getAppWidgetOptions(id).toString())
+                println("WIDGET_HOST_RESTORED_INITIAL provider=${info.provider} widgetId=$id options=$options")
+            }
             "setup" -> {
                 assertEquals("Use a fresh isolated synthetic ledger",0L,app.store.readableDatabase.rawQuery("SELECT COUNT(*) FROM records",null).use {it.moveToFirst();it.getLong(0)})
                 assertTrue(app.store.accounts().isEmpty());assertTrue(taskIds().isEmpty())
