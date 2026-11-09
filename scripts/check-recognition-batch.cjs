@@ -873,8 +873,11 @@ async function runTests() {
   assert.equal(await itemCards904.nth(1).getAttribute('data-status'), 'SKIPPED');
   assert.equal(await itemCards904.nth(1).locator('[data-nav-record="102"]').count(), 1, 'Second item must offer navigation to historical bill 102');
 
-  // Verify item 2 is PENDING (incomplete)
+  // Verify item 2 is PENDING, and in CANCELLED batch its badge shows "未完成" and progress shows "未完成 1"
   assert.equal(await itemCards904.nth(2).getAttribute('data-status'), 'PENDING');
+  const item2Badge = await itemCards904.nth(2).locator('.batch-item-status-tag').innerText();
+  assert.equal(item2Badge, '未完成', 'In CANCELLED batch, PENDING item status tag must show 未完成');
+  assert.ok(stats904.includes('未完成 1'), 'In CANCELLED batch, summary stats must show 未完成 1');
 
   // Verify zero button-descendant-buttons in DOM
   assert.equal(await page.locator('button button').count(), 0, 'No nested buttons in cancelled batch view');
@@ -1117,6 +1120,73 @@ async function runTests() {
 
   await page.screenshot({ path: path.join(outputDir, 'after-12-narrow-large-text-import-batch.png') });
   console.log('✓ after-12-narrow-large-text-import-batch.png');
+
+  console.log('\n--- Test 15: New recognitionBatch Event During Child Edit (公共事件草稿与dirty保护) ---');
+  // Reset screen
+  await page.evaluate(() => document.body.classList.remove('large-text'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => cancelEditor());
+  await waitForTransitions(page);
+
+  // Open batch 901 -> open child 101 -> edit merchant to unsaved text
+  await page.evaluate(() => openTask(901));
+  await page.waitForTimeout(100);
+  await page.locator('#batch-view [data-nav-record="101"]').click();
+  await page.waitForTimeout(100);
+  await page.fill('#merchant', '合成新批次完成时尚未保存的输入');
+
+  const beforeIncoming = await page.evaluate(() => ({
+    editorVisible: !document.getElementById('import-form').hidden,
+    batchVisible: !document.getElementById('batch-view').hidden,
+    merchant: document.getElementById('merchant').value,
+    dirty: editorDirty(),
+    recordId: draft?.id,
+    activeTask: activeBatchTaskId
+  }));
+  assert.equal(beforeIncoming.editorVisible, true, 'Sub-record editor must be visible');
+  assert.equal(beforeIncoming.batchVisible, false, 'Batch view must be hidden');
+  assert.equal(beforeIncoming.merchant, '合成新批次完成时尚未保存的输入', 'Unsaved merchant input');
+  assert.equal(beforeIncoming.dirty, true, 'Editor must be dirty before incoming batch event');
+  assert.equal(beforeIncoming.recordId, 101, 'RecordId must be 101');
+
+  // Dispatch public recognitionBatch event with a different operationUID
+  await page.evaluate(() => {
+    const incoming = JSON.parse(JSON.stringify(window.fixtureTasks.find(t => t.id === 902).batch));
+    incoming.operationUID = 'synthetic-different-import-completion';
+    window.LedgerUI.event('recognitionBatch', incoming);
+  });
+  await page.waitForTimeout(100);
+
+  const afterIncoming = await page.evaluate(() => ({
+    editorVisible: !document.getElementById('import-form').hidden,
+    batchVisible: !document.getElementById('batch-view').hidden,
+    merchant: document.getElementById('merchant').value,
+    dirty: editorDirty(),
+    recordId: draft?.id ?? null,
+    activeTask: activeBatchTaskId,
+    confirmation: document.querySelector('#sheet')?.open || false
+  }));
+
+  assert.equal(afterIncoming.editorVisible, true, 'Sub-record editor must remain visible after incoming batch event');
+  assert.equal(afterIncoming.batchVisible, false, 'Batch view must remain hidden after incoming batch event');
+  assert.equal(afterIncoming.merchant, beforeIncoming.merchant, 'Unsaved merchant text must NOT be cleared by incoming batch event');
+  assert.equal(afterIncoming.dirty, true, 'Editor dirty state must be retained');
+  assert.equal(afterIncoming.recordId, 101, 'draft.id must remain 101');
+  assert.equal(afterIncoming.activeTask, 901, 'Active task must remain 901');
+
+  // Screenshot showing unsaved child edit is preserved despite async incoming import event
+  await page.screenshot({ path: path.join(outputDir, 'after-13-incoming-batch-dirty-preserved.png') });
+  console.log('✓ after-13-incoming-batch-dirty-preserved.png');
+
+  // Clean exit: cancel -> discard edits -> return to batch 901 -> close panel
+  await page.evaluate(() => cancelEditor(false));
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('#sheet').isVisible(), true, 'Discard sheet must be shown');
+  await page.locator('#discard-edits').click();
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('#batch-view').isVisible(), true, 'Returned to batch view');
+  await page.evaluate(() => cancelEditor());
+  await waitForTransitions(page);
 
   await page.close();
   await browser.close();

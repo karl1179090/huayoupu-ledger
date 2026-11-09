@@ -12,9 +12,15 @@ object BankReceiptParser {
     private val expenseTypes = setOf("网上快捷支付", "快捷支付", "消费", "刷卡消费", "银联消费")
     private val incomeTypes = setOf("工资入账", "工资收入", "利息入账")
 
-    internal fun issuerBankCode(value:String):String? = BankCodes.normalize(normalize(value).filterNot(Char::isWhitespace)
-        .replace(heading, "").trim('【','】','[',']','(',')',':','：').removeSuffix("服务通知").removeSuffix("微银行")
-        .removeSuffix("储蓄卡").removeSuffix("借记卡").removeSuffix("信用卡"))
+    /** Shared issuer-header interpretation for the partitioner and the bank parser. */
+    internal fun issuerCode(raw:String):String? {
+        val compact=normalize(raw).filterNot(Char::isWhitespace)
+        val marker=heading.find(compact)
+        val name=(if(marker!=null && marker.range.first>0)compact.substring(0,marker.range.first) else compact.replace(heading,""))
+            .trim('【','】','[',']','(',')',':','：').removeSuffix("储蓄卡").removeSuffix("借记卡")
+            .removeSuffix("信用卡").removeSuffix("服务通知").removeSuffix("微银行")
+        return BankCodes.normalize(name)
+    }
 
     fun matches(lines: List<LocalOcrLine>): Boolean = lines.any {
         val text=normalize(it.text).filterNot(Char::isWhitespace)
@@ -58,9 +64,7 @@ object BankReceiptParser {
         }
         val merchant=fields(ReceiptEvidenceParser.merchantLabel).singleOrNull()?.value.orEmpty()
         val base=ReceiptEvidenceParser.parse(scoped,merchant,origin)
-        val issuerHeaders=scoped.mapNotNull { line ->
-            issuerBankCode(line.text)?.let { it to line }
-        }
+        val issuerHeaders=scoped.mapNotNull { line -> issuerCode(line.text)?.let { it to line } }
         val methods=(if(direction==null)listOf(Direction.EXPENSE,Direction.INCOME) else listOf(direction)).mapNotNull {
             PaymentMethodParser.parse(scoped,it,origin)?.takeIf { method -> method.medium!="UNKNOWN" || method.ambiguous }
         }.distinctBy { listOf(it.medium,it.bankCode,it.cardLast4,it.ambiguous) }

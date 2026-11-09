@@ -25,6 +25,7 @@ import net.ankio.ledger.data.CustomCategory
 import net.ankio.ledger.data.CategoryDeletionPreview
 import net.ankio.ledger.data.CategoryPreviewStale
 import net.ankio.ledger.data.ClassificationCodec
+import net.ankio.ledger.data.ClassificationPreviewCodec
 import net.ankio.ledger.data.ClassificationException
 import net.ankio.ledger.data.CategoryDirectory
 import net.ankio.ledger.data.CategoryException
@@ -115,10 +116,12 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val pageRecordIds=mutableSetOf<Long>()
         val iconStatuses=mutableMapOf<Long,String>()
         val iconDetails=mutableMapOf<Long,String>()
+        val recognitionEvidence=mutableMapOf<Long,JSONObject>()
         val taskMetadata=if(requestedIds==null)tasks else app.tasks.metadataForRecords(requestedIds)
         for(index in 0 until taskMetadata.length()) {
             val task=taskMetadata.getJSONObject(index)
             val id=task.optLong("recordId",0)
+            task.optJSONObject("recognitionEvidence")?.let { if(id>0)recognitionEvidence.putIfAbsent(id,it) }
             if(id>0 && (task.optString("origin").startsWith("payment_auto:") || task.optJSONObject("diagnostic")?.optString("trigger").orEmpty().let { it.startsWith("page_auto") || it.startsWith("wechat_auto") || it.startsWith("payment_auto") }))pageRecordIds.add(id)
             val status=task.optJSONObject("diagnostic")?.optString("icon").orEmpty()
             if(id>0 && status.isNotBlank()) {
@@ -135,6 +138,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     .put("historyRevision",historyRevisions[id]?:"")
                     .put("merchantIconRevision",merchantIconRevisions[row.optString("merchantIconKey")]?:0)
                     .put("iconDetails",iconDetails[id].orEmpty())
+                    .put("recognitionEvidence",recognitionEvidence[id] ?: row.optJSONObject("receipt")?.optJSONObject("recognition") ?: JSONObject.NULL)
                 if(!row.getBoolean("hasMerchantIcon"))row.put("iconStatus",iconStatuses[id].orEmpty())
                 records.put(row)
             }
@@ -144,6 +148,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("uid", record.uid)
                 put("merchant", record.bill.merchant)
                 put("receipt", ReceiptEvidenceCodec.json(record.bill.receipt))
+                put("recognitionEvidence",recognitionEvidence[record.id] ?: record.bill.receipt?.recognition?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::json) ?: JSONObject.NULL)
                 put("category", record.bill.category)
                 put("categoryDecision",ClassificationCodec.decision(record.bill.categoryDecision))
                 app.store.categoryFor(record).let { category ->
@@ -243,6 +248,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("hasMerchantIcon",iconKey!=null).put("merchantIconKey",iconKey?:JSONObject.NULL)
             .put("merchantIconRevision",iconKey?.let { app.store.merchantIconAsset(it)?.contentHashCode() }?:0)
             .put("captureMode",if(task?.optString("origin")?.startsWith("payment_auto:")==true)"page" else "")
+            .put("recognitionEvidence",task?.optJSONObject("recognitionEvidence") ?: record.bill.receipt?.recognition?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::json) ?: JSONObject.NULL)
             .put("refundCandidateCount",if((record.bill.refund!=null||record.bill.standaloneRefund!=null)&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
             .put("categoryId",app.store.categoryFor(record)?.id ?: JSONObject.NULL).put("categoryIcon",app.store.categoryFor(record)?.icon ?: "tag")
@@ -611,6 +617,21 @@ class LedgerWebBridge(private val activity: MainActivity) {
     private fun ruleFailure(error:Exception)=failure(error.message ?: "分类规则操作失败，请重试",(error as? ClassificationException)?.code ?: "RULE_INVALID").toString()
     @JavascriptInterface fun classificationRules():String=try {
         synchronized(app.store) { classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun previewClassification(json:String):String=try {
+        val request=ClassificationPreviewCodec.readRequest(json)
+        synchronized(app.store) {
+            val result=request.recordId?.let { app.store.previewClassification(it,request.rule) }
+                ?: app.store.previewClassification(requireNotNull(request.input),request.rule)
+            JSONObject().put("ok",true).put("preview",ClassificationPreviewCodec.preview(result)).toString()
+        }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun classificationRuleDraftFromBill(recordId:Long):String=try {
+        synchronized(app.store) {
+            val draft=app.store.classificationRuleDraftFromBill(recordId)
+            JSONObject().put("ok",true).put("recordId",draft.recordId).put("input",ClassificationPreviewCodec.input(draft.input))
+                .put("rule",ClassificationCodec.rule(draft.rule).put("id",JSONObject.NULL)).toString()
+        }
     } catch(error:Exception) { ruleFailure(error) }
     @JavascriptInterface fun saveClassificationRule(json:String):String=try {
         checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")

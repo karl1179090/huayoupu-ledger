@@ -12,7 +12,7 @@ object TransactionPageParser {
         if(headings.size<2)return emptyList()
         val starts=headings.map { index ->
             val previous=ordered.getOrNull(index-1)
-            if(previous!=null && BankReceiptParser.issuerBankCode(previous.text)!=null)index-1 else index
+            if(previous!=null && BankReceiptParser.issuerCode(previous.text)!=null)index-1 else index
         }
         return starts.mapIndexed { ordinal,start -> TransactionBlock(CandidateId("bank_$ordinal"),
             ordered.subList(start,starts.getOrNull(ordinal+1) ?: ordered.size)) }

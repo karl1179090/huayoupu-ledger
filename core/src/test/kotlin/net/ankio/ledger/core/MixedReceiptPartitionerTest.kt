@@ -93,4 +93,60 @@ class MixedReceiptPartitionerTest {
             "支付方式：优先从零钱支付").map(::LocalOcrLine)
         assertTrue(parse(page).isEmpty())
     }
+
+    @Test fun payLaterServiceHeaderStillKeepsTheCompletedDebitIndependent() {
+        val page=lines("先享后付服务通知","优先从零钱支付","交易已关闭")+
+            lines("扣款成功","交易金额：12.34元","商户名称：合成咖啡","通过零钱扣款",top=600)
+        val candidate=TransactionPageParser.parse(page,1080,1800,time,origin="shake:com.tencent.mm").single()
+        assertEquals(1234L,candidate.bill.amountCents)
+        assertEquals("WECHAT_BALANCE",candidate.bill.paymentMethod!!.medium)
+        assertFalse(candidate.rawText!!.contains("先享后付"))
+    }
+
+    @Test fun serviceUseNoticeAndTitlelessActualBalanceCardKeepOnlyTheLowerCardsBusinessFields() {
+        val upper=lines("「先享后付」服务使用通知","商户名称：合成上卡商家","服务商：合成上卡服务","优先从零钱支付",
+            "交易金额：888.00元","交易时间：2020-01-01 08:00","银行作者：招商银行")
+        val lower=listOf(LocalOcrLine("合成下卡咖啡",350,650,730,695),LocalOcrLine("通过零钱扣款",360,730,720,770),
+            LocalOcrLine("￥",350,820,410,890),LocalOcrLine("12.34",420,820,730,890),
+            LocalOcrLine("扣费服务",100,980,300,1015),LocalOcrLine("合成地铁服务方",360,980,880,1015),
+            LocalOcrLine("扣费内容",100,1040,300,1075),LocalOcrLine("午餐套餐",360,1040,880,1075),
+            LocalOcrLine("查看订单详情",100,1120,600,1155))
+        for(origin in listOf("shake:com.tencent.mm","image")) for(contentLabel in listOf("扣费内容","扣费內容")) {
+            val observed=lower.map { if(it.text=="扣费内容")it.copy(text=contentLabel) else it }
+            val candidate=TransactionPageParser.parse((upper+observed).reversed(),1080,1800,time,origin=origin).single()
+            val bill=candidate.bill;val receipt=bill.receipt!!
+            assertEquals(origin,1234L,bill.amountCents);assertEquals("合成下卡咖啡",bill.merchant)
+            assertEquals("合成地铁服务方",receipt.serviceProvider!!.value)
+            assertEquals("午餐套餐",receipt.transactionDescription!!.value)
+            assertEquals("扣费服务\n合成地铁服务方",receipt.serviceProvider!!.rawText)
+            assertNull(receipt.receiptIssuer);assertNull(receipt.bank)
+            assertEquals("WECHAT_BALANCE",bill.paymentMethod!!.medium);assertTrue(bill.reliable)
+            assertEquals(time.recognitionAt,bill.occurredAt)
+            assertEquals(650,receipt.blockOrigin!!.top)
+            if(origin=="image")assertNull(receipt.sourceApp) else assertEquals("com.tencent.mm",receipt.sourceApp!!.value)
+            assertFalse(candidate.rawText!!.contains("上卡"));assertFalse(candidate.rawText!!.contains("查看订单详情"))
+            val resolved=WalletResolver.resolve(listOf(WalletCandidate("wechat",kind="wechat"),WalletCandidate("cash",kind="cash")),
+                sourcePackage=origin.takeUnless { it=="image" },evidence=bill.paymentMethod,defaultAccountUid="cash")
+            assertEquals("wechat",resolved.accountUid)
+        }
+    }
+
+    @Test fun paymentScreenshotSheetWithMicroBankNotificationExcludesOuterDateAndTheUnlabelledFeed() {
+        val page=listOf(LocalOcrLine("付款截图 · 1 / 1",100,40,900,80),LocalOcrLine("服务号",400,200,680,240),
+            LocalOcrLine("1条通知",100,270,400,305),LocalOcrLine("招商银行微银行: 交易成功提醒",100,360,780,400),
+            LocalOcrLine("4分钟前",820,360,1000,400),LocalOcrLine("交易金额:",100,460,320,500),
+            LocalOcrLine("人民币23.45",500,460,900,500),LocalOcrLine("全部通知 >",100,580,600,620),
+            LocalOcrLine("2021/03/07 09:20",350,800,850,840),LocalOcrLine("贴图",100,1000,300,1040),
+            LocalOcrLine("推荐",700,1000,820,1040),LocalOcrLine("关注",850,1000,1000,1040),
+            LocalOcrLine("商户名称：合成推荐餐厅",100,1100,900,1140),LocalOcrLine("交易金额：777.00元",100,1160,900,1200),
+            LocalOcrLine("交易说明：地铁广告",100,1220,900,1260))
+        val candidate=TransactionPageParser.parse(page.reversed(),1080,1800,time,origin="image").single()
+        val bill=candidate.bill;val receipt=bill.receipt!!
+        assertEquals(2345L,bill.amountCents);assertNull(bill.direction);assertEquals("",bill.merchant)
+        assertEquals("招商银行",receipt.receiptIssuer!!.value);assertEquals("cmb",receipt.bank!!.bankCode)
+        assertNull(receipt.merchant);assertNull(receipt.transactionDescription)
+        assertEquals(time.recognitionAt,bill.occurredAt);assertEquals("RECOGNITION_FALLBACK",receipt.time!!.source)
+        assertFalse(bill.reliable);assertEquals("NESTED_BANK",receipt.blockOrigin!!.kind)
+        for(unrelated in listOf("2021","777","地铁","推荐","4分钟前","全部通知"))assertFalse(unrelated,candidate.rawText!!.contains(unrelated))
+    }
 }

@@ -275,6 +275,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 serviceProvider=previous.serviceProvider ?: incoming.serviceProvider,
                 receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
                 sourceApp=previous.sourceApp ?: incoming.sourceApp,
+                recognition=previous.recognition ?: incoming.recognition,
                 bank=previous.bank ?: incoming.bank,
                 time=previous.time?.takeIf { it.accountingAt==result.bill.occurredAt }
                     ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
@@ -343,13 +344,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             put("version",1);put("medium",it.medium);put("role",it.role);put("bankCode",it.bankCode)
             put("cardLast4",it.cardLast4);put("platform",it.platform);put("rawLabel",it.rawLabel.take(80))
             put("rawValue",it.rawValue.take(160));put("ambiguous",it.ambiguous);put("reason",it.reason)
+            if(it.executed)put("executed",true)
         }.toString()
     }
     private fun decodePaymentEvidence(value: String?): PaymentMethodEvidence? = value?.let {
         val json=org.json.JSONObject(it)
         fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotEmpty)
         PaymentMethodEvidence(json.getString("medium"),json.getString("role"),optional("bankCode"),optional("cardLast4"),
-            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"))
+            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"),json.optBoolean("executed",false))
     }
 
     private fun encodeStandaloneRefund(e:StandaloneRefundEvidence?):String?=e?.let {
@@ -1718,6 +1720,41 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
 
     @Synchronized fun classificationMigrationBaseline():ClassificationSnapshot = ClassificationStorage.migrationBaseline(readableDatabase)
     @Synchronized fun classificationRules():ClassificationSnapshot = ClassificationStorage.configuration(readableDatabase)
+    @Synchronized fun previewClassification(input:ClassificationInput,draftRule:ClassificationRule?=null):ClassificationTestResult {
+        if(input.direction !in listOf(Direction.EXPENSE,Direction.INCOME))
+            throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
+        val prepared=draftRule?.let { ClassificationStorage.prepared(readableDatabase,it) }
+        val preview=ClassificationEngine.preview(prepared?.first ?: classificationRules(),input)
+        val category=CategoryDirectory.requireCategory(readableDatabase,
+            CategoryReplacementStorage.resolve(readableDatabase,requireNotNull(preview.decision.categoryId)),input.direction)
+        return ClassificationTestResult(preview.copy(decision=preview.decision.copy(categoryId=category.id)),category,prepared?.second?.id)
+    }
+    private fun classificationTestRecord(recordId:Long):LedgerRecord {
+        val record=get(recordId) ?: throw ClassificationException("RULE_INPUT","账单已不存在，请重新选择")
+        if(record.bill.direction !in listOf(Direction.EXPENSE,Direction.INCOME))
+            throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
+        return record
+    }
+    @Synchronized fun previewClassification(recordId:Long,draftRule:ClassificationRule?=null):ClassificationTestResult {
+        val record=classificationTestRecord(recordId)
+        return previewClassification(ClassificationInput.from(record.bill,record.capture),draftRule)
+    }
+    @Synchronized fun classificationRuleDraftFromBill(recordId:Long):ClassificationRuleDraft {
+        val record=classificationTestRecord(recordId)
+        val input=ClassificationInput.from(record.bill,record.capture)
+        val category=categoryFor(record) ?: throw ClassificationException("RULE_TARGET","账单分类已失效，请先选择有效分类")
+        val conditions=buildList {
+            input.merchant?.takeIf(ClassificationCodec::validKeyword)?.let { add(ClassificationCondition(ClassificationField.MERCHANT,ClassificationOperator.EQUALS,it)) }
+            input.orderContent.firstOrNull(ClassificationCodec::validKeyword)?.let { add(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.EQUALS,it)) }
+        }
+        val source=when(input.captureSource) {
+            Source.OCR -> "LIVE"+(input.sourcePackage?.let { ":$it" } ?: "")
+            Source.IMAGE -> "IMAGE"+(input.platform?.let { ":$it" } ?: "")
+            else -> null
+        }
+        val name=(input.merchant.orEmpty().filterNot(Char::isISOControl).trim().take(76).ifBlank { "来自账单" })+"规则"
+        return ClassificationRuleDraft(recordId,input,ClassificationRule("",name,true,input.direction,category.id,0,conditions,source=source))
+    }
     @Synchronized fun saveClassificationRule(rule:ClassificationRule):ClassificationRule = classificationTransaction { ClassificationStorage.save(it,rule) }
     @Synchronized fun deleteClassificationRule(id:String) = classificationTransaction { ClassificationStorage.delete(it,id) }
     @Synchronized fun reorderClassificationRules(direction:Direction,ids:List<String>) = classificationTransaction { ClassificationStorage.reorder(it,direction,ids) }
