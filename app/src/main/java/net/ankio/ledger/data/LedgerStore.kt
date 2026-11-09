@@ -41,7 +41,7 @@ data class DeletedRecord(val id:Long,val expiresAt:Long)
 
 class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 16) {
     private val backupContext=context.applicationContext
-    private var boundBackupTasks:RecognitionTasks?=null
+    @Volatile private var boundBackupTasks:RecognitionTasks?=null
     internal fun bindBackupTasks(tasks:RecognitionTasks) { boundBackupTasks=tasks }
     internal fun backupTasks():RecognitionTasks?=boundBackupTasks ?: (backupContext as? net.ankio.ledger.LedgerApp)?.takeIf { name=="ledger.db" }?.tasks
     internal val backupScreenshots get()=screenshots
