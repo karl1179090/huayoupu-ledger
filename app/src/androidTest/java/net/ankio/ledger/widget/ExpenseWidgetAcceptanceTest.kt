@@ -485,6 +485,8 @@ class ExpenseWidgetAcceptanceTest {
             Case("five-weeks-tall","2026-06-10",350,440,1f),
             Case("compact-boundary","2026-11-10",350,314,1f),
             Case("regular-boundary","2026-11-10",350,315,1f),
+            Case("compact-319-boundary","2026-11-10",350,319,1f),
+            Case("regular-320-boundary","2026-11-10",350,320,1f),
             Case("six-weeks-tall","2026-11-10",350,440,1.3f,screenshot=true),
             Case("today-zero","2026-11-10",280,280,1.3f,todayCents=0L),
             Case("six-weeks-minimum","2026-11-10",280,280,1.5f,screenshot=true),
