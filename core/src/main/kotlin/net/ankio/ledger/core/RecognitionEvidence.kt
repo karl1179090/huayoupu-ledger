@@ -7,6 +7,7 @@ data class RecognitionEvidence(val route:String,val reason:String,val adapter:No
         require(version==1 && route in setOf("NODE","OCR"))
         require(reason in setOf("verified_layout","unknown_layout","invalid_candidate","conflicting_candidates","image_import","legacy_image"))
         require(route!="NODE" || reason=="verified_layout" && adapter!=null && snapshot!=null)
+        require(screenshot.state !in setOf("UNAVAILABLE","TIMEOUT") || route=="NODE" && screenshot.reason==screenshot.state)
         require(phaseTimingsMs.keys.all { it in setOf("nodeRead","screenshot","route","ocr","parse","save") } && phaseTimingsMs.values.all { it>=0 })
     }
 }

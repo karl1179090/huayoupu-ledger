@@ -35,9 +35,12 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
                 taskRecovery.await()
                 modelPermit.withPermit {
                     if(!allowed())throw CancellationException("识别授权已关闭")
-                    val image=app.tasks.image(id)?:throw RecognitionException("本次截图已失效，请重新摇一摇补录")
+                    val image=app.tasks.image(id)
+                    if(image==null && !app.tasks.hasMissingNodeEvidence(id))throw RecognitionException("本次截图已失效，请重新摇一摇补录")
                     feedback("正在识别…",true)
-                    val result=factory().processPrepared(image,if(imported)Source.IMAGE else Source.OCR,pkg,id,::allowed)
+                    val processor=factory()
+                    val result=if(image==null)processor.processWithoutScreenshot(Source.OCR,pkg,id,::allowed)
+                        else processor.processPrepared(image,if(imported)Source.IMAGE else Source.OCR,pkg,id,::allowed)
                     if(allowed()) {
                         var message=completedMessage(id,result)
                         if(!imported && (message.startsWith("已记账 ¥") || message=="退款已更新") && app.tasks.recordId(id)?.let { app.captureHealth.successful(it,pkg) }!=true)
