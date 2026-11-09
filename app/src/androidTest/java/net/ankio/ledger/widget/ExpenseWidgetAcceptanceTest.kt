@@ -82,6 +82,13 @@ class ExpenseWidgetAcceptanceTest {
                 root.measure(android.view.View.MeasureSpec.makeMeasureSpec(width,android.view.View.MeasureSpec.EXACTLY),
                     android.view.View.MeasureSpec.makeMeasureSpec(height,android.view.View.MeasureSpec.EXACTLY))
                 root.layout(0,0,width,height)
+                // Detached TextViews retain their own observer; complete the normal pre-draw
+                // scroll correction before inspecting or drawing centered single-line text.
+                fun preDraw(view:android.view.View) {
+                    view.viewTreeObserver.dispatchOnPreDraw()
+                    if(view is android.view.ViewGroup)for(index in 0 until view.childCount)preDraw(view.getChildAt(index))
+                }
+                preDraw(root)
                 action(root)
             } finally {bitmaps.forEach {it.recycle()}}
         }
