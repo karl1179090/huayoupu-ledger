@@ -310,7 +310,24 @@ class NodeCapturePipelineTest {
             web.await("!document.querySelector('.toast')?.classList.contains('show') && !document.querySelector('#record-panel').classList.contains('fluid-active') && !document.querySelector('#sheet').classList.contains('fluid-active')")
             web.run("window.__t13Painted=false;requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__t13Painted=true}))")
             web.await("window.__t13Painted")
-            val captured=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+            val instrumentation=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            val drawn=java.util.concurrent.CountDownLatch(1)
+            instrumentation.runOnMainSync {
+                val activity=androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)
+                    .filterIsInstance<net.ankio.ledger.ui.MainActivity>().single()
+                val view=activity.webView
+                view.postVisualStateCallback(0,object:android.webkit.WebView.VisualStateCallback() {
+                    override fun onComplete(requestId:Long) {
+                        val listener=object:android.view.ViewTreeObserver.OnDrawListener {
+                            override fun onDraw() { view.post { view.viewTreeObserver.removeOnDrawListener(this);drawn.countDown() } }
+                        }
+                        view.viewTreeObserver.addOnDrawListener(listener);view.postInvalidateOnAnimation()
+                    }
+                })
+            }
+            assertTrue("WebView visual state must reach an Android draw",drawn.await(10,java.util.concurrent.TimeUnit.SECONDS))
+            val captured=instrumentation.uiAutomation.takeScreenshot()
             try {
                 val file=java.io.File(app.cacheDir,"t13-native-ui/$name.png");file.parentFile!!.mkdirs()
                 file.outputStream().use { assertTrue(captured.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)) }
