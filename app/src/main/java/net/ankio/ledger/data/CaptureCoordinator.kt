@@ -33,5 +33,33 @@ class CaptureCoordinator(context: Context) {
         }
     }
 
+    /** Freeze every history decision before committing the first child. Failed children remain retryable. */
+    suspend fun acceptBatch(capture:Capture,candidates:List<TransactionCandidate>,operationKey:String,zoneId:String,
+        screenshot:ByteArray?=null,classificationSnapshot:ClassificationSnapshot?=null,
+        policy:RecognitionPolicy=RecognitionPolicy.USER_INITIATED,allowed:()->Boolean):RecognitionBatchResult = mutex.withLock {
+        synchronized(app.channels) {
+            if(!allowed())throw kotlinx.coroutines.CancellationException("识别已停止")
+            val initial=app.store.freezeRecognitionBatch(capture,candidates,operationKey,zoneId,
+                classificationSnapshot ?: app.store.classificationRules(),policy)
+            continueBatchLocked(operationKey,initial,screenshot,allowed)
+        }
+    }
+    suspend fun resumeBatch(operationKey:String,screenshot:ByteArray?=null,allowed:()->Boolean):RecognitionBatchResult?=mutex.withLock {
+        synchronized(app.channels) {
+            val initial=app.store.recognitionBatch(operationKey) ?: return@withLock null
+            continueBatchLocked(operationKey,initial,screenshot,allowed)
+        }
+    }
+    private fun continueBatchLocked(operationKey:String,initial:RecognitionBatchResult,screenshot:ByteArray?,allowed:()->Boolean):RecognitionBatchResult {
+        for(item in initial.items.filter { it.status in setOf("PENDING","FAILED") }) {
+            if(!allowed())throw kotlinx.coroutines.CancellationException("识别已停止")
+            try { app.store.submitBatchCandidate(operationKey,item.candidateId,screenshot) }
+            catch(error:kotlinx.coroutines.CancellationException) { throw error }
+            catch(error:Exception) { app.store.failBatchCandidate(operationKey,item.candidateId) }
+        }
+        app.changed(true)
+        return requireNotNull(app.store.recognitionBatch(operationKey))
+    }
+
 
 }

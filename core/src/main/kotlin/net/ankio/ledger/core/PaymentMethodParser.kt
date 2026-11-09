@@ -46,6 +46,7 @@ object PaymentMethodParser {
         val statedDebits = if (role == "DEBIT") clean.mapNotNull { line ->
             val compact = line.text.filterNot(Char::isWhitespace)
             actualDebit.matchEntire(compact)?.groupValues?.get(1)?.takeUnless { preference.containsMatchIn(it) }?.let { value ->
+                // Executed “零钱” is explicit WeChat balance evidence even in an imported image.
                 decode("实际扣款",value,if(value=="零钱")"wechat" else platform,role).copy(executed=true)
             }
         } else emptyList()

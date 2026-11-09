@@ -7,7 +7,7 @@ let query='',searching=false;
 let ledgerView=null,viewKey='',viewLimit=200,searchTimer,undoTimer;
 let dataRevision='',loadedScope='',loadingPage=false,editorBaseline=null,recordReturnControl=null;
 const listScope=()=>JSON.stringify([month,query,filter]);
-let recognitionTasks=[],recordPanelOpen=false,recordPanelClosing=false,recordAnchor=null,recordHome=null;
+let recognitionTasks=[],recordPanelOpen=false,recordPanelClosing=false,recordAnchor=null,recordHome=null,activeBatch=null,activeBatchTaskId=null;
 let ledgerTouchActive=false,ledgerRenderPending=false;
 let lastControl=null,lastControlAt=0,sheetAnchor=null,sheetClosing=false,manualOpen=false,manualClosing=false,manualHome=null,manualAnchor=null,manualReturnControl=null;
 function controlBounds(control){if(!control?.getBoundingClientRect)return null;const r=control.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height,radius:parseFloat(getComputedStyle(control).borderTopLeftRadius)||Math.min(r.width,r.height)/2}}
@@ -228,7 +228,7 @@ function showUndo(deletion){let bar=$('delete-undo');clearTimeout(undoTimer);if(
 function loadedTotals(){return ledgerView?.summary?.totals||sums(monthRecords())}
 function loadedCategories(type){return ledgerView?.summary?.categories?.filter(r=>r.direction===(type==='income'?'INCOME':'EXPENSE'))||categoryTotals(monthRecords().filter(r=>type==='income'?r.direction==='INCOME':r.direction!=='INCOME'))}
 function remember(){try{native?.remember(JSON.stringify(getState()))}catch(_){}}
-function getState(){return {page,recordPanel:recordPanelOpen,manualPanel:manualOpen,month,filter,editorBaseline,draft:storedDraft(),previewUrl,manual:{amount:$('manual-amount').value,note:$('manual-note').value,type:manualType,category:manualCategory,categoryId:manualCategoryId,walletUid:manualWalletUid,walletSelected:manualWalletSelected,submissionToken:manualSubmissionToken,transfer:manualTransfer,occurredAt:$('manual-occurred-at').value},statsType,rankingType,assetsHidden}}
+function getState(){return {page,recordPanel:recordPanelOpen,manualPanel:manualOpen,month,filter,editorBaseline,draft:storedDraft(),previewUrl,activeBatch,activeBatchTaskId,manual:{amount:$('manual-amount').value,note:$('manual-note').value,type:manualType,category:manualCategory,categoryId:manualCategoryId,walletUid:manualWalletUid,walletSelected:manualWalletSelected,submissionToken:manualSubmissionToken,transfer:manualTransfer,occurredAt:$('manual-occurred-at').value},statsType,rankingType,assetsHidden}}
 function go(id){closeSheet(false);if(manualOpen||manualClosing)closeManual(false);if(recordPanelOpen||recordPanelClosing)closeRecordPanel(false);if(id!=='ledger'&&searching)setSearchOpen(false,false);page=id;document.querySelectorAll('.screen').forEach(s=>s.classList.toggle('mobile-active',s.id===id));if(id==='import'&&!draft)newDraft();if(id==='manual')drawCategories();if(id==='stats')drawStats();if(id==='assets')drawAssets();remember()}
 function categoryStyle(r){const resolved=resolveRecordCategory(r),cat=resolved.name,icon=resolved.icon;return [icon,r.direction==='INCOME'?'pink':/交通|停车|高速|bus|car|plane/.test(cat+' '+icon)?'blue':/购物|服饰|日用|bag-shopping|shirt|basket-shopping/.test(cat+' '+icon)?'orange':'green']}
 function ledgerIcon(r,pending=false){
@@ -256,7 +256,7 @@ function render(){
  const shown=records.filter(r=>(r.state==='POSTED'||r.state==='REVIEW')&&(query||recordMonth(r)===month)
   &&(filter==='all'||r.direction===filterDirection()||filter==='expense'&&!r.direction)
   &&(!query||[r.merchant,transferName(r),resolveRecordCategory(r).name,r.category,r.note,r.transactionId,sourceNames[r.source]].some(v=>String(v||'').toLowerCase().includes(search))));
- const attempts=recognitionTasks.filter(t=>!t.recordId&&!['SKIPPED','DUPLICATE'].includes(t.status)&&localMonth(t.createdAt)===month&&(!query||[captureName(t),taskNames[t.status],t.message].some(v=>String(v||'').toLowerCase().includes(search))));
+ const attempts=recognitionTasks.filter(t=>!t.recordId&&!['SKIPPED','DUPLICATE'].includes(t.status)&&localMonth(t.createdAt)===month&&(!query||[captureName(t),taskNames[t.status],t.message,t.batch?.message,...(t.batch?.items||[]).map(i=>i.merchant)].some(v=>String(v||'').toLowerCase().includes(search))));
  const timeline=[...shown.map(record=>({record,time:record.occurredAt,id:record.id})),...attempts.map(task=>({task,time:task.createdAt,id:task.id}))].sort((a,b)=>{
   const dayDiff=itemDateKey(b).localeCompare(itemDateKey(a));
   if(dayDiff!==0)return dayDiff;
@@ -282,6 +282,7 @@ function render(){
  $('entries').querySelectorAll('.merchant-icon img').forEach(img=>{const failed=()=>{img.parentElement.classList.remove('merchant-icon');img.remove()};img.onerror=failed;if(img.complete&&!img.naturalWidth)failed()});
  $('entries').querySelectorAll('[data-record],[data-pending]').forEach(e=>e.onclick=()=>openRecord(Number(e.dataset.record||e.dataset.pending),false,e.getBoundingClientRect()));
  $('entries').querySelectorAll('[data-task]').forEach(e=>e.onclick=()=>openTask(Number(e.dataset.task),e.getBoundingClientRect()));
+ $('entries').querySelectorAll('[data-retry-task]').forEach(btn=>{btn.onclick=(e)=>{e.preventDefault();triggerRetryTask(Number(btn.dataset.retryTask),btn)}});
  bindSwipeRows();
  document.querySelectorAll('[data-filter]').forEach(e=>{e.classList.toggle('active',e.dataset.filter===filter);e.setAttribute('aria-pressed',String(e.dataset.filter===filter))});
  drawSettings();
@@ -299,7 +300,21 @@ function renderTimeline(markup){
 }
 const taskNames={QUEUED:'等待识别',CAPTURING:'正在截图',RECOGNIZING:'AI 识别中',FAILED:'识别失败',NO_BILL:'未识别到账单',DUPLICATE:'已跳过重复',CANCELLED:'已停止',REVIEW:'待确认',SUCCEEDED:'已记账'};
 function recognitionRow(t){
- const running=['CAPTURING','QUEUED','RECOGNIZING'].includes(t.status),label=taskNames[t.status]||'识别记录';
+ const running=['CAPTURING','QUEUED','RECOGNIZING'].includes(t.status);
+ if(t.batch){
+  const counts=t.batch.counts||{added:0,skipped:0,review:0,failed:0};
+  const summaryText=`新增 ${counts.added} · 跳过 ${counts.skipped} · 待确认 ${counts.review} · 失败 ${counts.failed}`;
+  const parentStatusLabel={
+   SUCCEEDED:'已记账',
+   REVIEW:'待确认',
+   FAILED:'部分失败',
+   SKIPPED:'已跳过',
+   CANCELLED:'已停止'
+  }[t.status]||taskNames[t.status]||'多笔识别';
+  const canRetry=!running&&t.id>0&&t.batch.canRetry===true;
+  return swipeRow(`<div class="entry recognition-entry batch-entry ${running?'is-recognizing':t.status==='FAILED'?'is-failed':t.status==='REVIEW'?'ai-pending-entry':''}"><button type="button" class="batch-entry-main" data-task="${t.id}" aria-label="${escapeText(captureName(t)||'图片识别')}，${parentStatusLabel}，${summaryText}"><span class="category-icon">${running?'<span class="recognition-spinner" aria-hidden="true"></span>':'<i class="fa-solid fa-layer-group" aria-hidden="true"></i>'}</span><span class="entry-text"><span class="entry-title">${parentStatusLabel} · 多笔识别</span><span class="entry-subtitle">${localTime(t.createdAt).slice(11)} · ${summaryText}</span></span><span class="recognition-state ${t.status==='SUCCEEDED'?'state-succeeded':''}">${running?'处理中':parentStatusLabel}</span>${canRetry?'':'<span class="chevron" aria-hidden="true">›</span>'}</button>${canRetry?`<button type="button" class="row-retry-btn" data-retry-task="${t.id}" aria-label="重试未完成项"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> 重试</button>`:''}</div>`,t.id,true,'识别记录',running);
+ }
+ const label=taskNames[t.status]||'识别记录';
  const scState=t.recognitionEvidence?.screenshot?.state;
  const isMissing=String(t.recognitionEvidence?.route||'').toUpperCase()==='NODE'&&(scState==='UNAVAILABLE'||scState==='TIMEOUT');
  const subtitleText=isMissing
@@ -337,7 +352,247 @@ $('entries').addEventListener('pointerdown',e=>{if(!e.target.closest('.swipe-row
 $('entries').addEventListener('pointerdown',e=>{if(e.isPrimary!==false)ledgerTouchActive=true},true);
 function finishLedgerTouch(){ledgerTouchActive=false;if(ledgerRenderPending){ledgerRenderPending=false;setTimeout(()=>render(),80)}}
 document.addEventListener('pointerup',finishLedgerTouch,true);document.addEventListener('pointercancel',finishLedgerTouch,true);window.addEventListener('blur',finishLedgerTouch);
-function openTask(id,anchor=null){recordReturnControl=document.activeElement;editorBaseline=null;const t=recognitionTasks.find(t=>t.id===id);if(!t){notify('识别记录已不存在');return}if(t.recordId){openRecord(t.recordId,false,anchor);return}const fallbackCat=findCategoryItem('EXPENSE',null,'其他');draft={id:0,recognitionTaskId:t.id,taskStatus:t.status,source:t.source,captureMode:/^(page_auto|wechat_auto|payment_auto)/.test(String(t.origin||''))?'page':'',amount:'',merchant:'',category:fallbackCat.name,categoryId:fallbackCat.id,direction:'EXPENSE',occurredAt:t.createdAt,_originalOccurredAt:t.createdAt,_timeEdited:false,note:'',reason:t.message,state:'REVIEW',rawText:'',receipt:t.receipt||null,recognitionEvidence:t.recognitionEvidence||null};working=['CAPTURING','QUEUED','RECOGNIZING'].includes(t.status);importError=t.status==='FAILED'?t.message:'';previewUrl=t.hasScreenshot?'https://appassets.androidplatform.net/task-capture/'+t.id+'.jpg':'';updateEditor();showRecordPanel(anchor);remember()}
+function openTask(id,anchor=null){recordReturnControl=document.activeElement;editorBaseline=null;const t=recognitionTasks.find(t=>t.id===id);if(!t){notify('识别记录已不存在');return}if(t.recordId){openRecord(t.recordId,false,anchor);return}if(t.batch){openBatch(t.batch,t.id,anchor);return}activeBatch=null;activeBatchTaskId=null;const fallbackCat=findCategoryItem('EXPENSE',null,'其他');draft={id:0,recognitionTaskId:t.id,taskStatus:t.status,source:t.source,captureMode:/^(page_auto|wechat_auto|payment_auto)/.test(String(t.origin||''))?'page':'',amount:'',merchant:'',category:fallbackCat.name,categoryId:fallbackCat.id,direction:'EXPENSE',occurredAt:t.createdAt,_originalOccurredAt:t.createdAt,_timeEdited:false,note:'',reason:t.message,state:'REVIEW',rawText:'',receipt:t.receipt||null,recognitionEvidence:t.recognitionEvidence||null};working=['CAPTURING','QUEUED','RECOGNIZING'].includes(t.status);importError=t.status==='FAILED'?t.message:'';previewUrl=t.hasScreenshot?'https://appassets.androidplatform.net/task-capture/'+t.id+'.jpg':'';if($('batch-view'))$('batch-view').hidden=true;if($('import-form'))$('import-form').hidden=false;updateEditor();showRecordPanel(anchor);remember()}
+function triggerRetryTask(taskId,btnEl=null){
+ if(!Number.isSafeInteger(taskId)||taskId<=0){notify('识别记录编号无效');return}
+ const bridge=native||window.LedgerNative||window.Android;
+ if(!bridge?.retryRecognitionTask){notify('请在 Android 应用中重试识别');return}
+ if(btnEl)btnEl.disabled=true;
+ try{
+  const res=JSON.parse(bridge.retryRecognitionTask(taskId));
+  if(res.ok){
+   notify('已提交重试，正在识别未完成项…');
+   refresh();
+  }else{
+   if(btnEl)btnEl.disabled=false;
+   notify(res.error||'没有可重试的批次、截图已失效或识别授权已关闭');
+  }
+ }catch(_){
+  if(btnEl)btnEl.disabled=false;
+  notify('重试失败，请稍后重试');
+ }
+}
+function openBatch(batch,taskId=null,anchor=null){
+ recordReturnControl=document.activeElement;
+ editorBaseline=null;
+ activeBatch=batch;
+ activeBatchTaskId=taskId;
+ draft=null;
+ const t=taskId?recognitionTasks.find(x=>x.id===taskId):null;
+ working=t?['CAPTURING','QUEUED','RECOGNIZING'].includes(t.status):false;
+ importError=(t&&t.status==='FAILED')?t.message:'';
+ previewUrl=(t&&t.hasScreenshot)?'https://appassets.androidplatform.net/task-capture/'+t.id+'.jpg':'';
+ renderBatchView(batch,taskId);
+ const scanner=document.querySelector('.scanner');
+ if(scanner){
+  scanner.hidden=!previewUrl;
+  scanner.classList.toggle('has-preview',!!previewUrl);
+  scanner.classList.toggle('placeholder',!previewUrl);
+  if($('capture-preview')){
+   $('capture-preview').hidden=!previewUrl;
+   if(previewUrl)$('capture-preview').src=previewUrl;
+  }
+ }
+ if($('import-form'))$('import-form').hidden=true;
+ document.querySelector('#import .page-title h1').textContent='多笔识别结果';
+ document.querySelector('#import .subtitle').hidden=false;
+ document.querySelector('#import .subtitle').textContent='已自动识别完成，符合入账条件的账单已直接保存';
+ document.querySelector('.scanning').hidden=true;
+ document.querySelector('.dots').hidden=true;
+ showRecordPanel(anchor);
+ remember();
+}
+function renderBatchView(batch,taskId=null){
+ const container=$('batch-view');
+ if(!container||!batch)return;
+ activeBatch=batch;
+ activeBatchTaskId=taskId||null;
+ if($('import-form'))$('import-form').hidden=true;
+ container.hidden=false;
+ const items=Array.isArray(batch.items)?batch.items:[];
+ const added=batch.counts?.added??items.filter(i=>i.status==='ADDED').length;
+ const skipped=batch.counts?.skipped??items.filter(i=>i.status==='SKIPPED').length;
+ const review=batch.counts?.review??items.filter(i=>i.status==='REVIEW').length;
+ const failed=batch.counts?.failed??items.filter(i=>i.status==='FAILED').length;
+ const pending=items.filter(i=>i.status==='PENDING').length;
+ const complete=batch.complete!==false&&pending===0&&failed===0;
+ const canRetry=Boolean(activeBatchTaskId&&activeBatchTaskId>0&&batch.canRetry===true);
+ const parentTask=activeBatchTaskId?recognitionTasks.find(x=>x.id===activeBatchTaskId):null;
+ const isCancelled=parentTask?.status==='CANCELLED'||batch.status==='CANCELLED';
+ let parentStatus='SUCCEEDED',parentLabel='已记账';
+ if(isCancelled){parentStatus='CANCELLED';parentLabel='已停止'}
+ else if(!complete||failed>0||pending>0){parentStatus='FAILED';parentLabel='未完成'}
+ else if(review>0){parentStatus='REVIEW';parentLabel='待确认'}
+ else if(added>0){parentStatus='SUCCEEDED';parentLabel='已记账'}
+ else{parentStatus='SKIPPED';parentLabel='已跳过'}
+ const summaryText=`新增 ${added} · 跳过 ${skipped} · 待确认 ${review} · 失败 ${failed}`;
+ const progressText=pending>0?` · ${pending} 项${isCancelled?'未完成':'处理中'}`:'';
+ const rawNotice=batch.message||parentTask?.message||'';
+ const noticeMessage=isCancelled
+  ?(((added>0||skipped>0)&&(rawNotice.includes('未新增账单')||rawNotice.includes('未新增记账')))?rawNotice.replace(/未新增账单|未新增记账/g,'已保存的账单已保留'):(rawNotice||'已停止后续识别，已保存的账单已保留'))
+  :(rawNotice||'符合入账条件的账单已自动保存，无需逐一勾选；点击卡片可查看或编辑。');
+ const itemsHtml=items.map((item,index)=>{
+  const candidateId=item.candidateId||`item_${index}`;
+  const status=item.status||'PENDING';
+  const statusMap={
+   ADDED:{label:'已记账',cls:'status-added'},
+   REVIEW:{label:'待确认',cls:'status-review'},
+   SKIPPED:{label:'已跳过',cls:'status-skipped'},
+   FAILED:{label:'失败',cls:'status-failed'},
+   PENDING:{label:isCancelled?'未完成':'处理中',cls:isCancelled?'status-cancelled':'status-pending'},
+   CANCELLED:{label:'已停止',cls:'status-cancelled'}
+  };
+  const sInfo=statusMap[status]||{label:status,cls:'status-unknown'};
+  const merchant=(item.merchant&&String(item.merchant).trim())?String(item.merchant).trim():'未提供';
+  const isMissingMerchant=merchant==='未提供';
+  const dateText=item.accountingDate?String(item.accountingDate).trim():'未提供日期';
+  const isMissingDate=!item.accountingDate;
+  let amountMarkup='';
+  const hasAmount=item.amountCents!=null&&Number.isFinite(Number(item.amountCents));
+  const hasDirection=item.direction!=null&&['EXPENSE','INCOME','TRANSFER'].includes(item.direction);
+  if(!hasAmount&&!hasDirection){
+   amountMarkup=`<div class="batch-amount-block null-both"><span class="amount-missing">待确认金额</span><span class="direction-missing">待确认收支</span></div>`;
+  }else if(!hasAmount){
+   const dirText=item.direction==='INCOME'?'收入':item.direction==='EXPENSE'?'支出':'互转';
+   amountMarkup=`<div class="batch-amount-block null-amount"><span class="amount-missing">待确认金额</span><span class="direction-badge">${dirText}</span></div>`;
+  }else if(!hasDirection){
+   amountMarkup=`<div class="batch-amount-block null-direction"><span class="direction-missing">待确认收支</span><span class="amount-val">¥ ${money(item.amountCents)}</span></div>`;
+  }else{
+   const isIncome=item.direction==='INCOME',isTransfer=item.direction==='TRANSFER',sign=isTransfer?'':isIncome?'+':'-',cls=isTransfer?'transfer':isIncome?'positive':'negative';
+   amountMarkup=`<div class="batch-amount-block ${cls}"><span class="direction-badge">${isTransfer?'转':isIncome?'收':'支'}</span><span class="amount-val">${sign}¥ ${money(item.amountCents)}</span></div>`;
+  }
+  const hasNav=item.recordId!=null&&Number(item.recordId)>0;
+  let navButtonHtml='';
+  if(hasNav){
+   const isHistory=status==='SKIPPED',navLabel=isHistory?'查看历史':status==='REVIEW'?'待确认':'查看账单';
+   navButtonHtml=`<button type="button" class="batch-item-nav-btn ${isHistory?'is-history':''}" data-nav-record="${item.recordId}" aria-label="${navLabel}：${escapeText(merchant)}"><span class="nav-text">${navLabel}</span><span class="chevron" aria-hidden="true">›</span></button>`;
+  }
+  const reasonText=item.reason?escapeText(item.reason):'';
+  return `<div class="batch-item-card ${sInfo.cls} ${hasNav?'is-clickable':'no-nav'}" data-candidate-id="${escapeText(candidateId)}" data-status="${status}" data-index="${index}">
+   <div class="batch-item-top">
+    <span class="batch-item-status-tag ${sInfo.cls}">${sInfo.label}</span>
+    ${amountMarkup}
+   </div>
+   <div class="batch-item-body">
+    <div class="batch-item-merchant-row">
+     <span class="batch-item-merchant ${isMissingMerchant?'is-missing':''}">${escapeText(merchant)}</span>
+    </div>
+    <div class="batch-item-meta-row">
+     <span class="batch-item-date ${isMissingDate?'is-missing':''}">${escapeText(dateText)}</span>
+     ${reasonText?`<span class="batch-item-reason">${reasonText}</span>`:''}
+    </div>
+   </div>
+   <div class="batch-item-actions">
+    ${navButtonHtml}
+    <button type="button" class="batch-item-toggle-btn" aria-expanded="false" aria-controls="batch-diag-${index}" aria-label="展开第${index+1}项技术诊断"><span class="toggle-text">诊断</span><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></button>
+   </div>
+   <div class="batch-item-diag-drawer" id="batch-diag-${index}" hidden="">
+    <div class="diag-prop"><span>候选标识:</span> <code>${escapeText(candidateId)}</code></div>
+    <div class="diag-prop"><span>操作键:</span> <code>${escapeText(item.operationKey||'')}</code></div>
+    ${item.recordUID?`<div class="diag-prop"><span>记录UID:</span> <code>${escapeText(item.recordUID)}</code></div>`:''}
+    ${item.recordId?`<div class="diag-prop"><span>本地账单ID:</span> <code>${item.recordId}</code></div>`:''}
+    ${item.reason?`<div class="diag-prop"><span>状态说明:</span> <span>${escapeText(item.reason)}</span></div>`:''}
+   </div>
+  </div>`;
+ }).join('');
+ const itemsDiagHtml=items.map((item,idx)=>`
+  <div class="batch-diag-item">
+   <div><b>#${idx+1} (${escapeText(item.candidateId)})</b> 状态: <code>${item.status}</code></div>
+   <div>操作键: <code>${escapeText(item.operationKey||'')}</code></div>
+   ${item.recordUID?`<div>记录UID: <code>${escapeText(item.recordUID)}</code></div>`:''}
+   ${item.recordId?`<div>账单ID: <code>${item.recordId}</code></div>`:''}
+  </div>
+ `).join('');
+ const retryButtonHtml=canRetry?`
+  <div class="batch-retry-section">
+   <button type="button" class="primary batch-retry-btn" id="batch-retry-button" data-task-id="${activeBatchTaskId}">
+    <i class="fa-solid fa-rotate-right" aria-hidden="true"></i> 重试未完成项
+   </button>
+   <small class="batch-retry-note">已入账账单将完整保留，不重复提交</small>
+  </div>
+ `:'' ;
+ const deleteSectionHtml=activeBatchTaskId?`
+  <div class="batch-footer-actions">
+   <button type="button" class="delete-action batch-delete-btn" id="batch-delete-btn" data-task-id="${activeBatchTaskId}">
+    <i class="fa-regular fa-trash-can" aria-hidden="true"></i> 删除识别记录
+   </button>
+  </div>
+ `:'' ;
+ container.innerHTML=`
+  <div class="batch-card" data-operation-uid="${escapeText(batch.operationUID||'')}">
+   <header class="batch-card-header">
+    <div class="batch-heading-row">
+     <h2 class="batch-heading-title">多笔识别结果</h2>
+     <span class="batch-status-badge ${parentStatus.toLowerCase()}">${parentLabel}</span>
+    </div>
+    <div class="batch-summary-stats" role="status" aria-label="识别汇总：${summaryText}${progressText}">
+     <span class="stat-badge added">新增 ${added}</span> · <span class="stat-badge skipped">跳过 ${skipped}</span> · <span class="stat-badge review">待确认 ${review}</span> · <span class="stat-badge failed">失败 ${failed}</span>${pending>0?` · <span class="stat-badge pending">${isCancelled?'未完成':'处理中'} ${pending}</span>`:''}
+    </div>
+   </header>
+   <p class="batch-auto-notice ${isCancelled?'batch-cancelled-notice':''}">${escapeText(noticeMessage)}</p>
+   ${retryButtonHtml}
+   <div class="batch-items-container" role="list" aria-label="批次明细列表">
+    ${itemsHtml}
+   </div>
+   <details class="batch-diagnostics" id="batch-diagnostics">
+    <summary class="batch-diag-summary"><i class="fa-solid fa-screwdriver-wrench" aria-hidden="true"></i> 诊断信息（技术标识）</summary>
+    <div class="batch-diag-body">
+     <div class="diag-prop"><span>批次标识 (operationUID):</span> <code>${escapeText(batch.operationUID||'无')}</code></div>
+     ${itemsDiagHtml}
+    </div>
+   </details>
+   ${deleteSectionHtml}
+  </div>
+ `;
+ container.querySelectorAll('[data-nav-record]').forEach(btn=>{
+  btn.onclick=(e)=>{
+   e.stopPropagation();
+   const recId=Number(btn.dataset.navRecord);
+   if(recId>0){
+    const r=btn.getBoundingClientRect();
+    openRecord(recId,false,{left:r.left,top:r.top,width:r.width,height:r.height,fromBatch:true});
+   }
+  };
+ });
+ container.querySelectorAll('.batch-item-card.is-clickable').forEach(card=>{
+  card.onclick=(e)=>{
+   if(e.target.closest('.batch-item-toggle-btn')||e.target.closest('.batch-item-diag-drawer'))return;
+   const navBtn=card.querySelector('[data-nav-record]');
+   if(navBtn)navBtn.click();
+  };
+ });
+ container.querySelectorAll('.batch-item-toggle-btn').forEach(btn=>{
+  btn.onclick=(e)=>{
+   e.stopPropagation();
+   const card=btn.closest('.batch-item-card');
+   const drawer=card?.querySelector('.batch-item-diag-drawer');
+   if(!drawer)return;
+   const expanded=btn.getAttribute('aria-expanded')==='true';
+   btn.setAttribute('aria-expanded',String(!expanded));
+   drawer.hidden=expanded;
+   btn.querySelector('.toggle-text').textContent=expanded?'诊断':'收起';
+   const icon=btn.querySelector('i');
+   if(icon){
+    icon.classList.toggle('fa-chevron-down',expanded);
+    icon.classList.toggle('fa-chevron-up',!expanded);
+   }
+  };
+ });
+ const retryBtn=container.querySelector('#batch-retry-button');
+ if(retryBtn){
+  retryBtn.onclick=()=>{
+   const taskId=Number(retryBtn.dataset.taskId||activeBatchTaskId);
+   if(taskId)triggerRetryTask(taskId,retryBtn);
+  };
+ }
+ const delBtn=container.querySelector('#batch-delete-btn');
+ if(delBtn){
+  delBtn.onclick=()=>{
+   const taskId=Number(delBtn.dataset.taskId||activeBatchTaskId);
+   if(taskId)requestDelete(taskId,true);
+  };
+ }
+}
 function syncTaskEditor(){if((!recordPanelOpen&&page!=='import')||!draft?.recognitionTaskId)return;const t=recognitionTasks.find(t=>t.id===draft.recognitionTaskId);if(!t)return;if(t.recordId&&working){const r=records.find(r=>r.id===t.recordId);if(r){applyRecord(r);remember()}return}if(t.status!==draft.taskStatus||(!previewUrl&&t.hasScreenshot)||t.recognitionEvidence!==draft.recognitionEvidence){draft={...storedDraft(),taskStatus:t.status,reason:t.message,receipt:t.receipt||draft.receipt||null,recognitionEvidence:t.recognitionEvidence||draft.recognitionEvidence||null};working=['CAPTURING','QUEUED','RECOGNIZING'].includes(t.status);importError=t.status==='FAILED'?t.message:'';if(t.hasScreenshot)previewUrl='https://appassets.androidplatform.net/task-capture/'+t.id+'.jpg';updateEditor();remember()}}
 function capsuleBounds(){return {left:innerWidth/2-80,top:innerHeight-90,width:160,height:52}}
 function fluidPanel(panel,origin,reverse=false,done=()=>{}){
@@ -409,7 +664,7 @@ function refresh(){
   ledgerView=result.ledgerView||null;
   if(retainTail&&ledgerView){ledgerView.hasMore=previousView.hasMore;ledgerView.nextCursor=previousView.nextCursor}
   recognitionTasks=result.recognitionTasks||[];channels=result.channels;accounts=result.accounts||[];bankOptions=result.bankOptions||[];customCategories=result.customCategories||{expense:[],income:[]};if(result.categoryDirectory)categoryDirectory=result.categoryDirectory;if(result.categoryIconOptions)categoryIconOptions=result.categoryIconOptions;if(result.classificationRules)applyClassificationRules(result.classificationRules);else if(native.classificationRules){try{const cr=JSON.parse(native.classificationRules());if(cr.ok&&cr.classificationRules)applyClassificationRules(cr.classificationRules)}catch(_){}}automationRunning=!!result.automationRunning;automatic=result.automatic||{enabled:false,applications:[]};screenshotStorage=result.screenshotStorage||{};captureHealth=result.captureHealth||{enabled:false,ready:false};walletSettings=result.walletSettings||{defaultAccountUid:null,appBindings:{}};bankCodeOptions=result.bankCodeOptions||[];
-  showUndo(result.pendingDeletion);render();syncTaskEditor();syncRecordHistory();if(manualOpen||page==='manual')drawCategories();else drawManualWallet();if(page==='stats')drawStats();if(draft){updateEditor();drawRecordWallet()}if(activeRulesSheetRefresh)activeRulesSheetRefresh(false);return true;
+  showUndo(result.pendingDeletion);render();syncTaskEditor();syncRecordHistory();if(manualOpen||page==='manual')drawCategories();else drawManualWallet();if(page==='stats')drawStats();if(draft){if(recordPanelOpen||page==='import'){const edits=readDraft();draft={...draft,...edits}}else{updateEditor()}drawRecordWallet()}if(activeRulesSheetRefresh)activeRulesSheetRefresh(false);return true;
  }catch(_){notify('账本读取失败，请重试');return false}
 }
 function loadMoreRecords(){
@@ -425,7 +680,7 @@ function loadMoreRecords(){
   ledgerView.hasMore=result.ledgerView.hasMore;ledgerView.nextCursor=result.ledgerView.nextCursor;render();
  }catch(_){notify('更多账单读取失败，请重试')}finally{loadingPage=false}
 }
-function newDraft(){editorBaseline=null;const defCat=findCategoryItem('EXPENSE',null,'餐饮');draft={id:0,submissionToken:submissionToken(),walletAccountUid:walletSettings.defaultAccountUid,manualWalletSelected:false,_categoryEdited:true,amount:'',direction:'EXPENSE',merchant:'',category:defCat.name,categoryId:defCat.id,occurredAt:Date.now(),_originalOccurredAt:Date.now(),_timeEdited:false,note:'',state:'REVIEW',source:'MANUAL',reason:'',rawText:''};previewUrl='';importError='';updateEditor()}
+function newDraft(){editorBaseline=null;activeBatch=null;activeBatchTaskId=null;if($('batch-view')){$('batch-view').hidden=true;$('batch-view').innerHTML=''}if($('import-form'))$('import-form').hidden=false;const defCat=findCategoryItem('EXPENSE',null,'餐饮');draft={id:0,submissionToken:submissionToken(),walletAccountUid:walletSettings.defaultAccountUid,manualWalletSelected:false,_categoryEdited:true,amount:'',direction:'EXPENSE',merchant:'',category:defCat.name,categoryId:defCat.id,occurredAt:Date.now(),_originalOccurredAt:Date.now(),_timeEdited:false,note:'',state:'REVIEW',source:'MANUAL',reason:'',rawText:''};previewUrl='';importError='';updateEditor()}
 function recordWithDetails(record){
  if(record._detailsLoaded||!native?.recordDetails)return {...record};
  try{const details=JSON.parse(native.recordDetails(record.id));if(!details.ok)throw Error(details.error);const merged={...record,...details.record,receipt:details.record?.receipt!==undefined?details.record.receipt:(record.receipt??null),recognitionEvidence:details.record?.recognitionEvidence!==undefined?details.record.recognitionEvidence:(record.recognitionEvidence??null),rawText:details.rawText,history:details.history,_detailsLoaded:true};if(merged.categoryDecision===undefined&&record.categoryDecision!==undefined)merged.categoryDecision=record.categoryDecision;return merged}
@@ -574,6 +829,15 @@ function renderReceiptDetails(){
   const timeSourceNames={EXPLICIT:'识别文字',YEAR_INFERRED:'年份推断',RECOGNITION_FALLBACK:'识别时间',MANUAL:'人工修改'};
   const timeSrcName=timeSourceNames[timeSrc]||receiptSourceNames[timeSrc]||'识别文字';
   evidenceItems.push(`<div class="receipt-evidence-item" data-evidence-field="time" data-evidence-source="${escapeText(timeSrc)}"><div class="receipt-evidence-meta"><b>交易时间</b><span class="receipt-source-tag">${escapeText(timeSrcName)}</span></div><div class="receipt-evidence-raw">${escapeText(timeRaw)}</div></div>`);
+ }
+ if(receipt?.blockOrigin&&typeof receipt.blockOrigin==='object'){
+  const origin=receipt.blockOrigin;
+  const originKindNames={NESTED_BANK:'内嵌银行凭证',MIXED_DEBIT:'独立扣款卡'};
+  const kindLabel=originKindNames[origin.kind]||origin.kind||'凭证区块';
+  const hasCoords=origin.pageWidth>0&&origin.pageHeight>0&&origin.left!=null&&origin.top!=null&&origin.right!=null&&origin.bottom!=null;
+  const rectText=hasCoords?`${kindLabel} · 原图位置 ${origin.left},${origin.top}–${origin.right},${origin.bottom} / ${origin.pageWidth}×${origin.pageHeight}`:kindLabel;
+  const techInfo=receipt.blockId?`<details class="receipt-block-tech"><summary>技术信息</summary><div class="receipt-tech-content">区块 ID: <code>${escapeText(receipt.blockId)}</code></div></details>`:'';
+  evidenceItems.unshift(`<div class="receipt-evidence-item receipt-block-evidence" data-evidence-field="blockOrigin" data-evidence-kind="${escapeText(origin.kind||'')}"><div class="receipt-evidence-meta"><b>区块来源</b><span class="receipt-source-tag">${escapeText(kindLabel)}</span></div><div class="receipt-evidence-raw">${escapeText(rectText)}</div>${techInfo}</div>`);
  }
  let provenanceMarkup='';
  if(evidence&&typeof evidence==='object'&&evidence.route){
@@ -759,15 +1023,18 @@ function updateTimeChip(){
  if(basisEl){basisEl.textContent=basis;basisEl.hidden=!basis}
 }
 function updateAmountSign(){$('amount-sign').textContent='¥ '+(({INCOME:'+',EXPENSE:'-',TRANSFER:''})[$('direction').dataset.value]||'');drawRecordWallet()}
-function applyRecord(r,keepPreview=false){const detailed=recordWithDetails(r),resolved=resolveRecordCategory(detailed),merchant=recordMerchant(detailed);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...detailed,merchant,category:resolved.name,categoryId:resolved.id,_storedMerchant:merchant,_categoryEdited:false,expectedRevision:detailed.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false,_originalOccurredAt:detailed.occurredAt,_timeEdited:false};previewUrl=detailed.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':((detailed.history||[]).find(h=>h.hasScreenshot)?.screenshotUrl?'https://appassets.androidplatform.net'+detailed.history.find(h=>h.hasScreenshot).screenshotUrl:'');working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
+function applyRecord(r,keepPreview=false){if($('batch-view'))$('batch-view').hidden=true;if($('import-form'))$('import-form').hidden=false;const detailed=recordWithDetails(r),resolved=resolveRecordCategory(detailed),merchant=recordMerchant(detailed);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...detailed,merchant,category:resolved.name,categoryId:resolved.id,_storedMerchant:merchant,_categoryEdited:false,expectedRevision:detailed.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false,_originalOccurredAt:detailed.occurredAt,_timeEdited:false};previewUrl=detailed.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':((detailed.history||[]).find(h=>h.hasScreenshot)?.screenshotUrl?'https://appassets.androidplatform.net'+detailed.history.find(h=>h.hasScreenshot).screenshotUrl:'');working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
 function openRecord(id,keepPreview=false,anchor=null){
- const control=document.querySelector(`[data-pending="${id}"],[data-record="${id}"]`),origin=anchor||controlBounds(control);
+ const fromBatchNav=Boolean(anchor?.fromBatch||(lastControl&&lastControl.closest('#batch-view')));
+ if(!fromBatchNav){activeBatch=null;activeBatchTaskId=null}
+ const control=fromBatchNav?document.querySelector(`#batch-view [data-nav-record="${id}"]`):document.querySelector(`[data-pending="${id}"],[data-record="${id}"]`);
+ const origin=anchor||controlBounds(control);
  let r=records.find(x=>x.id===id);
  if(!r&&native?.recordDetails){try{const detail=JSON.parse(native.recordDetails(id));if(detail.ok)r={...detail.record,rawText:detail.rawText,history:detail.history,_detailsLoaded:true}}catch(_){}}
  if(!r){notify('账单已不存在');return}
  const targetMonth=recordMonth(r),targetFilter=r.direction==='TRANSFER'?'transfer':r.direction==='INCOME'?'income':'expense';
  if(month!==targetMonth||filter!==targetFilter){month=targetMonth;filter=targetFilter;viewLimit=200;viewKey='';refresh()}
- if(page!=='ledger'&&page!=='stats')go('ledger');
+ if(page!=='ledger'&&page!=='stats'&&page!=='import')go('ledger');
  recordReturnControl=control||document.activeElement;applyRecord(records.find(x=>x.id===id)||r,keepPreview);showRecordPanel(origin);remember();
 }
 function pickImage(){if(draft?.id||draft?.recognitionTaskId){notify('原始截图仅供核对，不能替换；请从新增入口导入新截图');return}if(working){notify('正在识别，请稍候');return}if(native)native.importImage();else notify('请在 Android 应用中导入截图')}
@@ -801,7 +1068,18 @@ function cancelEditor(force=false){
   showSheet('保留这次修改？','<p class="sheet-copy">账单内容已修改，还没有保存。</p><div class="sheet-actions"><button type="button" id="keep-editing">继续编辑</button><button type="button" id="discard-edits">放弃修改</button></div>');
   $('keep-editing').onclick=()=>closeSheet();$('discard-edits').onclick=()=>{closeSheet(false);cancelEditor(true)};return;
  }
- const returnPage=recordPanelOpen?page:'ledger',done=()=>{draft=null;editorBaseline=null;working=false;previewUrl='';go(returnPage)};
+ const returnPage=recordPanelOpen?page:'ledger';
+ if(draft&&activeBatch){
+  draft=null;editorBaseline=null;working=false;previewUrl='';
+  renderBatchView(activeBatch,activeBatchTaskId);
+  return;
+ }
+ const done=()=>{
+  draft=null;editorBaseline=null;working=false;previewUrl='';activeBatch=null;activeBatchTaskId=null;
+  if($('batch-view')){$('batch-view').hidden=true;$('batch-view').innerHTML=''}
+  if($('import-form'))$('import-form').hidden=false;
+  go(returnPage);
+ };
  if(recordPanelOpen)closeRecordPanel(true,done);else done();
 }
 function setChannel(key,enabled){if(native){native.setChannel(key,enabled);setTimeout(refresh,100)}else notify('系统权限需要在 Android 应用中开启')}
@@ -828,8 +1106,8 @@ $('sheet').addEventListener('cancel',e=>{e.preventDefault();closeSheet()});
 $('sheet').addEventListener('click',e=>{if(e.target===$('sheet')){const r=$('sheet').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeSheet()}});
 function about(){if(native?.aboutFrom)native.aboutFrom(nativeOrigin(document.querySelector('.about-app')));else if(native)native.about();else showSheet('关于花有谱','<p class="sheet-copy">花有谱 · 少点手动，收支有谱</p>')}
 function submitDraft(confirmDuplicate=false){if((draft?.refund||draft?.standaloneRefund)&&draft.state!=='POSTED'){chooseRefundTarget();return}if(working){notify('正在识别，请稍候');return}if($('direction').dataset.value==='TRANSFER'&&!validTransfer('record'))return;const values=readDraft();if(!values.direction||!['EXPENSE','INCOME','TRANSFER'].includes(values.direction)){notify('请确认交易收支方向');$('direction').focus();return}$('amount').parentElement.classList.remove('error-field');if(!/^\d+(\.\d{1,2})?$/.test(values.amount)||(Number(values.amount)<0||(Number(values.amount)===0&&!(draft?.refund&&draft.state==='POSTED'&&draft.amountCents===0)))){$('amount').parentElement.classList.add('error-field');$('amount').focus();notify('请输入大于零、最多两位小数的金额');return}if(!Number.isFinite(values.occurredAt)){$('occurred-at').focus();notify('请选择有效交易时间');return}if(!native){notify('请在 Android 应用中保存账单');return}const result=JSON.parse(native.save(JSON.stringify({...values,id:draft?.id||0,recognitionTaskId:draft?.recognitionTaskId||0,confirmDuplicate,expectedRevision:draft?.expectedRevision??draft?.wallet?.revision??0,submissionToken:draft?.submissionToken||(draft.submissionToken=submissionToken())})));if(result.duplicateRequired){showSheet('疑似重复，仍然保存？','<p class="sheet-copy">这笔账单可能已从其他渠道记录，请核对后再确认。</p><div class="sheet-actions"><button onclick="closeSheet()">返回核对</button><button class="primary" id="confirm-duplicate">仍然保存</button></div>');$('confirm-duplicate').onclick=()=>submitDraft(true);return}if(!result.ok){notify(result.error||'保存失败，请重试');return}const edited=draft?.state==='POSTED';filter=values.direction==='TRANSFER'?'transfer':values.direction==='INCOME'?'income':'expense';refresh();cancelEditor(true);notify(result.state==='REVIEW'?'已保存，请选择钱包后入账':edited?'修改已保存':'记账成功')}
-function restoreState(state){if(!state)return;month=/^\d{4}-\d{2}$/.test(state.month)?state.month:month;filter=['income','expense','transfer','all'].includes(state.filter)?state.filter:'expense';draft=state.draft||null;if(draft&&draft._originalOccurredAt==null){draft._originalOccurredAt=draft.occurredAt;draft._timeEdited=false}editorBaseline=typeof state.editorBaseline==='string'?state.editorBaseline:null;if(draft)updateEditor();previewUrl=state.previewUrl||'';if(state.manual){manualType=['income','expense','transfer'].includes(state.manual.type)?state.manual.type:'expense';manualTransfer=state.manual.transfer||manualTransfer;$('manual-occurred-at').value=state.manual.occurredAt||localTime(Date.now());manualCategory=state.manual.category||'餐饮';manualCategoryId=state.manual.categoryId||null;$('manual-amount').value=state.manual.amount||'';$('manual-note').value=state.manual.note||'';$('manual-note-count').textContent=$('manual-note').value.length+'/500';manualWalletUid=state.manual.walletUid||walletSettings.defaultAccountUid;manualWalletSelected=!!state.manual.walletSelected;manualSubmissionToken=state.manual.submissionToken||submissionToken();drawManualWallet()}statsType=['expense','income','all'].includes(state.statsType)?state.statsType:'expense';rankingType=state.rankingType==='income'?'income':'expense';assetsHidden=!!state.assetsHidden;go(['ledger','import','settings','manual','stats','assets'].includes(state.page)?state.page:'ledger');refresh();if(draft){updateEditor();if(state.recordPanel)showRecordPanel(null)}if(state.manualPanel)beginManual(false);remember()}
-window.LedgerUI={getState,back(){if(window.LedgerSetup?.isOpen()){window.LedgerSetup.close();return true}if($('sheet').open){closeSheet();return true}if(manualOpen||manualClosing){if(!manualClosing)closeManual();return true}if(recordPanelOpen||recordPanelClosing){if(!recordPanelClosing)cancelEditor();return true}if(searching){setSearchOpen(false);return true}if(page!=='ledger'){go('ledger');return true}return false},event(type,data){switch(type){case'fileOperation':if(data){showSheet('文件处理中',`<div class="export-progress" role="status"><span class="recognition-spinner" aria-hidden="true"></span><p>${escapeText(data)}…</p></div>`);$('sheet').dataset.fileOperation='true'}else if($('sheet').dataset.fileOperation){closeSheet();delete $('sheet').dataset.fileOperation}break;case'shakeApplications':openShakeWhitelist();break;case'permissionSetup':window.LedgerSetup?.render(data);break;case'fontScale':document.body.classList.toggle('large-text',data>=1.4);document.body.style.setProperty('--scaled-fab-font',`${35/Math.max(1,data)}px`);break;case'refresh':if(refresh()){if(page==='stats')drawStats();if(page==='assets')drawAssets();if(page==='manual')drawCategories()}break;case'statisticsPeriod':openStatistics(data);break;case'navigate':go(data);break;case'message':notify(data);break;case'restoreState':restoreState(data);break;case'openRecord':openRecord(data,true);break;case'preview':previewUrl=data.url;updateEditor();break;case'importStatus':working=!!data.working;if(working){newDraft();if(data.taskId){draft.recognitionTaskId=data.taskId;draft.taskStatus='CAPTURING'}go('import')}if(data.error)importError=String(data.error);updateEditor();break;case'importError':working=false;importError=typeof data==='string'?data:String(data?.error||'识别失败，请重新选择截图重试');updateEditor();break}}};
+function restoreState(state){if(!state)return;month=/^\d{4}-\d{2}$/.test(state.month)?state.month:month;filter=['income','expense','transfer','all'].includes(state.filter)?state.filter:'expense';draft=state.draft||null;if(draft&&draft._originalOccurredAt==null){draft._originalOccurredAt=draft.occurredAt;draft._timeEdited=false}editorBaseline=typeof state.editorBaseline==='string'?state.editorBaseline:null;if(draft)updateEditor();previewUrl=state.previewUrl||'';if(state.manual){manualType=['income','expense','transfer'].includes(state.manual.type)?state.manual.type:'expense';manualTransfer=state.manual.transfer||manualTransfer;$('manual-occurred-at').value=state.manual.occurredAt||localTime(Date.now());manualCategory=state.manual.category||'餐饮';manualCategoryId=state.manual.categoryId||null;$('manual-amount').value=state.manual.amount||'';$('manual-note').value=state.manual.note||'';$('manual-note-count').textContent=$('manual-note').value.length+'/500';manualWalletUid=state.manual.walletUid||walletSettings.defaultAccountUid;manualWalletSelected=!!state.manual.walletSelected;manualSubmissionToken=state.manual.submissionToken||submissionToken();drawManualWallet()}statsType=['expense','income','all'].includes(state.statsType)?state.statsType:'expense';rankingType=state.rankingType==='income'?'income':'expense';assetsHidden=!!state.assetsHidden;go(['ledger','import','settings','manual','stats','assets'].includes(state.page)?state.page:'ledger');if(state.activeBatch){activeBatch=state.activeBatch;activeBatchTaskId=state.activeBatchTaskId||null;renderBatchView(activeBatch,activeBatchTaskId)}refresh();if(draft){updateEditor();if(state.recordPanel)showRecordPanel(null)}if(state.manualPanel)beginManual(false);remember()}
+window.LedgerUI={getState,back(){if(window.LedgerSetup?.isOpen()){window.LedgerSetup.close();return true}if($('sheet').open){closeSheet();return true}if(manualOpen||manualClosing){if(!manualClosing)closeManual();return true}if(recordPanelOpen||recordPanelClosing){if(!recordPanelClosing){if(draft&&activeBatch){cancelEditor();return true}cancelEditor()}return true}if(searching){setSearchOpen(false);return true}if(page!=='ledger'){go('ledger');return true}return false},event(type,data){switch(type){case'fileOperation':if(data){showSheet('文件处理中',`<div class="export-progress" role="status"><span class="recognition-spinner" aria-hidden="true"></span><p>${escapeText(data)}…</p></div>`);$('sheet').dataset.fileOperation='true'}else if($('sheet').dataset.fileOperation){closeSheet();delete $('sheet').dataset.fileOperation}break;case'shakeApplications':openShakeWhitelist();break;case'permissionSetup':window.LedgerSetup?.render(data);break;case'fontScale':document.body.classList.toggle('large-text',data>=1.4);document.body.style.setProperty('--scaled-fab-font',`${35/Math.max(1,data)}px`);break;case'refresh':if(refresh()){if(page==='stats')drawStats();if(page==='assets')drawAssets();if(page==='manual')drawCategories();if(activeBatch&&activeBatchTaskId){const curTask=recognitionTasks.find(t=>t.id===activeBatchTaskId);if(curTask?.batch){activeBatch=curTask.batch;const isEditingChild=Boolean(draft&&((recordPanelOpen&&$('import-form')&&!$('import-form').hidden)||page==='import'));if(!isEditingChild)renderBatchView(curTask.batch,activeBatchTaskId)}}}break;case'statisticsPeriod':openStatistics(data);break;case'navigate':go(data);break;case'message':notify(data);break;case'restoreState':restoreState(data);break;case'openRecord':openRecord(data,true);break;case'preview':previewUrl=data.url;updateEditor();break;case'recognitionBatch':{let batchObj=data;if(typeof batchObj==='string'){try{batchObj=JSON.parse(batchObj)}catch(_){break}}if(!batchObj||typeof batchObj!=='object')break;const isEditingActiveDraft=Boolean(draft&&recordPanelOpen&&$('import-form')&&!$('import-form').hidden);if(isEditingActiveDraft){const edits=readDraft();draft={...draft,...edits};refresh();break}working=false;draft=null;editorBaseline=null;activeBatch=batchObj;let matchingTaskId=null;if(batchObj.operationUID){const matchingTask=recognitionTasks.find(t=>(t.operationUID&&t.operationUID===batchObj.operationUID)||(t.batch?.operationUID&&t.batch.operationUID===batchObj.operationUID));if(matchingTask)matchingTaskId=matchingTask.id}activeBatchTaskId=matchingTaskId;renderBatchView(batchObj,activeBatchTaskId);if(page==='import'){document.querySelector('#import .page-title h1').textContent='多笔识别结果';document.querySelector('#import .subtitle').hidden=false;document.querySelector('#import .subtitle').textContent='已自动识别完成，符合入账条件的账单已直接保存';document.querySelector('.scanning').hidden=true;document.querySelector('.dots').hidden=true}else if(!recordPanelOpen){showRecordPanel(null)}refresh();break}case'importStatus':working=!!data.working;if(working){newDraft();if(data.taskId){draft.recognitionTaskId=data.taskId;draft.taskStatus='CAPTURING'}go('import')}if(data.error)importError=String(data.error);updateEditor();break;case'importError':working=false;importError=typeof data==='string'?data:String(data?.error||'识别失败，请重新选择截图重试');updateEditor();break}}};
 document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;viewLimit=200;refresh();remember()});
 document.querySelectorAll('[data-channel]').forEach(s=>s.onclick=()=>setChannel(s.dataset.channel,s.getAttribute('aria-checked')!=='true'));
 $('month').onclick=()=>{showSheet('选择账本月份',`<input id="month-picker" class="month-input" type="month" value="${month}" min="2000-01" max="2100-12"/><div class="sheet-actions"><button id="month-prev">上个月</button><button id="month-next">下个月</button><button class="primary" id="month-apply">确定</button></div>`);const move=delta=>{const [y,m]=$('month-picker').value.split('-').map(Number),d=new Date(y,m-1+delta,1);$('month-picker').value=localTime(d.getTime()).slice(0,7)};$('month-prev').onclick=()=>move(-1);$('month-next').onclick=()=>move(1);$('month-apply').onclick=()=>{const value=$('month-picker').value;if(value){month=value;viewLimit=200;refresh();closeSheet();remember()}}};

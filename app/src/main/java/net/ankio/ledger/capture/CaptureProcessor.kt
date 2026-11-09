@@ -3,6 +3,7 @@ package net.ankio.ledger.capture
 import android.graphics.Bitmap
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CancellationException
 import net.ankio.ledger.LedgerApp
 import net.ankio.ledger.ocr.OcrClient
@@ -70,9 +71,17 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
     private suspend fun processRecognition(source:Source,origin:String,taskId:Long?,beforeAccept:suspend ()->Unit,allowed:()->Boolean,
         recognize:suspend (()->Boolean,()->net.ankio.ledger.core.RecognitionTimeContext)->net.ankio.ledger.ocr.RecognitionResult):IngestResult {
         require(source == Source.OCR || source == Source.IMAGE)
-        val guard={ allowed() && (taskId==null || app.tasks.exists(taskId)) }
+        val processingContext=currentCoroutineContext()
+        val guard={ processingContext.isActive && allowed() && (taskId==null || app.tasks.exists(taskId)) }
         try {
             val operationKey=taskId?.let(app.tasks::operationKey)
+            if(operationKey!=null) {
+                val batch=app.coordinator.resumeBatch(operationKey,taskId?.let(app.tasks::image),guard)
+                if(batch!=null) {
+                    app.tasks.update(requireNotNull(taskId),batch.taskStatus,batch.message)
+                    app.changed();return IngestResult.Batch(batch)
+                }
+            }
             if(taskId!=null && net.ankio.ledger.data.RecognitionCommitRecovery.recover(app.tasks,app.store,taskId)) {
                 app.changed();return IngestResult.DuplicateSkipped
             }
@@ -93,12 +102,24 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
             val recognitionTime = { frozenTime ?: (taskId?.let { app.tasks.beginRecognition(it,recognitionClock) }
                 ?: recognitionClock()).also { frozenTime=it } }
             val extracted = recognize(guard,recognitionTime)
-            val provenance=taskId?.let(app.tasks::recognitionEvidence)?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::decode)?.takeIf { it.route=="NODE" || it.snapshot!=null }
-            val recognized=if(extracted.bill==null || provenance==null)extracted else extracted.copy(bill=extracted.bill.copy(
-                receipt=(extracted.bill.receipt ?: net.ankio.ledger.core.ReceiptEvidence()).copy(recognition=provenance)))
+            val provenance=taskId?.let(app.tasks::recognitionEvidence)?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::decode)
+            val recognized=if(provenance==null)extracted else extracted.copy(candidates=extracted.candidates.map { candidate ->
+                candidate.copy(bill=candidate.bill.copy(receipt=(candidate.bill.receipt ?: net.ankio.ledger.core.ReceiptEvidence()).copy(recognition=provenance)))
+            })
             currentCoroutineContext().ensureActive()
             beforeAccept()
             if(!guard())throw CancellationException("识别已停止")
+            val multi=recognized.candidates.any { it.id!=net.ankio.ledger.core.CandidateId.SINGLE }
+            if(multi) {
+                val time=recognitionTime()
+                val key=operationKey ?: "recognition:${java.util.UUID.randomUUID()}"
+                val saveAt=android.os.SystemClock.elapsedRealtime()
+                val batch=app.coordinator.acceptBatch(Capture(source,origin,recognized.rawText,time.recognitionAt),
+                    recognized.candidates,key,time.zoneId,recognized.screenshot,classification,policy(taskId),guard)
+                taskId?.let { app.tasks.phaseTiming(it,"save",android.os.SystemClock.elapsedRealtime()-saveAt)
+                    app.tasks.update(it,batch.taskStatus,batch.message);app.tasks.diagnose(it,"stage","finished") }
+                app.changed();return IngestResult.Batch(batch)
+            }
             val skip=recognized.skipReason ?: net.ankio.ledger.core.TransactionRejection.reason(recognized.rawText)
             skip?.let { message ->
                 taskId?.let { app.tasks.update(it,"SKIPPED",message);app.tasks.diagnose(it,"stage","skipped_transaction") }
@@ -150,13 +171,17 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                     }
                     IngestResult.Ignored -> app.tasks.update(id,"NO_BILL","未识别到单笔账单，可换到账单详情页重试")
                     is IngestResult.Skipped -> app.tasks.update(id,"SKIPPED",result.message)
+                    is IngestResult.Batch -> app.tasks.update(id,result.result.taskStatus,result.result.message)
                 }
                 app.tasks.diagnose(id,"stage","finished")
                 app.changed()
             }
             return result
         } catch(error:CancellationException) {
-            taskId?.let { app.tasks.update(it,"CANCELLED","识别已停止，未新增账单");app.changed() };throw error
+            taskId?.let { id ->
+                val batch=app.tasks.operationKey(id)?.let(app.store::recognitionBatch)
+                app.tasks.update(id,"CANCELLED",batch?.stoppedMessage("识别已停止，未新增账单") ?: "识别已停止，未新增账单");app.changed()
+            };throw error
         } catch(error:Exception) {
             app.executionLog.event("model","local","failed",org.json.JSONObject().put("errorType",error.javaClass.simpleName)
                 .put("message",(error as? net.ankio.ledger.ocr.RecognitionException)?.userMessage?:"识别失败"))

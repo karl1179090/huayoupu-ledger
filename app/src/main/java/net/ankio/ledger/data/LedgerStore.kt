@@ -34,11 +34,12 @@ sealed class IngestResult {
     data object DuplicateSkipped : IngestResult()
     data object Ignored : IngestResult()
     data class Skipped(val message:String):IngestResult()
+    data class Batch(val result:RecognitionBatchResult):IngestResult()
 }
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 14) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 15) {
     private val backupContext=context.applicationContext
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
@@ -89,10 +90,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         CategoryDirectory.create(db)
         ClassificationStorage.create(db)
         AccountingDates.create(db)
+        RecognitionBatchStore.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..13 && newVersion == 14) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..14 && newVersion == 15) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -128,7 +130,8 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         if (oldVersion < 11) CategoryDirectory.create(db)
         if(oldVersion < 12)db.execSQL("ALTER TABLE records ADD COLUMN receipt_evidence TEXT")
         if(oldVersion<13)ClassificationStorage.create(db)
-        AccountingDates.migrate(db)
+        if(oldVersion<14)AccountingDates.migrate(db)
+        if(oldVersion<15)RecognitionBatchStore.create(db)
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -529,6 +532,16 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             throw WalletException("STALE_RECORD_REVISION","账单已更新，请重新核对")
     }
 
+    @Synchronized fun recognitionBatch(operationKey:String):RecognitionBatchResult?=RecognitionBatchStore.result(this,operationKey)
+    @Synchronized fun freezeRecognitionBatch(capture:Capture,candidates:List<TransactionCandidate>,operationKey:String,zoneId:String,
+        snapshot:ClassificationSnapshot,policy:RecognitionPolicy):RecognitionBatchResult=
+        RecognitionBatchStore.freeze(this,capture,candidates,operationKey,zoneId,snapshot,policy)
+    @Synchronized fun submitBatchCandidate(operationKey:String,candidateId:CandidateId,screenshot:ByteArray?=null):RecognitionBatchResult=
+        RecognitionBatchStore.submit(this,operationKey,candidateId,screenshot)
+    @Synchronized fun failBatchCandidate(operationKey:String,candidateId:CandidateId)=RecognitionBatchStore.failed(this,operationKey,candidateId)
+    @Synchronized fun recognitionBatchBackup():org.json.JSONArray=RecognitionBatchStore.export(this)
+    @Synchronized fun restoreRecognitionBatches(batches:org.json.JSONArray)=RecognitionBatchStore.restore(this,batches)
+
     data class CommittedCapture(val recordUid:String,val record:LedgerRecord?,val candidateId:CandidateId=CandidateId.SINGLE)
 
     fun committedCandidate(operationKey:String,candidateId:CandidateId):CommittedCapture? =
@@ -555,14 +568,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     @Synchronized fun ingestRecognition(capture:Capture,bill:ParsedBill,operationKey:String,eventKey:String?=null,
-        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null):IngestResult {
+        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null,independentCandidate:Boolean=false):IngestResult {
         val db=writableDatabase;db.beginTransaction()
         try {
             committedCapture(operationKey)?.let { committed ->
                 db.setTransactionSuccessful()
                 return if(committed.record==null)IngestResult.Skipped("账单已移除，未新增记账") else IngestResult.DuplicateSkipped
             }
-            val result=ingest(capture,bill,eventKey,screenshot,merchantIcon)
+            val result=ingest(capture,bill,eventKey,screenshot,merchantIcon,independentCandidate=independentCandidate)
             val record=when(result) {
                 is IngestResult.Saved->result.record
                 IngestResult.DuplicateSkipped->eventKey?.let(::committedPaymentEvent)?.record ?: matchingIdentity(capture,bill)
@@ -586,7 +599,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     @Synchronized
-    fun ingest(capture: Capture, bill: ParsedBill, eventKey: String? = null, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, requireReview: Boolean = false): IngestResult {
+    fun ingest(capture: Capture, bill: ParsedBill, eventKey: String? = null, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, requireReview: Boolean = false, independentCandidate:Boolean=false): IngestResult {
         require(screenshot == null || screenshot.isNotEmpty() && screenshot.size <= 5 * 1024 * 1024) { "Invalid screenshot size" }
         require(merchantIcon == null || merchantIcon.isNotEmpty() && merchantIcon.size <= 128 * 1024) { "Invalid icon size" }
         val db = writableDatabase
@@ -598,7 +611,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 buildList { while(c.moveToNext())add(read(c)) }
             }.any { old ->
                 old.identities.any { it in incomingIdentities } ||
-                    old.bill.amountCents==bill.amountCents && old.bill.direction==bill.direction &&
+                    !independentCandidate && old.bill.amountCents==bill.amountCents && old.bill.direction==bill.direction &&
                         old.capture.origin==capture.origin && old.capture.text.filterNot(Char::isWhitespace)==capture.text.filterNot(Char::isWhitespace)
             }
             if(recentlyDeleted) { db.setTransactionSuccessful();return IngestResult.Skipped("账单已删除") }
@@ -685,7 +698,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     updated=promoted && presented.state==RecordState.POSTED,supplemented=supplemented)
                     else IngestResult.DuplicateSkipped
             }
-            val automatic = if(!requireReview) uniqueAutomaticPayment(capture,bill) else null
+            val automatic = if(!independentCandidate && !requireReview) uniqueAutomaticPayment(capture,bill) else null
             if(automatic!=null) {
                 val completed=syncWallet(db,completePaymentIdentity(db,automatic,bill),incomingEvidence=bill.paymentMethod)
                 val supplemented=appendPaymentScreenshot(db,completed,capture,screenshot)
@@ -693,7 +706,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 db.setTransactionSuccessful()
                 return IngestResult.Saved(completed,supplemented=supplemented)
             }
-            val repeated=if(!requireReview && eventKey==null)uniqueRepeatedPayment(capture,bill) else null
+            val repeated=if(!independentCandidate && !requireReview && eventKey==null)uniqueRepeatedPayment(capture,bill) else null
             if(repeated!=null) {
                 val supplemented=appendPaymentScreenshot(db,repeated,capture,screenshot)
                 linkMerchantIcon(db,repeated.id,repeated.bill,merchantIcon)
@@ -737,7 +750,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     if(!(primaryIssuerConflict && old.bill.transactionId==bill.transactionId) &&
                         old.identities.none { oldId->incomingIdentities.any { it.scope==oldId.scope && it.value!=oldId.value } })add(old.existing())
                 } } }
-            val detected = DuplicateDetector.find(capture, bill, near)
+            val detected = if(independentCandidate)Duplicate.None else DuplicateDetector.find(capture, bill, near)
             val identityOwners=incomingIdentities.flatMap { identity->db.rawQuery("SELECT record_id FROM record_identities WHERE scope=? AND value=?",arrayOf(identity.scope,identity.value))
                 .use { c->buildList { while(c.moveToNext())add(c.getLong(0)) } } }.distinct()
             // A shared alias with conflicting other issuer IDs is ambiguous, even when
@@ -757,7 +770,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 db.setTransactionSuccessful()
                 return if (supplemented || promoted || original!=previous) IngestResult.Saved(original, supplemented=supplemented) else IngestResult.DuplicateSkipped
             }
-            val automaticCandidate=automaticPaymentCandidates(capture,bill).firstOrNull { isAutomaticPayment(it) }
+            val automaticCandidate=if(independentCandidate)null else automaticPaymentCandidates(capture,bill).firstOrNull { isAutomaticPayment(it) }
             val possible = duplicate as? Duplicate.Possible ?: refundedPaymentCandidate?.let { Duplicate.Possible(it.id) }
                 ?: automaticCandidate?.let { Duplicate.Possible(it.id) }
             val reason = if(refundedPaymentCandidate!=null) "疑似为已退款账单的原付款页面，请核对后保存"

@@ -33,6 +33,8 @@ object WalletResolver {
         }
         if (existing?.manualLocked == true || existing?.selectionSource == "MANUAL")
             return if (evidence != null && evidence.medium != "UNKNOWN") existing.copy(evidenceFingerprint = fingerprint) else existing
+        if(evidence?.reason=="ACTUAL_ACCOUNT_REQUIRED" && !(existing?.selectionSource=="IMPORT" && existing.accountUid!=null))
+            return WalletResolution(null,"PAYMENT_METHOD","ACTUAL_ACCOUNT_REQUIRED",fingerprint)
         val packageName = sourcePackage?.let(::sourcePackage)
         val actualPlatform = when (packageName) {
             PaymentApps.WECHAT -> "wechat"

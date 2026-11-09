@@ -43,6 +43,7 @@ data class ReceiptEvidence(
     val sourceApp: ReceiptField? = null,
     val bank: BankReceiptEvidence? = null,
     val time: ReceiptTimeEvidence? = null,
+    val blockOrigin: ReceiptBlockOrigin? = null,
     val recognition: RecognitionEvidence? = null,
 ) {
     init {

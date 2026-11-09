@@ -58,8 +58,11 @@ class LocalRecognitionClient(context: android.content.Context) {
                     LocalOcrLine(line.text, box?.left ?: 0, box?.top ?: 0, box?.right ?: 0, box?.bottom ?: 0)
                 }
                 val parseAt=android.os.SystemClock.elapsedRealtime()
-                val bill = LocalOcrBillParser.parse(lines, ocr.width, ocr.height, time.recognitionAt, livePaymentAt, policy, origin, time)
+                val candidates = net.ankio.ledger.core.TransactionPageParser.parse(lines, ocr.width, ocr.height, time, livePaymentAt, policy, origin)
                 val timings=mapOf("ocr" to ocrMillis,"parse" to android.os.SystemClock.elapsedRealtime()-parseAt)
+                if (candidates.any { it.id != net.ankio.ledger.core.CandidateId.SINGLE })
+                    return@run RecognitionResult(ocr.rawText.take(16_384),candidates,screenshot=submitted,phaseTimingsMs=timings)
+                val bill = candidates.singleOrNull()?.bill
                 // Completed refunds, including a zero net amount, continue to storage association.
                 // Only closed, pending or failed transactions stop this pipeline.
                 net.ankio.ledger.core.TransactionRejection.reason(ocr.rawText)?.let { reason ->

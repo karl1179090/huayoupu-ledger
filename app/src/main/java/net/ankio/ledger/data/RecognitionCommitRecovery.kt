@@ -8,6 +8,10 @@ import net.ankio.ledger.core.CandidateId
 object RecognitionCommitRecovery {
     fun recover(tasks:RecognitionTasks,ledger:LedgerStore,taskId:Long):Boolean {
         val operation=tasks.operationKey(taskId) ?: return false
+        ledger.recognitionBatch(operation)?.let { batch ->
+            if(batch.complete)tasks.update(taskId,batch.taskStatus,batch.message)
+            return batch.complete
+        }
         val committed=ledger.committedCandidate(operation,CandidateId.SINGLE)
             ?: tasks.paymentIdentity(taskId)?.let(ledger::committedPaymentEvent) ?: return false
         val record=committed.record

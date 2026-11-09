@@ -157,7 +157,9 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         },"id=?"+(if(status in setOf("FAILED","CANCELLED")) " AND status IN ('CAPTURING','QUEUED','RECOGNIZING')" else ""),arrayOf(id.toString()))==1
         if(updated) {
             if(status in setOf("SUCCEEDED","REVIEW","DUPLICATE","NO_BILL","SKIPPED","CANCELLED"))operationKey(id)?.let { classificationStore?.releaseClassificationSnapshot(it) }
-            screenshots.state(imageOwner(id),status)
+            // A cancelled partial batch still owns resumable evidence; retain it under the failed-task policy.
+            val imageState=if(status=="CANCELLED" && operationKey(id)?.let { classificationStore?.recognitionBatch(it) }?.complete==false)"FAILED" else status
+            screenshots.state(imageOwner(id),imageState)
             if(status !in setOf("CAPTURING","QUEUED","RECOGNIZING"))screenshots.cleanup()
         }
         if(updated)app?.executionLog?.event("model","task",status,JSONObject().put("taskId",id).put("recordId",recordId))
@@ -315,6 +317,9 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         while(c.moveToNext())if(JSONObject(c.getString(1)).optString("payment_identity")==identity)return@use c.getLong(0)
         null
     }
+    fun origin(id:Long):String?=readableDatabase.rawQuery("SELECT origin FROM tasks WHERE id=?",arrayOf(id.toString())).use {
+        if(it.moveToFirst())it.getString(0) else null
+    }
     fun status(id:Long):String?=readableDatabase.rawQuery("SELECT status FROM tasks WHERE id=?",arrayOf(id.toString())).use { if(it.moveToFirst())it.getString(0) else null }
     fun recordId(id:Long):Long?=readableDatabase.rawQuery("SELECT record_id FROM tasks WHERE id=?",arrayOf(id.toString())).use {
         if(it.moveToFirst()&&!it.isNull(0))it.getLong(0) else null
@@ -337,13 +342,24 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             putNull("record_id");put("status","SKIPPED");put("message",message)
         },"record_id=?",arrayOf(recordId.toString()))
     }
-    fun snapshot(limit:Int=200,start:Long?=null,end:Long?=null):JSONArray=readableDatabase.rawQuery("SELECT id,source,origin,created_at,status,message,record_id,image IS NOT NULL,diagnostic FROM tasks"+
+    fun snapshot(limit:Int=200,start:Long?=null,end:Long?=null):JSONArray {
+        val rows=readableDatabase.rawQuery("SELECT id,source,origin,created_at,status,message,record_id,image IS NOT NULL,diagnostic,operation_uid FROM tasks"+
         (if(start!=null&&end!=null)" WHERE (created_at>=? AND created_at<?) OR status IN ('CAPTURING','QUEUED','RECOGNIZING')" else "")+
         " ORDER BY id DESC LIMIT ${limit.coerceIn(1,500)}",if(start!=null&&end!=null)arrayOf(start.toString(),end.toString()) else null).use { c ->
         JSONArray().apply { while(c.moveToNext()) put(JSONObject().put("id",c.getLong(0)).put("source",c.getString(1))
             .put("origin",c.getString(2)).put("createdAt",c.getLong(3)).put("status",c.getString(4)).put("message",c.getString(5))
             .put("recordId",if(c.isNull(6))JSONObject.NULL else c.getLong(6)).put("hasScreenshot",screenshots.contains(imageOwner(c.getLong(0))))
-            .put("diagnostic",JSONObject(c.getString(8))).put("recognitionEvidence",recognitionEvidence(c.getLong(0)) ?: JSONObject.NULL)) }
+            .put("diagnostic",JSONObject(c.getString(8))).put("operationUID",c.getString(9))
+            .put("recognitionEvidence",recognitionEvidence(c.getLong(0)) ?: JSONObject.NULL)) }
+    }
+        // Close the task cursor before reading ledger.db; task DB locks never nest a store lock.
+        for(index in 0 until rows.length()) {
+            val row=rows.getJSONObject(index)
+            val batch=classificationStore?.recognitionBatch("recognition:${row.getString("operationUID")}")
+            if(batch!=null)row.put("batch",batch.json().put("canRetry",!batch.complete &&
+                row.getString("status") in setOf("FAILED","CANCELLED") && row.getBoolean("hasScreenshot")))
+        }
+        return rows
     }
     fun diagnosticExport():JSONArray=readableDatabase.rawQuery("SELECT id,source,created_at,status,diagnostic FROM tasks ORDER BY id DESC LIMIT 100",null).use { c ->
         JSONArray().apply { while(c.moveToNext())put(JSONObject().put("id",c.getLong(0)).put("source",c.getString(1))
