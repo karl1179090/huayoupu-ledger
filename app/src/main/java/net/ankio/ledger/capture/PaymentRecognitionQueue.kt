@@ -72,7 +72,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
         if(!app.recognitionWork.accepting)return false
         val key=app.tasks.operationKey(id) ?: return false
         val batch=app.store.recognitionBatch(key) ?: return false
-        if(batch.complete || app.tasks.status(id) !in setOf("FAILED","CANCELLED") || !hasCapacity() || app.tasks.image(id)==null)return false
+        if(batch.complete || app.tasks.status(id) !in setOf("FAILED","CANCELLED") || !hasCapacity() || !app.tasks.hasResumableBatch(id))return false
         val origin=app.tasks.origin(id) ?: return false
         val imported=app.tasks.isImageImport(id)
         if(!imported) {
@@ -141,10 +141,12 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
     @Synchronized fun cancelShake(pkg:String?=null) {
         jobs.values.filter { !it.automatic && !it.shortcut && !it.imageImport && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
         app.tasks.pendingShake(pkg).forEach { app.tasks.update(it,"CANCELLED",stoppedMessage(it,"摇一摇授权已关闭，未新增账单")) }
+        app.tasks.reconcileCancelledBatchReservations("shake:",pkg)
     }
     @Synchronized fun cancelShortcut(pkg:String?=null) {
         jobs.values.filter { it.shortcut && (pkg==null || it.pkg==pkg) }.forEach { it.job.cancel() }
         app.tasks.pendingShortcut(pkg).forEach { app.tasks.update(it,"CANCELLED",stoppedMessage(it,"快捷方式识别授权已关闭，未新增账单")) }
+        app.tasks.reconcileCancelledBatchReservations("shortcut:",pkg)
     }
     @Synchronized fun cancelAll() {
         cancelAutomatic();cancelShake();cancelShortcut()

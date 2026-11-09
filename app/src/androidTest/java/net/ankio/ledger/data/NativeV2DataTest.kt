@@ -165,7 +165,7 @@ class NativeV2DataTest {
         store.addCategory(expense); store.addCategory(income)
         channels.set(ChannelSettings.Channel.OCR, true)
         val encoded = LedgerBackup.encode(store, channels)
-        assertEquals(8, JSONObject(encoded).getInt("version"))
+        assertEquals(10, JSONObject(encoded).getInt("version"))
         val backup = decode(encoded)
         assertEquals(setOf(posted.copy(id = 0), pending.copy(id = 0)), backup.records.toSet())
         assertEquals(setOf(asset.copy(id = 0), debt.copy(id = 0)), backup.accounts.toSet())

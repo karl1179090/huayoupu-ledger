@@ -89,7 +89,7 @@ class CategoryDirectoryTest {
         store.saveCategory(dining.id, "合成预设改名", Direction.EXPENSE, "coffee")
         store.reorderCategories(Direction.EXPENSE, store.categoryDirectory(Direction.EXPENSE).map { it.id }.reversed())
         val json = LedgerBackup.encode(store, ChannelSettings(context))
-        assertEquals(8, JSONObject(json).getInt("version"))
+        assertEquals(10, JSONObject(json).getInt("version"))
         val backup = LedgerBackup.decode(json.byteInputStream())
         val targetName = "category-restore-${UUID.randomUUID()}.db"
         try { LedgerStore(context, targetName).use { target ->
@@ -102,6 +102,36 @@ class CategoryDirectoryTest {
             assertEquals(before.map { if (it.bill.category == custom.name) it.copy(bill = it.bill.copy(category = "合成本地改名")) else it }, target.all())
             assertFalse(target.categoryDirectory(Direction.EXPENSE).any { it.name == custom.name })
         } } finally { context.deleteDatabase(targetName) }
+    }
+
+    @Test fun literalVersionEightBackupRetainsExplicitCategoryAndAbsoluteWalletBalance() {
+        // A real old-format input: no version 9 batch or version 10 task/receipt fields.
+        val legacy="""{"format":"simple-ledger","version":8,"channels":{"ocr":false},
+          "records":[{"uid":"22222222-2222-4222-8222-222222222222","source":"MANUAL","origin":"manual","text":"合成v8旧账",
+            "receivedAt":1793491200000,"amount":1235,"direction":"EXPENSE","merchant":"合成v8商家","category":"合成v8旧用途",
+            "categoryId":"synthetic:v8:category","occurredAt":1793491200000,"transactionId":null,"reliable":true,"reason":"",
+            "timeExplicit":true,"state":"POSTED","note":"合成旧备注"}],
+          "accounts":[{"uid":"11111111-1111-4111-8111-111111111111","name":"合成v8钱包","description":"",
+            "amountCents":8765,"kind":"cash","type":"ASSET","bankCode":null,"cardLast4":null,"archived":false,"revision":1}],
+          "customCategories":{"expense":["合成v8旧用途"],"income":[]},
+          "categoryDirectory":[{"id":"cat:expense:other","name":"其他","direction":"EXPENSE","icon":"ellipsis","order":0,"isFallback":true},
+            {"id":"cat:income:other","name":"其他","direction":"INCOME","icon":"ellipsis","order":0,"isFallback":true},
+            {"id":"synthetic:v8:category","name":"合成v8旧用途","direction":"EXPENSE","icon":"paw","order":1,"isFallback":false}],
+          "classification":null,"histories":{},"wallets":{"version":1,
+            "settings":{"defaultAccountUid":"11111111-1111-4111-8111-111111111111","revision":1,"appBindings":{}},
+            "links":[{"recordUid":"22222222-2222-4222-8222-222222222222","eligibility":"ACTIVE",
+              "accountUid":"11111111-1111-4111-8111-111111111111","selectionSource":"MANUAL","manualLocked":true,
+              "paymentEvidence":null,"evidenceFingerprint":null,"reviewCode":null,"revision":1,"accountReference":null}],
+            "effects":[{"recordUid":"22222222-2222-4222-8222-222222222222","accountUid":"11111111-1111-4111-8111-111111111111","appliedCents":-1235}],
+            "transfers":[],"movements":[],"aliases":[],"audits":[]}}"""
+        val backup=LedgerBackup.decode(legacy.byteInputStream())
+        assertEquals(8,backup.metadataVersion)
+        assertEquals(1,LedgerBackup.restore(store,backup))
+        val restored=store.all().single()
+        assertEquals("合成v8旧用途",restored.bill.category);assertEquals("synthetic:v8:category",store.categoryFor(restored)!!.id)
+        assertEquals(8765L,store.accounts().single().amountCents)
+        assertEquals(mapOf("11111111-1111-4111-8111-111111111111" to -1235L),restored.walletEffects)
+        assertEquals(0,LedgerBackup.restore(store,backup));assertEquals(8765L,store.accounts().single().amountCents)
     }
 
     @Test fun missingStableCategoryReferenceRejectsBackupBeforeMutation() {

@@ -44,6 +44,13 @@ class ChannelSettings(private val context: Context) {
         (if(authorization.shortcut)shortcutAllowed(authorization.packageName) && shortcutGeneration()==authorization.masterGeneration
             else shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration) &&
             shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
+    /** One consistent preferences snapshot, without taking channels while a caller owns the store. */
+    internal fun shakeGenerationMatches(authorization:ShakeAuthorization):Boolean {
+        val snapshot=preferences.all
+        val masterKey=if(authorization.shortcut)"shortcut_generation_v1" else "shake_master_generation_v1"
+        return (snapshot[masterKey] ?: 0L)==authorization.masterGeneration &&
+            (snapshot["shake_package_generation_v1:${authorization.packageName}"] ?: 0L)==authorization.applicationGeneration
+    }
     fun shortcutGeneration()=preferences.getLong("shortcut_generation_v1",0)
     @Synchronized fun shortcutAuthorization(packageName:String):ShakeAuthorization?=if(shortcutAllowed(packageName))
         ShakeAuthorization(packageName,shortcutGeneration(),shakeApplicationGeneration(packageName),shortcut=true) else null
