@@ -319,7 +319,7 @@ class NodeCapturePipelineTest {
                 assertEquals("https://appassets.androidplatform.net",web.text("location.origin"))
                 fun open(script:String) {
                     web.run("if(document.querySelector('#sheet').open)closeSheet();cancelEditor(true);refresh();$script")
-                    web.await("recordPanelOpen && !document.querySelector('#record-panel')._morph")
+                    web.await("document.querySelector('#record-panel').open && !document.querySelector('#record-panel').hidden && !recordPanelClosing && !document.querySelector('#record-panel').classList.contains('fluid-active')")
                 }
                 fun assertMissing(state:String) {
                     assertEquals(state,web.text("draft.recognitionEvidence.screenshot.state"))
@@ -339,7 +339,7 @@ class NodeCapturePipelineTest {
                         merchant="合成缺图界面${reason.name}-${UUID.randomUUID()}")
                     assertTrue(app.tasks.queuedWithoutScreenshot(id,snapshot,processor.prepareNodeFallback(id,snapshot,PaymentApps.WECHAT)!!,reason))
                     // Keep this genuine in-flight task out of the application queue while its UI is inspected.
-                    app.tasks.markNodeRecognizing(id)
+                    app.tasks.markNodeRecognizing(id);app.changed()
                     readOnlyView {
                         open("openTask($id)");web.await("draft.recognitionTaskId===$id")
                         assertMissing(reason.name);screenshot("task-${reason.name.lowercase()}",web)
@@ -361,6 +361,7 @@ class NodeCapturePipelineTest {
                 // The original missing capture remains missing; a later real image belongs to history item 2.
                 val (supplementTask,original)=missing.last()
                 val supplement=app.store.ingest(original.capture.copy(receivedAt=time.recognitionAt+1000),original.bill,screenshot=image) as IngestResult.Saved
+                app.changed()
                 assertEquals(original.id,supplement.record.id)
                 assertEquals(listOf(false,true),app.store.captureHistory(original.id).map { it.hasScreenshot })
                 assertNull(app.store.screenshot(original.id))
