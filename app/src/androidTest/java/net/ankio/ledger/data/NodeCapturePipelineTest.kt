@@ -307,6 +307,9 @@ class NodeCapturePipelineTest {
             assertEquals("Viewing evidence must not create wallet movements",movements,app.store.walletSnapshot().movements)
         }
         fun screenshot(name:String,web:WebUiProbe) {
+            web.await("!document.querySelector('.toast')?.classList.contains('show') && !document.querySelector('#record-panel').classList.contains('fluid-active') && !document.querySelector('#sheet').classList.contains('fluid-active')")
+            web.run("window.__t13Painted=false;requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__t13Painted=true}))")
+            web.await("window.__t13Painted")
             val captured=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
             try {
                 val file=java.io.File(app.cacheDir,"t13-native-ui/$name.png");file.parentFile!!.mkdirs()
