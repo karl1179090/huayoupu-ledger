@@ -17,11 +17,14 @@ import java.util.concurrent.TimeUnit
 class WidgetInitialLayoutRestoreRunner : Instrumentation() {
     private val applicationAttached=CountDownLatch(1)
     private var applicationOnCreateSkipped=false
+    private lateinit var restoreStep:String
 
     override fun onCreate(arguments:Bundle?) {
         require(arguments?.getString("restoreToken")=="widget-original-initial-2718b28e-fbe8-4286-8a25-15a140c80029")
         require(arguments.getString("restorePackage")=="net.ankio.ledger")
         require(arguments.getString("restoreWidgetId")=="2")
+        restoreStep=requireNotNull(arguments.getString("restoreStep"))
+        require(restoreStep in setOf("clear-host","initial"))
         require(Build.VERSION.SDK_INT==34 && Build.MODEL.contains("sdk_gphone"))
         super.onCreate(arguments)
         start()
@@ -57,13 +60,22 @@ class WidgetInitialLayoutRestoreRunner : Instrumentation() {
                 return bundle.keySet().sorted().associateWith {bundle.get(it).toString()}.toString()
             }
             val before=options()
-            manager.updateAppWidget(2,RemoteViews(context.packageName,info.initialLayout))
+            // An action-free RemoteViews with the same layout ID can reapply onto old
+            // text/children. The external driver must observe this different layout
+            // before requesting the original initial layout in a second invocation.
+            val views=if(restoreStep=="clear-host") {
+                RemoteViews("android",android.R.layout.simple_list_item_1).apply {
+                    setContentDescription(android.R.id.text1,"widget-restore-clear-host-2718b28e")
+                }
+            } else RemoteViews(context.packageName,info.initialLayout)
+            manager.updateAppWidget(2,views)
             check(options()==before)
             result.putBoolean("applicationOnCreateSkipped",true)
             result.putString("provider",provider.flattenToShortString())
             result.putInt("widgetId",2)
             result.putString("options",before)
-            result.putString("stream","INITIAL_LAYOUT_RESTORED_WITHOUT_APPLICATION_ONCREATE\n")
+            result.putString("restoreStep",restoreStep)
+            result.putString("stream","HOST_LAYOUT_UPDATED_WITHOUT_APPLICATION_ONCREATE\n")
             finish(Activity.RESULT_OK,result)
         } catch(failure:Throwable) {
             result.putString("stream",failure.stackTraceToString())
