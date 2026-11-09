@@ -495,6 +495,13 @@ class ExpenseWidgetAcceptanceTest {
         val report=org.json.JSONObject().put("api",android.os.Build.VERSION.SDK_INT)
             .put("densityDpi",app.resources.displayMetrics.densityDpi)
             .put("evidenceKind","Android production RemoteViews.apply; not a Launcher screenshot")
+        val existing=org.json.JSONArray()
+        val manager=AppWidgetManager.getInstance(app)
+        ExpenseWidgetProvider.ids(app).filter {it!=bound.id}.forEach {id->
+            existing.put(org.json.JSONObject().put("id",id).put("provider",manager.getAppWidgetInfo(id)?.provider.toString())
+                .put("options",manager.getAppWidgetOptions(id).toString()))
+        }
+        report.put("existingWidgets",existing)
         val observations=org.json.JSONArray();report.put("cases",observations)
         fun rect(value:android.graphics.Rect)=org.json.JSONArray(listOf(value.left,value.top,value.right,value.bottom).map {it/density})
         fun ink(root:android.view.ViewGroup,text:TextView):android.graphics.Rect {
