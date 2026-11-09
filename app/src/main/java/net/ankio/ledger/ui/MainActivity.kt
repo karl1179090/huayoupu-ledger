@@ -24,6 +24,8 @@ import net.ankio.ledger.capture.CaptureRuntime
 import net.ankio.ledger.capture.ScreenCaptureService
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.data.*
+import net.ankio.ledger.data.RestoreOutcomeUncertainException
+import net.ankio.ledger.data.RestoreSummary
 import net.ankio.ledger.ledger
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -335,7 +337,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type="image/*"; addCategory(Intent.CATEGORY_OPENABLE) }, IMAGE_REQUEST)
     }
     fun exportBackup() { startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-v6-${java.time.LocalDate.now()}.zip")
+        type="application/zip"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_TITLE,"花有谱完整备份-v10-${java.time.LocalDate.now()}.zip")
     }, EXPORT_REQUEST) }
     fun exportBills(format:String) = fileImports.exportBills(format)
     fun importBills() = fileImports.importBills()
@@ -385,40 +387,75 @@ class MainActivity : Activity() {
                             (contentResolver.openOutputStream(uri,"wt") ?: error("无法写入")).use { output -> temporary.inputStream().use { it.copyTo(output) } }
                             count
                         } finally { temporary.delete() }
-                    }; message(if(result==null)"完整备份 v5 已导出" else "已导出 $result 笔账单")
+                    }; message(if(result==null)"完整备份 v10 已导出" else "已导出 $result 笔账单")
                 } catch(cancelled:CancellationException) { throw cancelled }
                 catch(_:Exception) { message("导出失败，请检查文件位置或可用空间") }
                 finally { dispatch("fileOperation", "null") }
             }
             RESTORE_REQUEST -> AlertDialog.Builder(this).setTitle("恢复本地备份？")
-                .setMessage("将合并备份中的账单、账户、分类及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。支持 v1～v5 备份；钱包余额以快照恢复，资金影响不会重放。旧版备份可能没有截图。")
+                .setMessage("将合并备份中的账单、账户、分类与分类规则、排队识别任务与结果及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。支持 v1～v10 备份；钱包余额以快照恢复，资金影响不会重放。旧版备份可能没有截图。")
                 .setPositiveButton("恢复") { _,_ ->
                     // Pause both independent channels before taking the ledger write lock.
                     // A late native OCR response must lose its session before restore starts.
-                    ledger.channels.set(ChannelSettings.Channel.OCR,false)
-                    ledger.channels.setAutomaticEnabled(false)
-                    ledger.recognitionSession.invalidate()
-                    ScreenCaptureService.current?.cancelRecognition()
-                    ledger.captureQueue.cancelAll()
-                    CaptureRuntime.stopSafely()
-                    ledger.changed()
-                    uiScope.launch {
-                    dispatch("fileOperation",JSONObject.quote("正在校验并恢复备份"))
                     try {
-                        val count=withContext(Dispatchers.IO) {
-                            val imported=(contentResolver.openInputStream(uri) ?: error("无法读取")).use { input ->
-                                LedgerArchive.read(input,cacheDir).use { prepared -> LedgerArchive.restoreDetailed(ledger.store,prepared) }
-                            }
-                            // Restoring data must never silently start collection or restore cloud consent.
-                            ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
-                            ledger.channels.resetShakeSelectionForRestore()
-                            imported
-                        }; CaptureRuntime.stopSafely(); ledger.changed(true); message("新增 ${count.imported} 笔，${count.excludedRecords} 笔保留为不联动历史；保留 ${count.retainedAccounts} 个本地钱包，跳过 ${count.skippedRecords} 笔重复（强身份 ${count.identityConflicts}）；${count.aliasConflicts} 个别名冲突保留本地映射。采集保持暂停，请重新选择摇一摇应用")
+                        ledger.channels.set(ChannelSettings.Channel.OCR,false)
+                        ledger.channels.setAutomaticEnabled(false)
+                        ledger.recognitionSession.invalidate()
+                        ScreenCaptureService.current?.cancelRecognition()
+                        ledger.captureQueue.cancelAll()
+                        CaptureRuntime.stopSafely()
+                        ledger.changed()
                     } catch(cancelled:CancellationException) { throw cancelled }
-                    catch(_:Exception) { message("恢复失败，备份无效或已损坏，现有账单未修改") }
-                    finally { dispatch("fileOperation","null") }
-                }}.setNegativeButton("取消",null).show()
+                    catch(_:Exception) {
+                        message("暂停采集失败，备份未恢复，现有账单未修改")
+                        return@setPositiveButton
+                    }
+                    uiScope.launch {
+                        dispatch("fileOperation",JSONObject.quote("正在校验并恢复备份"))
+                        var restoredSummary: RestoreSummary? = null
+                        try {
+                            withContext(Dispatchers.IO) {
+                                (contentResolver.openInputStream(uri) ?: error("无法读取")).use { input ->
+                                    LedgerArchive.read(input,cacheDir).use { prepared ->
+                                        ledger.restoreQuiescent {
+                                            LedgerArchive.restoreDetailed(ledger.store,prepared).also { restoredSummary = it }
+                                        }
+                                    }
+                                }
+                                // Restoring data must never silently start collection or restore cloud consent.
+                                ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
+                                ledger.channels.resetShakeSelectionForRestore()
+                            }
+                            CaptureRuntime.stopSafely()
+                            ledger.changed(true)
+                            val count = restoredSummary!!
+                            message("${restoreSummaryMessage(count)}采集保持暂停，请重新选择摇一摇应用")
+                        } catch(cancelled:CancellationException) { throw cancelled }
+                        catch(e:Exception) {
+                            val summary = restoredSummary
+                            if(summary != null) {
+                                runCatching { CaptureRuntime.stopSafely() }
+                                runCatching { ledger.changed(true) }
+                                message("${restoreSummaryMessage(summary)}刷新/暂停状态待核对，建议重新打开应用核对")
+                            } else if(isRestoreOutcomeUncertain(e)) {
+                                message("恢复结果需要核对，建议重新打开应用核对")
+                            } else {
+                                message("恢复失败，备份无效或已损坏，现有账单未修改")
+                            }
+                        } finally { dispatch("fileOperation","null") }
+                    }
+                }.setNegativeButton("取消",null).show()
         }
+    }
+    private fun restoreSummaryMessage(count: RestoreSummary): String =
+        "新增 ${count.imported} 笔，${count.excludedRecords} 笔保留为不联动历史；保留 ${count.retainedAccounts} 个本地钱包，跳过 ${count.skippedRecords} 笔重复（强身份 ${count.identityConflicts}）；${count.aliasConflicts} 个别名冲突保留本地映射。"
+    private fun isRestoreOutcomeUncertain(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is RestoreOutcomeUncertainException) return true
+            current = current.cause
+        }
+        return false
     }
     fun changeChannel(key: String, enabled: Boolean) {
         val channel = ChannelSettings.Channel.entries.firstOrNull { it.key == key && it == ChannelSettings.Channel.OCR } ?: return
