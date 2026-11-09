@@ -436,7 +436,7 @@ class MainActivity : Activity() {
                             if(summary != null) {
                                 runCatching { CaptureRuntime.stopSafely() }
                                 runCatching { ledger.changed(true) }
-                                message("${restoreSummaryMessage(summary)}刷新/暂停状态待核对，建议重新打开应用核对")
+                                message("已恢复新增 ${summary.imported} 笔，刷新/暂停状态需核对")
                             } else if(isRestoreOutcomeUncertain(e)) {
                                 message("恢复结果需要核对，建议重新打开应用核对")
                             } else {
