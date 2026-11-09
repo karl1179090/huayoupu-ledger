@@ -489,11 +489,16 @@ class ExpenseWidgetAcceptanceTest {
             Case("today-zero","2026-11-10",280,280,1.3f,todayCents=0L),
             Case("six-weeks-minimum","2026-11-10",280,280,1.5f,screenshot=true),
             Case("long-amount","2026-11-10",350,334,1.5f,todayCents=1234567L,screenshot=true))
+        val requested=InstrumentationRegistry.getArguments().getString("widgetSpacingCases")
+            ?.split(',')?.filter {it.isNotBlank()}?.toSet().orEmpty()
+        require(requested.all {name->cases.any {it.name==name}}) {"Unknown widget spacing case"}
+        val selectedCases=cases.filter {requested.isEmpty() || it.name in requested}
         val zone=ZoneId.of("Asia/Shanghai")
         val original=shell("settings get system font_scale").trim()
         val density=app.resources.displayMetrics.density
         val report=org.json.JSONObject().put("api",android.os.Build.VERSION.SDK_INT)
             .put("densityDpi",app.resources.displayMetrics.densityDpi)
+            .put("requestedCases",org.json.JSONArray(selectedCases.map {it.name}))
             .put("evidenceKind","Android production RemoteViews.apply; not a Launcher screenshot")
         val existing=org.json.JSONArray()
         val manager=AppWidgetManager.getInstance(app)
@@ -526,7 +531,7 @@ class ExpenseWidgetAcceptanceTest {
             return result
         }
         try {
-            for(case in cases) {
+            for(case in selectedCases) {
                 shell("settings put system font_scale ${case.font}")
                 await("spacing font ${case.font}") {app.resources.configuration.fontScale==case.font}
                 val today=java.time.LocalDate.parse(case.day)
