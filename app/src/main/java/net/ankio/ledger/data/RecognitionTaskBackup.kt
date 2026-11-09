@@ -31,6 +31,8 @@ internal object RecognitionTaskBackup {
             if(!row.isNull("imageCreatedAt"))require(row.getLong("imageCreatedAt")>0)
             if(!row.isNull("recognition_evidence"))require(row.getString("recognition_evidence").toByteArray().size<=8192)
             val node=if(row.isNull("node_snapshot"))null else NodeSnapshotCodec.decode(row.getString("node_snapshot"))
+            if(node!=null)require(row.getString("source")==Source.OCR.name && row.getString("origin") in
+                setOf("shake:${node.packageName}","shortcut:${node.packageName}","payment_auto:${node.packageName}")) { "节点证据与识别来源不一致" }
             val evidence=if(row.isNull("recognition_evidence"))null else JSONObject(row.getString("recognition_evidence")).let { j ->
                 if(j.has("route"))RecognitionEvidenceCodec.decode(j)
                 else {
@@ -41,6 +43,7 @@ internal object RecognitionTaskBackup {
                     null
                 }
             }
+            if(evidence?.route=="NODE")require(node!=null && evidence.snapshot?.fingerprint==node.fingerprint)
             val hash=if(row.isNull("imageHash"))null else row.getString("imageHash").also { require(it.matches(Regex("[0-9a-f]{64}"))) }
             if(!row.isNull("node_image_hash"))require(node!=null && (hash==null || hash==row.getString("node_image_hash")))
             if(node!=null && row.isNull("node_image_hash"))require(evidence?.route=="NODE" && evidence.snapshot?.fingerprint==node.fingerprint &&

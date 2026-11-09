@@ -85,6 +85,9 @@ class CompleteRecognitionBackupTest {
                 assertEquals(time,targetTasks.recognitionTime(id));assertEquals(page.fingerprint,targetTasks.nodeSnapshot(id)!!.fingerprint);assertEquals(page.nodes,targetTasks.nodeSnapshot(id)!!.nodes);assertEquals(page.environment,targetTasks.nodeSnapshot(id)!!.environment)
             }
             assertEquals(setOf("UNAVAILABLE","TIMEOUT"),rows.map { targetTasks.recognitionEvidence(it.first)!!.getJSONObject("screenshot").getString("state") }.toSet())
+            val forged=org.json.JSONObject(json)
+            forged.getJSONArray("recognitionTasks").getJSONObject(0).put("source","IMAGE").put("origin","image")
+            assertNotNull("Restored node evidence cannot impersonate an image import",runCatching { LedgerBackup.decode(forged.toString().byteInputStream()) }.exceptionOrNull())
         } finally { sourceTasks.close();targetTasks.close();source.close();target.close();media.close() }
     }
     @Test fun fullQueueBeyondUiLimitAndTaskFailureRollBackAllImportedFacts() {
