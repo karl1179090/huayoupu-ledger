@@ -63,6 +63,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         LegacyScreenshots.compact(db,migratedBytes)
     }
     private val app=context.applicationContext as? net.ankio.ledger.LedgerApp
+    private val authorizationSettings by lazy { app?.channels ?: net.ankio.ledger.capture.ChannelSettings(context) }
     override fun onCreate(db:SQLiteDatabase) { db.execSQL("""CREATE TABLE tasks(
         id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, origin TEXT NOT NULL,
         created_at INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL,
@@ -394,10 +395,19 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         val task=readableDatabase.rawQuery("SELECT id,source,origin,shake_authorization FROM tasks WHERE operation_uid=?",arrayOf(key.removePrefix("recognition:"))).use { c ->
             if(!c.moveToFirst())return false
             val authorization=ShakeAuthorization.decode(if(c.isNull(3))null else c.getString(3))
-            c.getLong(0) to retryableBatchSource(Source.valueOf(c.getString(1)),c.getString(2),authorization?.origin==c.getString(2))
+            c.getLong(0) to retryableBatchSource(Source.valueOf(c.getString(1)),c.getString(2),
+                authorization?.let { it.origin==c.getString(2) && authorizationSettings.shakeGenerationMatches(it) }==true)
         }
         return task.second && screenshots.contains(imageOwner(task.first)) &&
             classificationStore?.let { RecognitionBatchStore.hasUnfinished(it.readableDatabase,key) }==true
+    }
+    /** Revocation can follow a manual cancellation; those rows are outside the live queue. */
+    internal fun reconcileCancelledBatchReservations(originPrefix:String,packageName:String?=null) = synchronized(classificationStore ?: this) {
+        val ids=readableDatabase.rawQuery("SELECT id FROM tasks WHERE status='CANCELLED' AND origin "+
+            (if(packageName==null)"LIKE ?" else "=?"),arrayOf(originPrefix+(packageName ?: "%"))).use { c ->
+            buildList { while(c.moveToNext())add(c.getLong(0)) }
+        }
+        ids.filterNot(::hasResumableBatch).mapNotNull(::operationKey).forEach { classificationStore?.releaseClassificationSnapshot(it) }
     }
     fun delete(id:Long) = synchronized(classificationStore ?: this) {
         val key=operationKey(id)

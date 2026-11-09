@@ -44,6 +44,10 @@ class ChannelSettings(private val context: Context) {
         (if(authorization.shortcut)shortcutAllowed(authorization.packageName) && shortcutGeneration()==authorization.masterGeneration
             else shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration) &&
             shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
+    /** Permanent token validity, independent of a temporary loss of capture permission. */
+    @Synchronized internal fun shakeGenerationMatches(authorization:ShakeAuthorization):Boolean =
+        (if(authorization.shortcut)shortcutGeneration() else shakeMasterGeneration())==authorization.masterGeneration &&
+            shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
     fun shortcutGeneration()=preferences.getLong("shortcut_generation_v1",0)
     @Synchronized fun shortcutAuthorization(packageName:String):ShakeAuthorization?=if(shortcutAllowed(packageName))
         ShakeAuthorization(packageName,shortcutGeneration(),shakeApplicationGeneration(packageName),shortcut=true) else null
