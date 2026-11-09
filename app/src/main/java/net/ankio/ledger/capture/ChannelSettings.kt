@@ -19,7 +19,7 @@ class ChannelSettings(private val context: Context) {
         }
         edit.apply()
         (context.applicationContext as? net.ankio.ledger.LedgerApp)?.let { app ->
-            if(registerPackages(app))app.scope.launch { app.channels.reconcileShakePackages() }
+            if(registerPackages(app))app.recognitionWork.launch { app.channels.reconcileShakePackages() }
         }
     }
     private val generations = java.util.concurrent.ConcurrentHashMap<Channel, Long>()
@@ -44,6 +44,13 @@ class ChannelSettings(private val context: Context) {
         (if(authorization.shortcut)shortcutAllowed(authorization.packageName) && shortcutGeneration()==authorization.masterGeneration
             else shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration) &&
             shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
+    /** One consistent preferences snapshot, without taking channels while a caller owns the store. */
+    internal fun shakeGenerationMatches(authorization:ShakeAuthorization):Boolean {
+        val snapshot=preferences.all
+        val masterKey=if(authorization.shortcut)"shortcut_generation_v1" else "shake_master_generation_v1"
+        return (snapshot[masterKey] ?: 0L)==authorization.masterGeneration &&
+            (snapshot["shake_package_generation_v1:${authorization.packageName}"] ?: 0L)==authorization.applicationGeneration
+    }
     fun shortcutGeneration()=preferences.getLong("shortcut_generation_v1",0)
     @Synchronized fun shortcutAuthorization(packageName:String):ShakeAuthorization?=if(shortcutAllowed(packageName))
         ShakeAuthorization(packageName,shortcutGeneration(),shakeApplicationGeneration(packageName),shortcut=true) else null
@@ -86,6 +93,13 @@ class ChannelSettings(private val context: Context) {
         val installed=InstalledAppsRepository.get(context)
         selectedShakePackages().filter { pkg -> !installed.selectable(pkg) ||
             installed.installationFingerprint(pkg)!=preferences.getString("shake_installation_v1:$pkg",null) }.forEach { setShakePackage(it,false) }
+    }
+    /** Durable local pause; a backup never imports consent or a live generation. */
+    @Synchronized fun pauseForRestore() {
+        check(preferences.edit().putBoolean("automatic_enabled",false).putBoolean(Channel.OCR.key,false)
+            .putStringSet("shake_apps_v1",emptySet()).putStringSet("auto_apps_v1",emptySet())
+            .putLong("shake_master_generation_v1",Math.addExact(shakeMasterGeneration(),1))
+            .putLong("shortcut_generation_v1",Math.addExact(shortcutGeneration(),1)).commit())
     }
     fun resetShakeSelectionForRestore() {
         set(Channel.OCR,false)

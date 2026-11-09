@@ -44,12 +44,13 @@ class ActivitySmokeTest {
                 .put("occurred_at","2026-10-16 12:30:00").put("transaction_id","TEST20261016").put("reliable",true)
             val recognition = net.ankio.ledger.ocr.SyntheticRecognition.parseRecognition(json.toString(), 1792209600000)
             val capture = Capture(Source.IMAGE, "image", recognition.rawText)
-            val saved = store.ingest(capture, recognition.bill!!, "synthetic-capture-event") as IngestResult.Saved
+            val bill = requireNotNull(recognition.bill)
+            val saved = store.ingest(capture, bill, "synthetic-capture-event") as IngestResult.Saved
             assertEquals(RecordState.POSTED, saved.record.state)
             assertEquals(2850L, store.get(saved.record.id)!!.bill.amountCents)
-            assertEquals(IngestResult.DuplicateSkipped, store.ingest(capture, recognition.bill, "synthetic-capture-event"))
+            assertEquals(IngestResult.DuplicateSkipped, store.ingest(capture, bill, "synthetic-capture-event"))
             // Without an identified provider, a second capture remains reviewable instead of silently disappearing.
-            val repeated = store.ingest(capture, recognition.bill) as IngestResult.Saved
+            val repeated = store.ingest(capture, bill) as IngestResult.Saved
             assertEquals(RecordState.REVIEW, repeated.record.state)
             assertEquals(saved.record.id, repeated.record.duplicateId)
             store.close()

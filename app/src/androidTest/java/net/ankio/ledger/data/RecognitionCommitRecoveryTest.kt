@@ -23,6 +23,45 @@ import java.util.concurrent.atomic.AtomicInteger
 class RecognitionCommitRecoveryTest {
     private val app = ApplicationProvider.getApplicationContext<LedgerApp>()
 
+    @Test fun singleCandidateKeepsTheRecognizedBillScreenshotWalletAndFeedback() = runBlocking {
+        app.taskRecovery.await()
+        val oldDefault = app.store.walletSettings().defaultAccountUid
+        val wallet = app.store.saveAccount(LedgerAccount(name = "合成单候选钱包", amountCents = 10_000, kind = "cash"))
+        app.store.setDefaultWallet(wallet.uid)
+        val suffix = UUID.randomUUID().toString()
+        val task = app.tasks.create(Source.IMAGE, "image")
+        val bill = ParsedBill(1250, Direction.EXPENSE, "合成候选商户$suffix", "餐饮", 1_798_776_000_000,
+            "SYNTHETIC-CANDIDATE-$suffix", true, "", true)
+        val image = "synthetic-candidate-$suffix".toByteArray()
+        val backend = RecognitionBackend { bytes, prepared, _, _, _, _ ->
+            prepared(bytes)
+            RecognitionResult("合成付款成功 12.50", bill, screenshot = bytes)
+        }
+        try {
+            val result = CaptureProcessor(app, OcrClient(app, backend))
+                .processPrepared(image, Source.IMAGE, "image", task) { true } as IngestResult.Saved
+            val record = result.record
+            assertEquals(bill.copy(category="其他"), record.bill.copy(categoryDecision=null))
+            assertEquals(CategorySource.FALLBACK,record.bill.categoryDecision!!.source)
+            assertEquals(app.tasks.classificationSnapshot(task)!!.version,record.bill.categoryDecision!!.ruleVersion)
+            assertEquals(Source.IMAGE, record.capture.source); assertEquals("image", record.capture.origin)
+            assertEquals("合成付款成功 12.50", record.capture.text)
+            assertEquals(RecordState.POSTED, record.state)
+            assertEquals(8750L, app.store.getAccount(wallet.id)!!.amountCents)
+            assertArrayEquals(image, app.store.screenshot(record.id))
+            assertEquals("SUCCEEDED", app.tasks.status(task)); assertEquals("已记账 ¥12.50", app.tasks.message(task))
+            val receipt = app.store.committedCandidate(app.tasks.operationKey(task)!!, CandidateId.SINGLE)!!
+            assertEquals(CandidateId.SINGLE, receipt.candidateId); assertEquals(record.uid, receipt.recordUid)
+            assertEquals(record.id, receipt.record!!.id)
+        } finally {
+            app.store.all().filter { it.bill.merchant == bill.merchant }.forEach { app.store.delete(it.id) }
+            app.tasks.operationKey(task)?.let { app.store.writableDatabase.delete("wallet_submissions", "token=?", arrayOf(it)) }
+            app.tasks.delete(task); app.store.setDefaultWallet(oldDefault)
+            app.store.writableDatabase.delete("wallet_movements", "account_uid=?", arrayOf(wallet.uid))
+            app.store.deleteAccount(wallet.id)
+        }
+    }
+
     @Test fun committedBillSurvivesTaskWriteFailureAndRestoresFeedbackWithoutRecognizingOrChargingAgain() = runBlocking {
         app.taskRecovery.await()
         val oldDefault = app.store.walletSettings().defaultAccountUid
@@ -87,6 +126,50 @@ class RecognitionCommitRecoveryTest {
         }
     }
 
+    @Test fun processorReceiptFailureRollsBackTheCandidateAndRetryChargesOnlyOnce() = runBlocking {
+        app.taskRecovery.await()
+        val oldDefault = app.store.walletSettings().defaultAccountUid
+        val wallet = app.store.saveAccount(LedgerAccount(name = "合成候选回滚钱包", amountCents = 10_000, kind = "cash"))
+        app.store.setDefaultWallet(wallet.uid)
+        val task = app.tasks.create(Source.IMAGE, "image")
+        val operation = app.tasks.operationKey(task)!!
+        val suffix = UUID.randomUUID().toString()
+        val merchant = "合成候选回滚$suffix"
+        val calls = AtomicInteger()
+        val backend = RecognitionBackend { image, prepared, _, _, _, _ ->
+            calls.incrementAndGet(); prepared(image)
+            RecognitionResult("合成付款成功 25.00", ParsedBill(2500, Direction.EXPENSE, merchant, "购物",
+                System.currentTimeMillis(), "SYNTHETIC-ROLLBACK-$suffix", true, "", true), screenshot = image)
+        }
+        val processor = CaptureProcessor(app, OcrClient(app, backend))
+        val image = "synthetic-rollback-$suffix".toByteArray()
+        val movementsBefore = app.store.walletMovements(wallet.uid)
+        try {
+            app.store.writableDatabase.execSQL("""CREATE TRIGGER reject_synthetic_candidate_receipt BEFORE INSERT ON wallet_submissions
+                WHEN NEW.kind='CAPTURE_RESULT' AND NEW.token='$operation' BEGIN SELECT RAISE(ABORT,'synthetic receipt failure'); END""")
+            assertNotNull(runCatching { processor.processPrepared(image, Source.IMAGE, "image", task) { true } }.exceptionOrNull())
+            assertTrue(app.store.all().none { it.bill.merchant == merchant })
+            assertEquals(10_000L, app.store.getAccount(wallet.id)!!.amountCents)
+            assertEquals(movementsBefore, app.store.walletMovements(wallet.uid))
+            assertNull(app.store.committedCandidate(operation, CandidateId.SINGLE))
+            assertEquals("FAILED", app.tasks.status(task)); assertNull(app.tasks.recordId(task))
+            app.store.writableDatabase.execSQL("DROP TRIGGER reject_synthetic_candidate_receipt")
+
+            val saved = processor.processPrepared(image, Source.IMAGE, "image", task) { true } as IngestResult.Saved
+            assertEquals(IngestResult.DuplicateSkipped, processor.processPrepared(image, Source.IMAGE, "image", task) { true })
+            assertEquals(2, calls.get()); assertEquals(7500L, app.store.getAccount(wallet.id)!!.amountCents)
+            assertEquals(1, app.store.walletMovements(wallet.uid).count { it.recordUid == saved.record.uid })
+            assertEquals("SUCCEEDED", app.tasks.status(task)); assertEquals("已记账 ¥25.00", app.tasks.message(task))
+        } finally {
+            app.store.writableDatabase.execSQL("DROP TRIGGER IF EXISTS reject_synthetic_candidate_receipt")
+            app.store.all().filter { it.bill.merchant == merchant }.forEach { app.store.delete(it.id) }
+            app.store.writableDatabase.delete("wallet_submissions", "token=?", arrayOf(operation))
+            app.tasks.delete(task); app.store.setDefaultWallet(oldDefault)
+            app.store.writableDatabase.delete("wallet_movements", "account_uid=?", arrayOf(wallet.uid))
+            app.store.deleteAccount(wallet.id)
+        }
+    }
+
     @Test fun receiptWriteFailureRollsBackTheBillBalanceAndMovementTogether() {
         val name = "recognition-receipt-${UUID.randomUUID()}.db"
         LedgerStore(app, name).use { store ->
@@ -107,6 +190,41 @@ class RecognitionCommitRecoveryTest {
         }
     }
 
+    @Test fun cancellationAfterRecognitionDoesNotCommitTheSingleCandidate() = runBlocking {
+        app.taskRecovery.await()
+        val oldDefault = app.store.walletSettings().defaultAccountUid
+        val wallet = app.store.saveAccount(LedgerAccount(name = "合成候选取消钱包", amountCents = 10_000, kind = "cash"))
+        app.store.setDefaultWallet(wallet.uid)
+        val task = app.tasks.create(Source.IMAGE, "image")
+        val operation = app.tasks.operationKey(task)!!
+        val suffix = UUID.randomUUID().toString()
+        val merchant = "合成取消商户$suffix"
+        var allowed = true
+        val backend = RecognitionBackend { image, prepared, _, _, _, _ ->
+            prepared(image); allowed = false
+            RecognitionResult("合成付款成功 25.00", ParsedBill(2500, Direction.EXPENSE, merchant, "购物",
+                System.currentTimeMillis(), "SYNTHETIC-CANCEL-$suffix", true, "", true), screenshot = image)
+        }
+        val movementsBefore = app.store.walletMovements(wallet.uid)
+        try {
+            val error = runCatching {
+                CaptureProcessor(app, OcrClient(app, backend)).processPrepared(suffix.toByteArray(), Source.IMAGE, "image", task) { allowed }
+            }.exceptionOrNull()
+            assertTrue(error is kotlinx.coroutines.CancellationException)
+            assertEquals("CANCELLED", app.tasks.status(task)); assertEquals("识别已停止，未新增账单", app.tasks.message(task))
+            assertNull(app.tasks.recordId(task)); assertNull(app.store.committedCandidate(operation, CandidateId.SINGLE))
+            assertTrue(app.store.all().none { it.bill.merchant == merchant })
+            assertEquals(10_000L, app.store.getAccount(wallet.id)!!.amountCents)
+            assertEquals(movementsBefore, app.store.walletMovements(wallet.uid))
+        } finally {
+            app.store.all().filter { it.bill.merchant == merchant }.forEach { app.store.delete(it.id) }
+            app.store.writableDatabase.delete("wallet_submissions", "token=?", arrayOf(operation))
+            app.tasks.delete(task); app.store.setDefaultWallet(oldDefault)
+            app.store.writableDatabase.delete("wallet_movements", "account_uid=?", arrayOf(wallet.uid))
+            app.store.deleteAccount(wallet.id)
+        }
+    }
+
     @Test fun versionFourTasksReceiveStableUniqueOperationIdsAndReopeningDoesNotChangeThem() {
         val name = "recognition-v4-${UUID.randomUUID()}.db"
         try {
@@ -118,13 +236,53 @@ class RecognitionCommitRecoveryTest {
                 db.version = 4
             }
             val operation = RecognitionTasks(app, name).use { tasks ->
-                assertEquals(5, tasks.readableDatabase.version)
+                assertEquals(8, tasks.readableDatabase.version)
                 val existing = tasks.operationKey(1)!!
                 val newer = tasks.create(Source.IMAGE, "image")
                 assertNotEquals(existing, tasks.operationKey(newer)); existing
             }
             RecognitionTasks(app, name).use { assertEquals(operation, it.operationKey(1)) }
         } finally { app.deleteDatabase(name) }
+    }
+
+    @Test fun independentSingleTasksWithTheSameDayAndAmountBothPost() = runBlocking {
+        app.taskRecovery.await()
+        val oldDefault = app.store.walletSettings().defaultAccountUid
+        val wallet = app.store.saveAccount(LedgerAccount(name = "合成单笔日金额钱包", amountCents = 10_000, kind = "cash"))
+        app.store.setDefaultWallet(wallet.uid)
+        val suffix = UUID.randomUUID().toString()
+        val merchant = "合成独立单笔$suffix"
+        val noon = java.time.ZonedDateTime.of(2026, 11, 8, 12, 0, 0, 0, java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val tasks = mutableListOf<Long>()
+        val records = mutableListOf<LedgerRecord>()
+        try {
+            for (index in 0..1) {
+                val task = app.tasks.create(Source.IMAGE, "image").also(tasks::add)
+                val bill = ParsedBill(2500, Direction.EXPENSE, merchant, "购物", noon + index * 3_600_000,
+                    "SYNTHETIC-INDEPENDENT-$suffix-$index", true, "", true)
+                val backend = RecognitionBackend { image, prepared, _, _, _, _ ->
+                    prepared(image)
+                    RecognitionResult("合成付款成功 25.00 交易$index", bill, screenshot = image)
+                }
+                val saved = CaptureProcessor(app, OcrClient(app, backend))
+                    .processPrepared("synthetic-$suffix-$index".toByteArray(), Source.IMAGE, "image", task) { true } as IngestResult.Saved
+                records += saved.record
+                assertEquals(RecordState.POSTED, saved.record.state)
+                assertEquals("SUCCEEDED", app.tasks.status(task))
+            }
+            assertEquals(2, records.map { it.uid }.distinct().size)
+            assertEquals(2, app.store.all().count { it.bill.merchant == merchant })
+            assertEquals(5000L, app.store.getAccount(wallet.id)!!.amountCents)
+        } finally {
+            app.store.all().filter { it.bill.merchant == merchant }.forEach { app.store.delete(it.id) }
+            tasks.forEach { task ->
+                app.tasks.operationKey(task)?.let { app.store.writableDatabase.delete("wallet_submissions", "token=?", arrayOf(it)) }
+                app.tasks.delete(task)
+            }
+            app.store.setDefaultWallet(oldDefault)
+            app.store.writableDatabase.delete("wallet_movements", "account_uid=?", arrayOf(wallet.uid))
+            app.store.deleteAccount(wallet.id)
+        }
     }
 
     @Test fun recoveryAfterShakeRevocationRetainsOnlyTheAlreadyCommittedBillAndDoesNotReauthorize() = runBlocking {

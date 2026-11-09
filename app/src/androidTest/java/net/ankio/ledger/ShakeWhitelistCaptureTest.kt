@@ -114,6 +114,11 @@ class ShakeWhitelistCaptureTest {
             val record=app.store.all().single { it.bill.merchant.startsWith(merchant) }
             assertEquals(record.reason,RecordState.POSTED,record.state);assertEquals(-1234L,record.wallet!!.appliedCents)
             assertNotNull(app.store.screenshot(record.id));assertEquals(1,calls.get())
+            val captured=app.tasks.nodeSnapshot((taskIds()-previousTasks).single())
+            assertNotNull("production traversal must retain the exact validated node evidence",captured)
+            assertEquals(fixturePackage,captured!!.packageName)
+            assertTrue(captured.nodes.any { it.parentId!=null && it.bounds.bottom>it.bounds.top })
+            assertTrue(captured.environment.system.contains("/api"))
         }
         // The previous result banner is an accessibility overlay. Removing it for a
         // second frame must not be mistaken for a switch away from the selected app.
@@ -123,7 +128,255 @@ class ShakeWhitelistCaptureTest {
         assertEquals(2,(taskIds()-previousTasks).size)
     }
 
+    @Test fun publicUnknownLayoutMeasuresRealAcquisitionAndOneBundledOcrAttempt() = observePublicAttempt(false)
+
+    @Test fun publicSyntheticQualifiedLayoutMeasuresRealAcquisitionWithoutOcr() = observePublicAttempt(true)
+
+    /** Two constructed emulator routes, not a population sample or real payment benchmark. */
+    private fun observePublicAttempt(syntheticNode:Boolean) {
+        val beforeRecords=app.store.all().map { it.id }.toSet()
+        val completed=AtomicInteger()
+        if(syntheticNode)service.processorFactory=nodeFactory()
+        else {
+            val local=net.ankio.ledger.ocr.LocalRecognitionClient(app)
+            val backend=object:net.ankio.ledger.ocr.RecognitionBackend {
+                override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                    livePaymentAt:Long?,policy:net.ankio.ledger.core.RecognitionPolicy,origin:String):net.ankio.ledger.ocr.RecognitionResult = error("frozen context required")
+                override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                    livePaymentAt:Long?,policy:net.ankio.ledger.core.RecognitionPolicy,origin:String,
+                    recognitionTime:()->net.ankio.ledger.core.RecognitionTimeContext):net.ankio.ledger.ocr.RecognitionResult {
+                    calls.incrementAndGet()
+                    return local.recognizePrepared(image,onPrepared=onPrepared,stillAllowed=stillAllowed,
+                        livePaymentAt=livePaymentAt,policy=policy,origin=origin,recognitionTime=recognitionTime).also {
+                        if(it.phaseTimingsMs.containsKey("ocr"))completed.incrementAndGet()
+                    }
+                }
+            }
+            service.processorFactory={CaptureProcessor(app,OcrClient(app,backend))}
+        }
+        startFixture("safe")
+        val requests=service.screenshotRequests
+        val started=SystemClock.elapsedRealtime()
+        var task:Long?=null
+        try {
+            service.captureOnShake()
+            val deadline=started+30_000
+            while(SystemClock.elapsedRealtime()<deadline) {
+                task=(taskIds()-previousTasks).singleOrNull()
+                if(task?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0)break
+                SystemClock.sleep(30)
+            }
+            val terminal=SystemClock.elapsedRealtime()
+            val id=requireNotNull(task) { "Public trigger did not create a task: ${app.channels.lastStatus()}" }
+            val evidence=app.tasks.recognitionEvidence(id)
+            val timings=evidence?.optJSONObject("phaseTimingsMs") ?: JSONObject()
+            val phases=JSONObject()
+            for(phase in listOf("nodeRead","screenshot","route","ocr","parse","save")) {
+                phases.put(phase,JSONObject().put("state",when {
+                    timings.has(phase)->"measured"
+                    phase=="ocr" && syntheticNode->"not_run"
+                    else->"missing"
+                }).put("millis",if(timings.has(phase))timings.getLong(phase) else JSONObject.NULL))
+            }
+            val snapshot=app.tasks.nodeSnapshot(id)
+            val output=java.io.File(app.filesDir,"t15-acceptance").apply { mkdirs() }
+            val row=JSONObject().put("attemptId",UUID.randomUUID().toString()).put("trigger","ScreenCaptureService.captureOnShake")
+                .put("serial",InstrumentationRegistry.getArguments().getString("ledgerAcceptanceSerial") ?: JSONObject.NULL)
+                .put("api",Build.VERSION.SDK_INT).put("model",Build.MODEL).put("systemFingerprint",Build.FINGERPRINT)
+                .put("fixturePackage",fixturePackage).put("fixtureMode","safe")
+                .put("registry",if(syntheticNode)"test_only_synthetic" else "production_unknown_layout")
+                .put("parseScope",if(syntheticNode)"synthetic_adapter" else "production_transaction_parser")
+                .put("operationKey",app.tasks.operationKey(id)).put("taskId",id).put("status",app.tasks.status(id))
+                .put("backendEntered",calls.get()).put("ocrExecutedConfirmed",completed.get())
+                .put("triggerElapsedMs",started).put("persistedTerminalObservedElapsedMs",terminal)
+                .put("intervalMeaning","public trigger to persisted terminal observed; readiness excluded; model warmth uncontrolled")
+                .put("screenshotRequestDelta",service.screenshotRequests-requests).put("phases",phases)
+                .put("taskEvidence",evidence).put("actualNodeReadStartedMs",snapshot?.readStartedMs)
+                .put("actualNodeReadCompletedMs",snapshot?.readCompletedMs)
+                .put("recordCount",app.store.all().count { it.id !in beforeRecords })
+            java.io.File(output,"attempts.jsonl").appendText(row.toString()+"\n")
+            assertEquals(row.toString(),if(syntheticNode)"NODE" else "OCR",evidence?.getString("route"))
+            assertEquals(1,service.screenshotRequests-requests)
+            assertNotNull(snapshot);assertEquals(fixturePackage,snapshot!!.packageName)
+            assertTrue(snapshot.readCompletedMs>=snapshot.readStartedMs)
+            for(phase in listOf("nodeRead","screenshot","route","parse","save"))assertTrue("$phase absent: $row",timings.has(phase))
+            assertEquals(if(syntheticNode)0 else 1,calls.get())
+            assertEquals(if(syntheticNode)0 else 1,completed.get())
+            if(syntheticNode)assertFalse(timings.has("ocr")) else assertTrue(timings.has("ocr"))
+            assertTrue(row.toString(),app.tasks.status(id) in setOf("SUCCEEDED","REVIEW","NO_BILL"))
+        } finally {
+            app.store.all().filter { it.id !in beforeRecords }.forEach { app.store.delete(it.id) }
+        }
+    }
+
+    @Test fun ordinaryScreenshotFailurePostsReliableNodesWithoutOcrAndKeepsMissingImageEvidence() {
+        startFixture("safe")
+        service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.UNAVAILABLE,"synthetic unavailable") }
+        try {
+            service.captureOnShake()
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            val record=app.tasks.recordId(task)?.let(app.store::get)
+            assertNotNull("Reliable qualified nodes must survive ordinary screenshot failure",record)
+            assertEquals(RecordState.POSTED,record!!.state)
+            assertEquals(-1234L,record.wallet!!.appliedCents);assertEquals(0,calls.get())
+            assertNull(app.store.screenshot(record.id));assertNull(app.tasks.image(task))
+            assertEquals("NODE",record.bill.receipt!!.recognition!!.route)
+            assertEquals("UNAVAILABLE",record.bill.receipt!!.recognition!!.screenshot.state)
+            assertEquals("UNAVAILABLE",app.tasks.recognitionEvidence(task)!!.getJSONObject("screenshot").getString("state"))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun unknownLayoutDelayedSuccessfulPixelsKeepTheOriginalTriggerDeadline() {
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        val deliveryAllowed=CompletableDeferred<Boolean>()
+        val accounts=app.store.accounts()
+        service.screenshotProvider={ _,allowed ->
+            delay(1_800)
+            val permitted=allowed();deliveryAllowed.complete(permitted)
+            if(!permitted)throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"synthetic expired pixel delivery")
+            android.graphics.Bitmap.createBitmap(100,200,android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        try {
+            service.captureOnShake()
+            await { deliveryAllowed.isCompleted && (taskIds()-previousTasks).singleOrNull()?.let {
+                app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            assertFalse("Unknown/OCR layouts must reject pixels delivered after the original trigger deadline",runBlocking { deliveryAllowed.await() })
+            assertEquals(0,calls.get())
+            assertNull(app.tasks.recordId((taskIds()-previousTasks).single()))
+            assertEquals(accounts,app.store.accounts())
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun ordinaryScreenshotTimeoutStillPostsTheOriginalReliableNodesWithoutOcr() {
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->delay(5_000);error("bounded timeout must cancel pixel acquisition") }
+        try {
+            service.captureOnShake()
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            val record=app.tasks.recordId(task)?.let(app.store::get)
+            assertNotNull("A bounded ordinary timeout must preserve still-current reliable nodes",record)
+            assertEquals("TIMEOUT",record!!.bill.receipt!!.recognition!!.screenshot.state)
+            assertEquals(RecordState.POSTED,record.state);assertEquals(0,calls.get());assertNull(app.store.screenshot(record.id))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    private fun nodeFactory():()->CaptureProcessor {
+        val info=app.packageManager.getPackageInfo(fixturePackage,0)
+        val verification=net.ankio.ledger.core.NodeLayoutVerification("synthetic-failure",fixturePackage,info.versionName.orEmpty(),info.longVersionCode,
+            "${Build.VERSION.RELEASE}/api${Build.VERSION.SDK_INT}/${Build.FINGERPRINT}".take(256),"${Build.MANUFACTURER}/${Build.MODEL}".take(256),
+            setOf("net.ankio.ledger.ShakeCaptureFixtureActivity"),false,"synthetic-failure-comparison","synthetic capture only")
+        val registry=net.ankio.ledger.core.NodeRecognitionRegistry(listOf(net.ankio.ledger.core.NodeLayoutAdapter(verification,{true}) { _,clock ->
+            val field=net.ankio.ledger.core.ReceiptField(merchant,merchant,"node")
+            listOf(net.ankio.ledger.core.TransactionCandidate(net.ankio.ledger.core.CandidateId.SINGLE,
+                net.ankio.ledger.core.ParsedBill(1234,net.ankio.ledger.core.Direction.EXPENSE,merchant,"其他",clock.recognitionAt,null,true,"",
+                    receipt=net.ankio.ledger.core.ReceiptEvidence(merchant=field))))
+        }))
+        return { CaptureProcessor(app,OcrClient(app,net.ankio.ledger.ocr.RecognitionBackend { _,_,_,_,_,_->calls.incrementAndGet();error("nodes must not invoke OCR") }),nodeRegistry=registry) }
+    }
+
+    @Test fun protectedPixelFailureRetainsTheExistingPrivacyRefusalWithoutATaskOrBill() {
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.PROTECTED,"合成受保护页面，未截图") }
+        try {
+            service.captureOnShake()
+            await { app.channels.lastStatus().contains("合成受保护页面") }
+            assertEquals(previousTasks,taskIds())
+            assertEquals(0,calls.get());assertTrue(app.store.all().none { it.bill.merchant.startsWith(merchant) })
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun ordinaryFailureAfterWindowContentChangeCannotSaveOldNodes() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->entered.complete(Unit);release.await();throw ScreenshotAcquisitionException(ScreenshotFailureReason.UNAVAILABLE,"synthetic unavailable") }
+        try {
+            service.captureOnShake();await { entered.isCompleted }
+            val event=android.view.accessibility.AccessibilityEvent.obtain(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            event.packageName=fixturePackage
+            try { InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onAccessibilityEvent(event) } }
+            finally { event.recycle() }
+            release.complete(Unit)
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            assertNull(app.tasks.recordId(task));assertEquals(0,calls.get());assertFalse(app.tasks.hasMissingNodeEvidence(task))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun ordinaryFailureAfterConsentRevocationCannotSaveOldNodes() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        startFixture("safe");service.processorFactory=nodeFactory()
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->entered.complete(Unit);release.await();throw ScreenshotAcquisitionException(ScreenshotFailureReason.TIMEOUT,"synthetic timeout") }
+        try {
+            service.captureOnShake();await { entered.isCompleted }
+            app.channels.setShakePackage(fixturePackage,false);release.complete(Unit)
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0 }
+            val task=(taskIds()-previousTasks).single()
+            assertEquals("CANCELLED",app.tasks.status(task));assertNull(app.tasks.recordId(task));assertEquals(0,calls.get());assertFalse(app.tasks.hasMissingNodeEvidence(task))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun typedAuthorizationAndWindowFailuresNeverUseReliableNodeFallback() {
+        val provider=service.screenshotProvider
+        service.processorFactory=nodeFactory()
+        try {
+            listOf(ScreenshotFailureReason.AUTHORIZATION_CHANGED,ScreenshotFailureReason.WINDOW_CHANGED).forEach { reason ->
+                startFixture("safe");val before=taskIds()
+                service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(reason,"synthetic refusal") }
+                service.captureOnShake()
+                await { (taskIds()-before).singleOrNull()?.let { app.tasks.status(it)=="FAILED" }==true }
+                val task=(taskIds()-before).single()
+                assertNull(app.tasks.recordId(task));assertFalse(app.tasks.hasMissingNodeEvidence(task));assertEquals(0,calls.get())
+            }
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun unknownNodesWithOrdinaryScreenshotFailureNeverStartOcrOrPost() {
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,_->throw ScreenshotAcquisitionException(ScreenshotFailureReason.UNAVAILABLE,"synthetic unavailable") }
+        try {
+            service.captureOnShake()
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it)=="FAILED" }==true }
+            val task=(taskIds()-previousTasks).single()
+            assertNull(app.tasks.recordId(task));assertEquals(0,calls.get());assertFalse(app.tasks.hasMissingNodeEvidence(task))
+        } finally { service.screenshotProvider=provider }
+    }
+
+    @Test fun contentChangeWhilePixelsArePendingCannotFallBackIntoOcrOrCreateABill() {
+        val entered=CompletableDeferred<Unit>();val release=CompletableDeferred<Unit>().also { releases+=it }
+        startFixture("safe")
+        val provider=service.screenshotProvider
+        service.screenshotProvider={ _,allowed ->
+            entered.complete(Unit);release.await()
+            if(!allowed())throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"合成采集期间交易改变")
+            android.graphics.Bitmap.createBitmap(100,200,android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        try {
+            service.captureOnShake();await { entered.isCompleted }
+            val event=android.view.accessibility.AccessibilityEvent.obtain(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+            event.packageName=fixturePackage
+            // Some platform content events omit a window ID. They cannot certify that
+            // an in-flight frame still belongs to the previously checked transaction.
+            try { InstrumentationRegistry.getInstrumentation().runOnMainSync { service.onAccessibilityEvent(event) } }
+            finally { event.recycle() }
+            release.complete(Unit)
+            await { (taskIds()-previousTasks).singleOrNull()?.let { app.tasks.status(it)=="FAILED" }==true }
+            assertEquals(0,calls.get());assertTrue(app.store.all().none { it.bill.merchant.startsWith(merchant) })
+            assertTrue((taskIds()-previousTasks).all { app.tasks.image(it)==null })
+        } finally { release.complete(Unit);service.screenshotProvider=provider }
+    }
+
     @Test fun sensitiveEditableAndUnreadablePagesNeverRequestPixelsOrCreateTasks() {
+        service.processorFactory=nodeFactory()
         val count=service.screenshotRequests;val before=taskIds()
         for(mode in listOf("password","editable","verification","blank")) {
             startFixture(mode);service.captureOnShake();SystemClock.sleep(1_900)

@@ -13,6 +13,7 @@ import net.ankio.ledger.core.Money
 import net.ankio.ledger.core.AccountMoney
 import net.ankio.ledger.core.BankCodes
 import net.ankio.ledger.core.ParsedBill
+import net.ankio.ledger.core.ReceiptEvidence
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.core.Source
 import net.ankio.ledger.core.PaymentApps
@@ -21,8 +22,18 @@ import net.ankio.ledger.data.LedgerAccount
 import net.ankio.ledger.data.AccountType
 import net.ankio.ledger.data.AccountBanks
 import net.ankio.ledger.data.CustomCategory
+import net.ankio.ledger.data.CategoryDeletionPreview
+import net.ankio.ledger.data.CategoryPreviewStale
+import net.ankio.ledger.data.ClassificationCodec
+import net.ankio.ledger.data.ClassificationPreviewCodec
+import net.ankio.ledger.data.ClassificationException
+import net.ankio.ledger.data.CategoryDirectory
+import net.ankio.ledger.data.CategoryException
+import net.ankio.ledger.data.LedgerCategory
 import net.ankio.ledger.data.LedgerReadView
+import net.ankio.ledger.data.CalendarRecordPages
 import net.ankio.ledger.data.WalletReadModel
+import net.ankio.ledger.data.ReceiptEvidenceCodec
 import net.ankio.ledger.data.WalletException
 import net.ankio.ledger.data.paymentProvider
 import net.ankio.ledger.ledger
@@ -41,33 +52,39 @@ class LedgerWebBridge(private val activity: MainActivity) {
     /** Production list entry: exactly one bounded page, with a revision for continuation. */
     @JavascriptInterface
     fun snapshotFirst(month:String,search:String,direction:String,known:String):String = synchronized(app.store) {
-        val revision=app.revision.value.toString()
-        snapshotViewData(month,search,200,direction,known).put("dataRevision",revision).toString()
+        val zone=java.time.ZoneId.systemDefault()
+        val revision=readRevision(month,search,direction,zone)
+        snapshotViewData(month,search,200,direction,known,zone).put("dataRevision",revision).toString()
     }
 
     /** A mutation invalidates the cursor rather than mixing two different ledger views. */
     @JavascriptInterface
     fun recordPage(month:String,search:String,direction:String,beforeAt:Long,beforeId:Long,expectedRevision:String):String = try {
         synchronized(app.store) {
-            val revision=app.revision.value.toString()
+            val zone=java.time.ZoneId.systemDefault()
+            val revision=readRevision(month,search,direction,zone)
             if(expectedRevision!=revision)JSONObject().put("ok",true).put("reset",true).toString()
             else {
-                val view=LedgerReadView(app.store).records(month,search,direction=direction,beforeAt=beforeAt,beforeId=beforeId)
+                val view=LedgerReadView(app.store,zone).records(month,search,direction=direction,beforeAt=beforeAt,beforeId=beforeId)
                     .put("summary",JSONObject()).put("month",month)
                 val result=buildSnapshot(view).put("dataRevision",revision)
-                if(app.revision.value.toString()!=revision)JSONObject().put("ok",true).put("reset",true).toString()
+                if(readRevision(month,search,direction,java.time.ZoneId.systemDefault())!=revision)JSONObject().put("ok",true).put("reset",true).toString()
                 else result.toString()
             }
         }
-    } catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
+    } catch(_:CalendarRecordPages.StaleCursor) { JSONObject().put("ok",true).put("reset",true).toString() }
+      catch(error:Exception) { failure("更多账单读取失败，请重试",failureCode(error)).toString() }
 
     @JavascriptInterface
     fun snapshotView(month:String,search:String,limit:Int,direction:String,known:String):String =
         synchronized(app.store) { snapshotViewData(month,search,limit,direction,known).toString() }
 
-    private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String):JSONObject = try {
-        val read=LedgerReadView(app.store)
-        val key="${app.revision.value}|$month|$search|$limit|$direction|${System.currentTimeMillis()/30_000}|${app.channels.permitted(ChannelSettings.Channel.OCR)}|${net.ankio.ledger.capture.CaptureRuntime.running}|${net.ankio.ledger.capture.ScreenCaptureService.current!=null}"
+    private fun readRevision(month:String,search:String,direction:String,zone:java.time.ZoneId):String =
+        "calendar-v3|$READ_SESSION|${app.revision.value}|${zone.id}|${month.length}:$month|${search.length}:$search|${direction.length}:$direction"
+
+    private fun snapshotViewData(month:String,search:String,limit:Int,direction:String,known:String,zone:java.time.ZoneId=java.time.ZoneId.systemDefault()):JSONObject = try {
+        val read=LedgerReadView(app.store,zone)
+        val key="${readRevision(month,search,direction,zone)}|$limit|${System.currentTimeMillis()/30_000}|${app.channels.permitted(ChannelSettings.Channel.OCR)}|${net.ankio.ledger.capture.CaptureRuntime.running}|${net.ankio.ledger.capture.ScreenCaptureService.current!=null}"
         if(known==key)JSONObject().put("ok",true).put("unchanged",true)
         else {
             val view=read.records(month,search,limit=200,direction=direction)
@@ -75,9 +92,11 @@ class LedgerWebBridge(private val activity: MainActivity) {
             val pages=limit.coerceIn(200,1_000_000)/200
             for(page in 1 until pages) {
                 if(!view.getBoolean("hasMore"))break
-                val next=read.records(month,search,page*200,200,direction)
+                val cursor=view.getJSONObject("nextCursor")
+                val next=read.records(month,search,limit=200,direction=direction,beforeAt=cursor.getLong("occurredAt"),beforeId=cursor.getLong("id"))
                 val rows=next.getJSONArray("records");repeat(rows.length()){view.getJSONArray("records").put(rows.getJSONObject(it))}
                 view.put("hasMore",next.getBoolean("hasMore"))
+                view.put("nextCursor",next.opt("nextCursor") ?: JSONObject.NULL)
             }
             view.put("summary",read.summary(month)).put("month",month)
             buildSnapshot(view).put("viewKey",key)
@@ -97,10 +116,12 @@ class LedgerWebBridge(private val activity: MainActivity) {
         val pageRecordIds=mutableSetOf<Long>()
         val iconStatuses=mutableMapOf<Long,String>()
         val iconDetails=mutableMapOf<Long,String>()
+        val recognitionEvidence=mutableMapOf<Long,JSONObject>()
         val taskMetadata=if(requestedIds==null)tasks else app.tasks.metadataForRecords(requestedIds)
         for(index in 0 until taskMetadata.length()) {
             val task=taskMetadata.getJSONObject(index)
             val id=task.optLong("recordId",0)
+            task.optJSONObject("recognitionEvidence")?.let { if(id>0)recognitionEvidence.putIfAbsent(id,it) }
             if(id>0 && (task.optString("origin").startsWith("payment_auto:") || task.optJSONObject("diagnostic")?.optString("trigger").orEmpty().let { it.startsWith("page_auto") || it.startsWith("wechat_auto") || it.startsWith("payment_auto") }))pageRecordIds.add(id)
             val status=task.optJSONObject("diagnostic")?.optString("icon").orEmpty()
             if(id>0 && status.isNotBlank()) {
@@ -117,6 +138,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     .put("historyRevision",historyRevisions[id]?:"")
                     .put("merchantIconRevision",merchantIconRevisions[row.optString("merchantIconKey")]?:0)
                     .put("iconDetails",iconDetails[id].orEmpty())
+                    .put("recognitionEvidence",recognitionEvidence[id] ?: row.optJSONObject("receipt")?.optJSONObject("recognition") ?: JSONObject.NULL)
                 if(!row.getBoolean("hasMerchantIcon"))row.put("iconStatus",iconStatuses[id].orEmpty())
                 records.put(row)
             }
@@ -125,7 +147,13 @@ class LedgerWebBridge(private val activity: MainActivity) {
                 put("id", record.id)
                 put("uid", record.uid)
                 put("merchant", record.bill.merchant)
+                put("receipt", ReceiptEvidenceCodec.json(record.bill.receipt))
+                put("recognitionEvidence",recognitionEvidence[record.id] ?: record.bill.receipt?.recognition?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::json) ?: JSONObject.NULL)
                 put("category", record.bill.category)
+                put("categoryDecision",ClassificationCodec.decision(record.bill.categoryDecision))
+                app.store.categoryFor(record).let { category ->
+                    put("categoryId", category?.id ?: JSONObject.NULL); put("categoryIcon", category?.icon ?: "tag")
+                }
                 put("note", record.note)
                 put("amountCents", record.bill.amountCents ?: JSONObject.NULL)
                 put("direction", record.bill.direction?.name ?: JSONObject.NULL)
@@ -191,6 +219,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("pendingDeletion",app.store.pendingDeletion()?.let { JSONObject().put("id",it.id).put("expiresAt",it.expiresAt) }?:JSONObject.NULL)
             .put("records", records).put("recognitionTasks",tasks).put("channels", channels)
             .put("accounts", accounts).put("customCategories", custom)
+            .put("categoryDirectory", directoryData()).put("categoryIconOptions", categoryIconOptions())
+            .put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules()))
             .put("walletSettings",walletSettingsData())
             .put("bankCodeOptions",JSONArray().apply { BankCodes.entries.forEach { put(JSONObject().put("code",it.code).put("label",it.label)) } })
             .put("bankOptions",JSONArray().apply { AccountBanks.entries.forEach {
@@ -218,8 +248,12 @@ class LedgerWebBridge(private val activity: MainActivity) {
             .put("hasMerchantIcon",iconKey!=null).put("merchantIconKey",iconKey?:JSONObject.NULL)
             .put("merchantIconRevision",iconKey?.let { app.store.merchantIconAsset(it)?.contentHashCode() }?:0)
             .put("captureMode",if(task?.optString("origin")?.startsWith("payment_auto:")==true)"page" else "")
+            .put("recognitionEvidence",task?.optJSONObject("recognitionEvidence") ?: record.bill.receipt?.recognition?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::json) ?: JSONObject.NULL)
             .put("refundCandidateCount",if((record.bill.refund!=null||record.bill.standaloneRefund!=null)&&record.state==RecordState.REVIEW)app.store.refundCandidates(id).size else 0)
             .put("merchant",record.bill.merchant).put("category",record.bill.category)
+            .put("categoryId",app.store.categoryFor(record)?.id ?: JSONObject.NULL).put("categoryIcon",app.store.categoryFor(record)?.icon ?: "tag")
+            .put("receipt",ReceiptEvidenceCodec.json(record.bill.receipt))
+            .put("categoryDecision",ClassificationCodec.decision(record.bill.categoryDecision))
             .put("note",record.note).put("amountCents",record.bill.amountCents?:JSONObject.NULL).put("direction",record.bill.direction?.name?:JSONObject.NULL)
             .put("occurredAt",record.bill.occurredAt).put("state",record.state.name).put("source",record.capture.source.name)
             .put("paymentProvider",paymentProvider(record.capture)?:JSONObject.NULL)
@@ -257,7 +291,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     @JavascriptInterface fun contributionRecords(period:String,category:String,direction:String,offset:Int):String=try {
         val range=net.ankio.ledger.core.ExpensePeriodBuckets.create(ExpensePeriod.valueOf(period),java.time.Instant.now(),java.time.ZoneId.systemDefault())
         LedgerReadView(app.store).records(java.time.YearMonth.now().toString(),offset=offset,direction=direction.also { checkInput(it in setOf("EXPENSE","INCOME"),"统计类型无效") },category=category,
-            contribution=true,rangeStart=range.startMillis,rangeEnd=range.endMillis).put("ok",true).toString()
+            contribution=true,calendarStart=range.startDate,calendarEnd=range.endDate).put("ok",true).toString()
     } catch(error:Exception) { structuredFailure(error,"开销明细读取失败").toString() }
 
     @JavascriptInterface
@@ -270,6 +304,9 @@ class LedgerWebBridge(private val activity: MainActivity) {
     fun save(json: String): String = try {
         checkInput(json.length <= MAX_INPUT_LENGTH, "账单数据过大")
         val input = JSONObject(json)
+        checkInput(!input.has("categoryDecision"),"分类信息无效，请重新打开账单")
+        val categoryEdited=if(input.has("categoryEdited"))input.get("categoryEdited") as? Boolean
+            ?: throw InvalidInput("分类选择状态无效，请重新选择") else false
         checkInput(!input.has("eligibility") && !input.has("walletEffects") && !input.has("appliedCents"),"不能指定余额联动事实")
         val id = integer(input, "id", 0, MAX_SAFE_INTEGER)
         val taskId=if(input.has("recognitionTaskId")) integer(input,"recognitionTaskId",0,MAX_SAFE_INTEGER) else 0L
@@ -284,16 +321,27 @@ class LedgerWebBridge(private val activity: MainActivity) {
             Direction.TRANSFER.name -> Direction.TRANSFER
             else -> throw InvalidInput("请选择支出、收入或转账")
         }
-        val merchant = string(input, "merchant", 1024).trim().ifBlank { "未填写商户" }
-        val category = string(input, "category", 1024).trim().ifBlank { "其他" }
-        val occurredAt = integer(input, "occurredAt", 1, MAX_TIME)
+        val enteredMerchant = string(input, "merchant", 1024).trim()
+        val categoryName = string(input, "category", 1024).trim().ifBlank { "其他" }
+        val requestedOccurredAt = integer(input, "occurredAt", 1, MAX_TIME)
+        val timeEdited=if(input.has("timeEdited"))input.get("timeEdited") as? Boolean
+            ?: throw InvalidInput("时间修改参数无效") else null
         val note = string(input, "note", 500).trim()
         val confirmed = if (input.has("confirmDuplicate")) {
             input.get("confirmDuplicate") as? Boolean ?: throw InvalidInput("重复确认参数无效")
         } else false
         val result = synchronized(app.store) {
+            val category = if (direction == Direction.TRANSFER) "本人互转" else {
+                val categoryId = if (input.has("categoryId") && !input.isNull("categoryId")) string(input, "categoryId", 160) else ""
+                if (categoryId.isNotBlank()) app.store.category(categoryId, direction).name
+                else app.store.categoryDirectory(direction).firstOrNull { it.name == categoryName }?.name
+                    ?: throw CategoryException("CATEGORY_NOT_FOUND", "分类已不存在或收支方向不一致，请重新选择")
+            }
             val original = if (id == 0L) null else (app.store.get(id)
                 ?: throw InvalidInput("账单已不存在，请刷新后重试"))
+            // A minute-only editor must not truncate the saved seconds/millis when the user did not edit time.
+            val occurredAt=if(original!=null && timeEdited==false)original.bill.occurredAt else requestedOccurredAt
+            val merchant = enteredMerchant.ifBlank { if(original?.bill?.receipt!=null) "" else "未填写商户" }
             checkInput(original?.bill?.standaloneRefund==null && (original?.bill?.refund == null || original.state == RecordState.POSTED),
                 "退款需先选择原账单，不能另记为一笔支出")
             if(direction==Direction.TRANSFER && (original?.bill?.refund!=null || original?.bill?.standaloneRefund!=null))throw WalletException("TRANSFER_REFUND_CONFLICT","含退款历史的消费不能直接改为转账，请先核对退款记录")
@@ -338,6 +386,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
                         merchant = merchant, category = category, occurredAt = occurredAt,
                         reliable = true, reason = "", transfer=null, timeExplicit = if(original!=null && occurredAt==base.bill.occurredAt)base.bill.timeExplicit else true),
                     note = note),
+                    manualCategorySelected=categoryEdited,
                     walletAccountUid=if(input.has("walletAccountUid")&&!input.isNull("walletAccountUid"))string(input,"walletAccountUid",64) else null,
                     manualWalletSelected=if(input.has("manualWalletSelected"))input.get("manualWalletSelected") as? Boolean ?: throw InvalidInput("钱包选择参数无效") else false,
                     expectedRevision=if(original!=null)integer(input,"expectedRevision",0,MAX_SAFE_INTEGER) else null,
@@ -366,9 +415,14 @@ class LedgerWebBridge(private val activity: MainActivity) {
         checkInput(id in 1..MAX_SAFE_INTEGER, "账单编号无效")
         val candidates = JSONArray()
         app.store.refundCandidates(id).forEach { record ->
-            candidates.put(JSONObject().put("id", record.id).put("merchant", record.bill.merchant)
+            val candidate=JSONObject().put("id", record.id).put("merchant", record.bill.merchant)
                 .put("occurredAt", record.bill.occurredAt).put("amountCents", record.bill.amountCents ?: JSONObject.NULL)
-                .put("originalAmountCents", record.bill.refund?.originalAmountCents ?: record.bill.amountCents ?: JSONObject.NULL))
+                .put("originalAmountCents", record.bill.refund?.originalAmountCents ?: record.bill.amountCents ?: JSONObject.NULL)
+            record.bill.receipt?.time?.let { time ->
+                val evidence=ReceiptEvidenceCodec.json(ReceiptEvidence(time=time)) as JSONObject
+                candidate.put("receipt",JSONObject().put("time",evidence.getJSONObject("time")))
+            }
+            candidates.put(candidate)
         }
         JSONObject().put("ok", true).put("candidates", candidates).toString()
     } catch (error: Exception) {
@@ -395,7 +449,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             app.changed(true)
         }
         val deletion=app.store.pendingDeletion()
-        app.scope.launch {
+        app.recognitionWork.launch {
             kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
             app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord)
             app.changed(true)
@@ -433,12 +487,19 @@ class LedgerWebBridge(private val activity: MainActivity) {
             JSONObject().put("ok",true).put("id",id).put("expiresAt",app.store.pendingDeletion()?.expiresAt ?: 0)
                 .put("expectedRevision",revision?.let { it+1 } ?: JSONObject.NULL)
         }
-        if(action=="DELETE")app.scope.launch {
+        if(action=="DELETE")app.recognitionWork.launch {
             kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
             app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord);app.changed(true)
         }
         result.toString()
     } catch(error:Exception) { structuredFailure(error,"账单操作失败，请重试").toString() }
+
+    @JavascriptInterface
+    fun retryRecognitionTask(id:Long):String=try {
+        checkInput(id in 1..MAX_SAFE_INTEGER,"识别记录编号无效")
+        checkInput(app.captureQueue.retryBatch(id),"没有可重试的批次、截图已失效或识别授权已关闭")
+        JSONObject().put("ok",true).toString()
+    } catch(error:Exception) { structuredFailure(error,"重试失败，请稍后再试").toString() }
 
     @JavascriptInterface
     fun deleteTask(id:Long):String=try {
@@ -551,6 +612,129 @@ class LedgerWebBridge(private val activity: MainActivity) {
         JSONObject().put("ok",true).put("selectedCount",app.channels.selectedShakePackages().size)
             .put("generation",app.channels.shakeMasterGeneration()).put("captureHealth",app.captureHealth.snapshot()).toString()
     } catch(error:Exception) { structuredFailure(error,"应用选择保存失败").toString() }
+
+    private fun classificationResponse()=JSONObject().put("ok",true).put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules()))
+    private fun ruleFailure(error:Exception)=failure(error.message ?: "分类规则操作失败，请重试",(error as? ClassificationException)?.code ?: "RULE_INVALID").toString()
+    @JavascriptInterface fun classificationRules():String=try {
+        synchronized(app.store) { classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun previewClassification(json:String):String=try {
+        val request=ClassificationPreviewCodec.readRequest(json)
+        synchronized(app.store) {
+            val result=request.recordId?.let { app.store.previewClassification(it,request.rule) }
+                ?: app.store.previewClassification(requireNotNull(request.input),request.rule)
+            JSONObject().put("ok",true).put("preview",ClassificationPreviewCodec.preview(result)).toString()
+        }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun classificationRuleDraftFromBill(recordId:Long):String=try {
+        synchronized(app.store) {
+            val draft=app.store.classificationRuleDraftFromBill(recordId)
+            JSONObject().put("ok",true).put("recordId",draft.recordId).put("input",ClassificationPreviewCodec.input(draft.input))
+                .put("rule",ClassificationCodec.rule(draft.rule).put("id",JSONObject.NULL)).toString()
+        }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun saveClassificationRule(json:String):String=try {
+        checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
+        val rule=ClassificationCodec.readRule(JSONObject(json))
+        synchronized(app.store) { app.store.saveClassificationRule(rule);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun setBuiltinClassificationRuleEnabled(json:String):String=try {
+        checkInput(json.length<=MAX_INPUT_LENGTH,"规则数据过长")
+        val input=JSONObject(json)
+        val id=(input.get("id") as? String)?.takeIf { it.length in 1..160 }
+            ?: throw ClassificationException("RULE_INVALID","内置规则标识无效")
+        val enabled=input.get("enabled") as? Boolean ?: throw ClassificationException("RULE_INVALID","规则启停状态无效")
+        synchronized(app.store) { app.store.setBuiltinClassificationRuleEnabled(id,enabled);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun copyBuiltinClassificationRule(id:String):String=try {
+        val draft=app.store.copyBuiltinClassificationRule(id)
+        JSONObject().put("ok",true).put("rule",ClassificationCodec.rule(draft).put("id",JSONObject.NULL)).toString()
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun deleteClassificationRule(id:String):String=try {
+        synchronized(app.store) { app.store.deleteClassificationRule(id);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+    @JavascriptInterface fun reorderClassificationRules(direction:String,idsJson:String):String=try {
+        checkInput(idsJson.length<=200_000,"规则顺序过长")
+        val entries=JSONArray(idsJson);checkInput(entries.length()<=2_000,"规则数量过多")
+        val ids=(0 until entries.length()).map { entries.get(it) as? String ?: throw ClassificationException("RULE_INVALID","规则顺序无效") }
+        synchronized(app.store) { app.store.reorderClassificationRules(categoryDirection(direction),ids);app.changed();classificationResponse().toString() }
+    } catch(error:Exception) { ruleFailure(error) }
+
+    private fun categoryJson(category: LedgerCategory) = JSONObject().put("id", category.id).put("name", category.name)
+        .put("direction", category.direction.name).put("icon", category.icon).put("order", category.order)
+        .put("isFallback", category.isFallback).put("referenceCount", category.referenceCount).put("canDelete", category.canDelete)
+
+    private fun directoryData(): JSONObject {
+        val categories = app.store.categoryDirectory()
+        return JSONObject().put("expense", JSONArray().apply { categories.filter { it.direction == Direction.EXPENSE }.forEach { put(categoryJson(it)) } })
+            .put("income", JSONArray().apply { categories.filter { it.direction == Direction.INCOME }.forEach { put(categoryJson(it)) } })
+    }
+    private fun categoryIconOptions() = JSONArray().apply { CategoryDirectory.icons.forEach { (key, label) -> put(JSONObject().put("key", key).put("label", label)) } }
+    private fun directoryResponse() = JSONObject().put("ok", true).put("categoryDirectory", directoryData()).put("categoryIconOptions", categoryIconOptions())
+    private fun categoryDirection(value: String): Direction = when (value) {
+        "EXPENSE", "expense" -> Direction.EXPENSE
+        "INCOME", "income" -> Direction.INCOME
+        else -> throw CategoryException("CATEGORY_DIRECTION", "分类仅支持收入或支出")
+    }
+    private fun categoryFailure(error: Exception): String = if (error is CategoryException) structuredFailure(error, "分类操作失败").toString()
+        else failure(error.message ?: "分类操作失败，请重试", "CATEGORY_INVALID").toString()
+
+    @JavascriptInterface fun getCategoryDirectory(): String = try {
+        synchronized(app.store) { directoryResponse().toString() }
+    } catch (error: Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun saveCategory(json: String): String = try {
+        checkInput(json.length <= MAX_INPUT_LENGTH, "分类数据过长")
+        val input = JSONObject(json)
+        val id = if (input.has("id") && !input.isNull("id")) string(input, "id", 160).takeIf { it.isNotBlank() } else null
+        val name = string(input, "name", 40).trim()
+        val direction = categoryDirection(string(input, "direction", 16))
+        val icon = if (input.has("icon")) string(input, "icon", 40) else "tag"
+        synchronized(app.store) {
+            val category = app.store.saveCategory(id, name, direction, icon)
+            app.changed(); directoryResponse().put("category", categoryJson(category)).toString()
+        }
+    } catch (error: Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun reorderCategories(direction: String, idsJson: String): String = try {
+        checkInput(idsJson.length <= 200_000, "分类顺序过长")
+        val input = JSONArray(idsJson)
+        checkInput(input.length() <= 2_000, "分类数量过多")
+        val ids = (0 until input.length()).map { index -> (input.get(index) as? String)?.takeIf { it.length <= 160 }
+            ?: throw CategoryException("CATEGORY_INVALID", "分类顺序无效") }
+        synchronized(app.store) { app.store.reorderCategories(categoryDirection(direction), ids); app.changed(); directoryResponse().toString() }
+    } catch (error: Exception) { categoryFailure(error) }
+
+    private fun deletionPreviewJson(value:CategoryDeletionPreview)=JSONObject().put("category",categoryJson(value.category))
+        .put("billCount",value.billCount).put("ruleCount",value.ruleCount).put("queuedConfigurationCount",value.queuedConfigurationCount)
+        .put("replacementCount",value.replacementCount).put("requiresReplacement",value.requiresReplacement).put("previewToken",value.previewToken)
+        .put("replacements",JSONArray().apply { value.replacements.forEach { put(categoryJson(it)) } })
+
+    @JavascriptInterface fun previewCategoryDeletion(id:String):String=try {
+        synchronized(app.store) { JSONObject().put("ok",true).put("deletionPreview",deletionPreviewJson(app.store.previewCategoryDeletion(id))).toString() }
+    } catch(error:Exception) { categoryFailure(error) }
+
+    @JavascriptInterface fun confirmCategoryDeletion(json:String):String=try {
+        if(json.length>MAX_INPUT_LENGTH)throw CategoryException("CATEGORY_INVALID","分类删除数据无效")
+        val input=JSONObject(json)
+        fun text(key:String)=((input.get(key) as? String)?.takeIf { it.length in 1..160 })
+            ?: throw CategoryException("CATEGORY_INVALID","分类删除数据无效")
+        val id=text("id");val token=text("previewToken")
+        val replacement=if(input.isNull("replacementId"))null else text("replacementId")
+        synchronized(app.store) {
+            app.store.confirmCategoryDeletion(id,replacement,token);app.changed()
+            directoryResponse().put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules())).toString()
+        }
+    } catch(error:CategoryPreviewStale) {
+        failure(error.message ?: "分类引用已变化，请核对最新影响后再确认删除","CATEGORY_PREVIEW_STALE")
+            .put("deletionPreview",deletionPreviewJson(error.preview)).toString()
+    } catch(error:CategoryException) { categoryFailure(error) }
+    catch(_:org.json.JSONException) { failure("分类删除数据无效","CATEGORY_INVALID").toString() }
+    catch(_:Exception) { failure("分类删除失败，所有更改均已回滚","CATEGORY_DELETE_FAILED").toString() }
+
+    @JavascriptInterface fun removeCategory(id: String): String = try {
+        synchronized(app.store) { app.store.removeCategory(id); app.changed(); directoryResponse().toString() }
+    } catch (error: Exception) { categoryFailure(error) }
 
     @JavascriptInterface
     fun addCategory(name: String, direction: String): String = try {
@@ -749,6 +933,8 @@ class LedgerWebBridge(private val activity: MainActivity) {
 
     private fun failure(message:String,code:String="OPERATION_FAILED") = JSONObject().put("ok",false).put("error",message).put("code",code)
     private fun failureCode(error:Exception):String = when(error) {
+        is ClassificationException -> error.code
+        is CategoryException -> error.code
         is WalletException -> error.code
         is IllegalArgumentException -> error.message?.takeIf { it=="STATISTICS_OVERFLOW" } ?: "INVALID_INPUT"
         is JSONException -> "INVALID_INPUT"
@@ -761,11 +947,12 @@ class LedgerWebBridge(private val activity: MainActivity) {
             "TRANSFER_AMOUNT_CONFLICT" to "转账金额、手续费或到账金额不一致","TRANSFER_IDENTITY_CONFLICT" to "同一交易的信息有冲突，请核对原账单",
             "TRANSFER_STATUS_REQUIRED" to "尚未确认转账完成，请核对终态","TRANSFER_PAYMENT_EVIDENCE_CONFLICT" to "新账户证据与原钱包冲突，请核对",
             "TRANSFER_REFUND_CONFLICT" to "含消费退款记录，不能直接改为转账","STATISTICS_OVERFLOW" to "统计金额超过支持范围，请缩小时间范围")
-        return failure(messages[code] ?: error.message ?: fallback,code)
+        return failure(messages[code] ?: error.message ?: fallback,code).also { if(error is CategoryException && error.code=="CATEGORY_REFERENCED")it.put("referenceCount",error.referenceCount) }
     }
     private class InvalidInput(message: String) : IllegalArgumentException(message)
 
     private companion object {
+        val READ_SESSION=java.util.UUID.randomUUID().toString()
         const val MAX_INPUT_LENGTH = 16_384
         const val MAX_TIME = 4_102_444_800_000L
         // WebView's JavaScript numbers must represent record IDs without rounding.

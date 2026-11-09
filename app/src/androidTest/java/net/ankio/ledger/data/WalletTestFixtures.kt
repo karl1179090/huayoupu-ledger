@@ -47,7 +47,7 @@ internal fun LedgerStore.rebuildPreWalletSchemaForTest(version: Int) {
         db.execSQL("DROP TABLE accounts")
         db.execSQL("ALTER TABLE accounts_pre_wallet RENAME TO accounts")
         db.execSQL("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='accounts'", arrayOf(sequence))
-        listOf("record_wallet_links", "wallet_settings", "app_wallet_bindings", "wallet_movements", "wallet_submissions",
+        listOf("backup_restore_runs", "recognition_batches", "import_audit_history", "classification_configuration", "classification_snapshots", "category_directory", "record_wallet_links", "wallet_settings", "app_wallet_bindings", "wallet_movements", "wallet_submissions",
             "record_wallet_effects", "record_transfer_details", "import_batches", "import_batch_records", "wallet_import_aliases").forEach {
             db.execSQL("DROP TABLE $it")
         }

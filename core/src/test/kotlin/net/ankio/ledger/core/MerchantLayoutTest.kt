@@ -56,7 +56,7 @@ class MerchantLayoutTest {
 
     @Test fun reviewStatisticsAloneAreNotAMerchant() {
         val bill = parse(order("合成家居旗舰店").filterNot { it.text == "合成家居旗舰店" })
-        assertEquals("淘宝支出", bill.merchant)
+        assertEquals("", bill.merchant)
     }
 
     private fun foodSection() = listOf(
@@ -80,13 +80,13 @@ class MerchantLayoutTest {
     }
 
     @Test fun goodsSectionWithoutFavoriteAnchorDoesNotInventMerchant() {
-        assertEquals("淘宝支出", parse(foodSection().filterNot { it.text == "收藏" }).merchant)
+        assertEquals("", parse(foodSection().filterNot { it.text == "收藏" }).merchant)
     }
 
     @Test fun multipleStoresInGoodsSectionRemainAmbiguous() {
         val lines = foodSection() + listOf(
             line("另一家合成店 >", 38, 1305, 230, 1335), line("收藏", 687, 1305, 773, 1335)
         )
-        assertEquals("淘宝支出", parse(lines).merchant)
+        assertEquals("", parse(lines).merchant)
     }
 }

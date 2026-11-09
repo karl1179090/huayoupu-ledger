@@ -18,7 +18,7 @@ class LedgerApp : Application() {
             // Remove the previous version's runtime/result channels during upgrade.
             listOf("shake_ledger","capture_repair","capture_feedback").forEach(::deleteNotificationChannel)
         }
-        scope.launch {
+        recognitionWork.launch {
             try {
                 RecognitionCommitRecovery.recoverAll(tasks,store)
                 tasks.recoverInterrupted(preserveCurrentSession=true)
@@ -30,7 +30,7 @@ class LedgerApp : Application() {
             store.readableDatabase
             store.purgeExpiredDeletes().forEach(tasks::deleteForRecord)
             store.pendingDeletion()?.let { deletion ->
-                scope.launch {
+                recognitionWork.launch {
                     delay((deletion.expiresAt-System.currentTimeMillis()).coerceAtLeast(0)+150)
                     store.purgeExpiredDeletes().forEach(tasks::deleteForRecord);changed(true)
                 }
@@ -45,9 +45,9 @@ class LedgerApp : Application() {
     private val interactiveStarted=java.util.concurrent.atomic.AtomicBoolean()
     /** Widget-only process starts recover durable receipts, but do not load OCR or resume capture. */
     fun startInteractiveMaintenance() {
-        if(!interactiveStarted.compareAndSet(false,true))return
+        if(!recognitionWork.accepting || !interactiveStarted.compareAndSet(false,true))return
         recognitionSession
-        scope.launch {
+        recognitionWork.launch {
             try {
                 taskRecovery.await()
             for(record in store.merchantLabelRepairCandidates()) {
@@ -74,6 +74,29 @@ class LedgerApp : Application() {
         }
     }
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val recognitionWork=net.ankio.ledger.capture.RecognitionWork(scope)
+    private val backupMutex=kotlinx.coroutines.sync.Mutex()
+    suspend fun <T> restoreQuiescent(action:()->T):T {
+        backupMutex.lock()
+        try {
+            taskRecovery.await()
+            var closed=false
+            try {
+                withContext(NonCancellable) { recognitionWork.closeAndDrain();closed=true }
+                channels.pauseForRestore()
+                recognitionSession.invalidate()
+                withContext(Dispatchers.Main) { net.ankio.ledger.capture.ScreenCaptureService.current?.cancelRecognition();net.ankio.ledger.capture.CaptureRuntime.stopSafely() }
+                // All tracked completion callbacks (including queue cleanup/resume) have drained.
+                return withContext(Dispatchers.IO) {
+                    action().also {
+                        AtomicBackupTransaction.checkpoint("applicationCleanup")
+                        runCatching { RecognitionCommitRecovery.recoverAll(tasks,store);tasks.recoverInterrupted() }
+                            .onFailure { android.util.Log.e("LedgerBackup","Restore committed; task feedback will recover at next startup",it) }
+                    }
+                }
+            } finally { if(closed)recognitionWork.reopen();runCatching { captureQueue.resume() }.onFailure { android.util.Log.e("LedgerBackup","Queue will resume at next startup",it) } }
+        } finally { backupMutex.unlock() }
+    }
     internal val taskRecovery = CompletableDeferred<Unit>()
     val revision = MutableStateFlow(0L)
     val store by lazy { LedgerStore(this) }

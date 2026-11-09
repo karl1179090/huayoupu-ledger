@@ -271,7 +271,7 @@ class MerchantIconTest {
             store.writableDatabase.execSQL("DROP TABLE merchant_icon_assets")
             store.rebuildPreWalletSchemaForTest(3)
             store.close(); store = LedgerStore(app, name)
-            assertEquals(10, store.readableDatabase.version)
+            assertEquals(16, store.readableDatabase.version)
             assertEquals(saved.asLegacyExcluded(), store.get(saved.id)); assertArrayEquals(image, store.screenshot(saved.id))
             assertTrue(store.merchantIconIds().isEmpty())
         } finally { store.close(); app.deleteDatabase(name); bitmap.recycle() }
@@ -296,7 +296,7 @@ class MerchantIconTest {
             }
             store.rebuildPreWalletSchemaForTest(4)
             store.close(); store = LedgerStore(app, name)
-            assertEquals(10, store.readableDatabase.version)
+            assertEquals(16, store.readableDatabase.version)
             assertEquals(first.asLegacyExcluded(), store.get(first.id)); assertEquals(second.asLegacyExcluded(), store.get(second.id))
             assertArrayEquals(store.merchantIcon(first.id), store.merchantIcon(second.id))
             assertNotNull(MerchantIconEncoding.mime(store.merchantIcon(first.id)!!))
@@ -463,7 +463,7 @@ class MerchantIconTest {
                 web.run("go('stats')")
                 web.await("document.querySelectorAll('#ranking .merchant-icon').length===0")
                 web.run("go('ledger');document.querySelector('[data-record=\"$id\"] img').src='https://appassets.androidplatform.net/merchant-icon/0000000000000000000000000000000000000000000000000000000000000000.img'")
-                web.await("!document.querySelector('[data-record=\"$id\"] img') && document.querySelector('[data-record=\"$id\"] .category-icon i.fa-utensils')")
+                web.await("(()=>{const row=document.querySelector('[data-record=\"$id\"]'),glyph=row?.querySelector('.category-icon i'),box=glyph?.getBoundingClientRect(),content=glyph&&getComputedStyle(glyph,'::before').content;return !row?.querySelector('img')&&glyph&&box.width>0&&box.height>0&&getComputedStyle(glyph).visibility!=='hidden'&&content&&content!=='none'&&content!=='normal'&&content!=='\"\"'})()")
             }
         } finally { id?.let { app.store.delete(it) }; sharedId?.let { app.store.delete(it) }; bitmap.recycle(); app.recognitionSession.invalidate(); app.changed() }
     }

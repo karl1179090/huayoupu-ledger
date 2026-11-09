@@ -1,6 +1,5 @@
 package net.ankio.ledger.core
 
-import java.time.LocalDateTime
 import java.time.ZoneId
 
 /** Coordinates refer to the exact bitmap passed to OCR. Reading order from OCR is not trusted. */
@@ -26,8 +25,8 @@ object LocalOcrBillParser {
     private val refundLabel = Regex("^(?:累计(?:成功)?退款(?:$amountWord)?|退款总额|已(?:成功)?退款(?:$amountWord)?|已退$amountWord|已退)[：:]?")
     private val singleRefundLabel = Regex("^(?:本次退款(?:$amountWord)?|退款$amountWord)[：:]?")
     private val refundIntent = Regex("累计(?:成功)?退款|退款总额|已(?:成功|部分|全部|全额)?退款|全额退款成功|已退金额|退款(?:成功|完成|已到账|到账成功|处理中|申请中|审核中|失败|金额|单号)|本次退款")
-    private val merchantLabel = Regex("^(?:商[户戶](?:全称|名称|金称|各称)|商家名称|店铺名称|收款方(?:全称|名称)?(?!备注|服务)|付款方(?:全称|名称)?(?!备注|服务)|交易对方|对方账户|对方账号)[：:]?")
-    private val paymentTimeLabel = Regex("^(?:原(?:支付|付款|交易|转账)时间|支付时间|付款时间|交易时间|转账时间)[：:]?")
+    private val merchantLabel = ReceiptEvidenceParser.merchantLabel
+    private val paymentTimeLabel = Regex("^(?:原)?(?:支付|付款|交易|转账|充值|提现|到账|完成)(?:时间|日期)[：:]?")
     private val idLabel = Regex("^(?:(?:原)?(?:微信|支付宝)?(?:支付|付款|交易|转账|充值|提现|订单))(?:编号|单号|号)[：:]?")
     private val datePattern = Regex("(20[0-9]{2})[年/.-]([0-9]{1,2})[月/.-]([0-9]{1,2})日?\\s*([0-9]{1,2})[:：]([0-9]{2})(?:[:：]([0-9]{2}))?")
     private val uiText = Regex("支付成功|付款成功|转账成功|交易成功|账单详情|交易详情|转账详情|全部账单|返回商家|完成|当前状态|账单服务|收款方服务|支付方式|付款方式|零钱|余额|银行卡|对订单有疑惑|电子凭证|退款|返回|服务由|¥|^[+-]?[0-9,.]+$")
@@ -43,7 +42,6 @@ object LocalOcrBillParser {
     private val shippingHelpGlyph = Regex("(?<=[0-9]\\.[0-9]{2})\\s+[Oo]\\s*(?=\\(免运费\\)\\s*$)")
     private val unpaidOrder = Regex("先用后付|确认收货后再付款|尚未扣款|未扣款")
     private val incomeType = Regex("^(?:交易类型[：:]?)?收入$")
-    private val nonPaymentTimeLabel = Regex("^(?:创建|下单|发货|收货|退款)时间[：:]?")
     private val refundIdLabel = Regex("^退款(?:订单|交易)?(?:单号|号)[：:]?")
     private val refundIdentifier = Regex("[A-Za-z0-9_-]{10,160}")
     private val wechatProvider = Regex("微信|财付通|WeChat", RegexOption.IGNORE_CASE)
@@ -63,8 +61,6 @@ object LocalOcrBillParser {
     private val disclosureSuffix = Regex("[>〉]$")
     private val numericMerchant = Regex("[0-9]{8,}|[:：][0-9]{2}")
     private val genericMerchantLabel = Regex("^(?:商品|收单机构|付款方备注|收款方备注|转账单号|商户单号|商戶单号|对方|去看看|推荐|广告)$")
-    private val digitWhitespace = Regex("(?<=[0-9])\\s+(?=[0-9])")
-    private val productLabel = Regex("^(?:商品|商品说明|商品名称|交易说明)[：:]?")
     private val transportCategory = Regex("ETC|高速|停车|地铁|公交|出租|打车|滴滴|加油", RegexOption.IGNORE_CASE)
     private val diningCategory = Regex("餐厅|餐饮|食堂|饭|咖啡|奶茶|外卖|美食|早餐|火锅")
     private val householdCategory = Regex("超市|便利店|百货|日用")
@@ -79,26 +75,27 @@ object LocalOcrBillParser {
         livePaymentAt: Long? = null,
         expenseOnly: Boolean = false,
         origin: String = "",
+        timeContext: RecognitionTimeContext = RecognitionTimeContext(capturedAt, ZoneId.systemDefault().id),
     ): ParsedBill? = parse(lines, width, height, capturedAt, livePaymentAt,
-        RecognitionPolicy.fromExpenseOnly(expenseOnly), origin)
+        RecognitionPolicy.fromExpenseOnly(expenseOnly), origin, timeContext)
 
     fun parse(
         lines: List<LocalOcrLine>, width: Int, height: Int, capturedAt: Long,
         livePaymentAt: Long? = null, policy: RecognitionPolicy, origin: String = "",
+        timeContext: RecognitionTimeContext = RecognitionTimeContext(capturedAt, ZoneId.systemDefault().id),
     ): ParsedBill? {
         val expenseOnly = policy == RecognitionPolicy.AUTOMATIC_PAYMENT
         val clean = lines.map { it.copy(text = normalize(it.text).trim().trim('|', '丨').trim()) }
             .filter { it.text.isNotBlank() }
         if (clean.isEmpty()) return null
         val text = clean.joinToString("\n") { it.text }
+        if (BankReceiptParser.matches(clean))
+            return if (expenseOnly) null else BankReceiptParser.parse(lines, capturedAt, origin, timeContext)
         val transfer = TransferEvidenceParser.parse(clean, origin)
         if (transfer != null && transfer.intent != TransferIntent.EXTERNAL) {
             if (expenseOnly && !TransferEvidenceParser.automaticCandidate(transfer, origin)) return null
-            val times = labeledValues(clean, Regex("^(?:转账时间|充值时间|提现时间|交易时间|到账时间|完成时间)[：:]?"))
-                .mapNotNull { parseDate(it, capturedAt) }.distinct()
-            val observed = livePaymentAt?.takeIf { expenseOnly && it in 946_656_000_000L..capturedAt }
-            val codes = transfer.reviewCodes + if (times.size > 1) listOf("TRANSFER_AMOUNT_CONFLICT") else emptyList()
-            val evidence = transfer.copy(reviewCodes = codes.distinct())
+            val time = TransactionTimeResolver.resolve(lines, timeContext)
+            val evidence = transfer
             val reliable = evidence.reviewCodes.isEmpty() && runCatching { TransferCalculator.validateEvidence(evidence) }.isSuccess
             val reason = if (reliable) "已识别本人钱包互转，请核对双方账户" else transferReason(evidence.reviewCodes)
             val merchant = when (evidence.scenario) {
@@ -107,14 +104,12 @@ object LocalOcrBillParser {
                 else -> "本人钱包转账"
             }
             return ParsedBill(evidence.amountCents, if (evidence.intent == TransferIntent.SELF_TRANSFER) Direction.TRANSFER else null,
-                merchant, "转账", times.singleOrNull() ?: observed ?: capturedAt, transactionId(clean), reliable, reason,
-                times.size == 1, transfer = evidence)
+                merchant, "转账", time.accountingAt, transactionId(clean), reliable, reason,
+                time.explicit, transfer = evidence, receipt = ReceiptEvidenceParser.parse(lines, "", origin).copy(time=time))
         }
         if(TransactionRejection.reason(text)!=null)return null
         val compact = text.filterNot(Char::isWhitespace)
         val isRefund = refundIntent.containsMatchIn(compact)
-        val paidTimes = labeledValues(clean, paymentTimeLabel)
-            .mapNotNull { parseDate(it,capturedAt) }.distinct()
         val header = headerAmount(clean, width, height)
         val hasOrderTotal=clean.any { orderPaidTotal.containsMatchIn(it.text.replace(" ","")) }
         val total=if(hasOrderTotal)uniqueLabeledAmount(clean.map { it.copy(text=it.text.replace(zeroAmountGlyph,"0")) },orderPaidTotal) else null
@@ -148,22 +143,12 @@ object LocalOcrBillParser {
         }
         if (expenseOnly && (direction == Direction.INCOME || isRefund)) return null
         val reasons = mutableListOf<String>()
-        val merchant = merchant(clean, header, width, height).ifBlank {
-            when(origin.substringAfter(':')) {
-                PaymentApps.TAOBAO -> "淘宝支出"
-                PaymentApps.WECHAT -> if(direction==Direction.INCOME)"微信收入" else "微信支出"
-                PaymentApps.ALIPAY -> if(direction==Direction.INCOME)"支付宝收入" else "支付宝支出"
-                else -> if(direction==Direction.INCOME)"收入记账" else "支出记账"
-            }
-        }
-        val otherTimes=labeledValues(clean,nonPaymentTimeLabel)
-            .mapNotNull { parseDate(it,capturedAt) }.toSet()
-        val visibleTimes = clean.mapNotNull { parseDate(it.text, capturedAt) }.filterNot { it in otherTimes }.distinct()
-        val explicitTime = if (paidTimes.size==1) paidTimes.single() else if (paidTimes.size>1) null
-            else if (!isRefund && visibleTimes.size == 1) visibleTimes.single() else null
+        val merchant = merchant(ReceiptEvidenceParser.merchantLines(clean), header, width, height)
+        val time = TransactionTimeResolver.resolve(lines, timeContext)
+        val receipt = ReceiptEvidenceParser.parse(lines, merchant, origin).copy(time=time)
+        val explicitTime = time.accountingAt.takeIf { time.explicit }
         val observedAt = livePaymentAt?.takeIf { !isRefund && direction == Direction.EXPENSE &&
             (paid.containsMatchIn(compact) || verifiedLiveExpense) && it in 946_656_000_000L..capturedAt }
-        if (isRefund && explicitTime == null && observedAt == null) reasons += "退款原付款时间不明确"
         val transactionId = transactionId(clean)
         val amount: Long?
         var refund: RefundInfo? = null
@@ -212,13 +197,14 @@ object LocalOcrBillParser {
             amount = if(!expenseOnly)manualAmount else agreedAmount(clean, amountLabel, header?.second)
             if (amount == null || amount <= 0) reasons += "付款金额不明确"
         }
-        return ParsedBill(amount, direction, merchant, category(clean, merchant), explicitTime ?: observedAt ?: capturedAt,
+        return ParsedBill(amount, direction, merchant, category(receipt), time.accountingAt,
             transactionId, reasons.isEmpty(), if (reasons.isEmpty()) {
-                if (explicitTime == null && observedAt != null) "已识别即时支付成功页；页面未显示交易时间，使用本机捕获时间"
+                if (explicitTime == null && observedAt != null) "已识别即时支付成功页；页面未显示交易时间，使用识别时间"
                 else if(explicitTime==null) "已识别；页面未显示有效付款时间，使用识别时间"
                 else "已识别，已校验交易信息"
             } else reasons.distinct().joinToString("；"),
-            explicitTime != null, refund, PaymentMethodParser.parse(clean, direction, origin), standaloneRefund)
+            explicitTime != null, refund, PaymentMethodParser.parse(clean, direction, origin), standaloneRefund,
+            receipt = receipt)
     }
 
     private fun transferReason(codes: List<String>): String = codes.map { code -> when (code) {
@@ -364,7 +350,8 @@ object LocalOcrBillParser {
         }
         // Wallets show the trading name above the amount; the legal full name below
         // can be a different person or company and must not break the icon anchor.
-        labeledValues(lines, merchantLabel).firstOrNull(::plausibleMerchant)?.let { return it.take(80) }
+        labeledValues(lines, merchantLabel).firstOrNull { plausibleMerchant(it) || it.length == 1 && it.single().isLetter() }
+            ?.let { return it.take(80) }
         // In text-only documents accept a clear named transaction header, never an arbitrary label.
         return lines.firstOrNull { it.text.startsWith("转账给") && it.text.length > 3 }?.text?.removePrefix("转账给")?.take(80).orEmpty()
     }
@@ -397,24 +384,13 @@ object LocalOcrBillParser {
     }
 
     private fun plausibleMerchant(value: String): Boolean = value.length in 2..80 &&
-        !uiText.containsMatchIn(value) && !isMerchantInterfaceText(value) && !fieldLabel(value) && !datePattern.containsMatchIn(value) &&
+        !uiText.containsMatchIn(value) && !isMerchantInterfaceText(value) && !fieldLabel(value) && !merchantLabel.containsMatchIn(value) && !datePattern.containsMatchIn(value) &&
         !numericMerchant.containsMatchIn(value) &&
         !genericMerchantLabel.matches(value)
 
-    private fun parseDate(value: String, capturedAt: Long): Long? {
-        // OCR may split one number into two tokens (for example month "1 0"). This repairs
-        // spacing only; numeric/date validity and the future-time guard still apply.
-        val m = datePattern.find(value.replace(digitWhitespace, "")) ?: return null
-        return runCatching {
-            val g = m.groupValues
-            LocalDateTime.of(g[1].toInt(), g[2].toInt(), g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6].toIntOrNull() ?: 0)
-                .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                .takeIf { it in 946_656_000_000L..(capturedAt + 5 * 60_000L) }
-        }.getOrNull()
-    }
-
-    private fun category(lines: List<LocalOcrLine>, merchant: String): String {
-        val content = merchant + " " + labeledValues(lines, productLabel).joinToString(" ")
+    private fun category(receipt: ReceiptEvidence): String {
+        val content = listOfNotNull(receipt.merchant, receipt.productDescription, receipt.transactionDescription,
+            receipt.orderRemark).joinToString(" ") { it.value }
         return when {
             transportCategory.containsMatchIn(content) -> "交通出行"
             diningCategory.containsMatchIn(content) -> "餐饮美食"

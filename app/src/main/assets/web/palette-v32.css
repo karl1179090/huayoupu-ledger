@@ -82,6 +82,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 #detailDialog.system-flow .system-target{background:var(--tint);color:var(--grape-deep)}
 .ai-status,.ai-pill{background:var(--tint);color:var(--grape-deep)}
 #direction{background:var(--tint);color:var(--grape-deep)}
+#direction.pending-direction{background:#FFF4E5;color:#B45309;border:1px dashed #F59E0B}
 
 /* ---------- 底部导航 ---------- */
 .bottom-nav{background:linear-gradient(to bottom,#FFFFFFC2,#FFFFFFF0);box-shadow:0 -8px 25px #EDE9F766;border:0}
@@ -260,6 +261,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .confirm-card .amount-row:focus-within{background:#F4F2FA}
 .record-chips button{background:var(--tint);color:var(--grape-ink)}
 .record-chips #time-label{background:#EFEDF4;color:#5C5575}
+.record-chips .time-basis{background:#F4F2FA;color:var(--muted)}
 .confirm-card .note-row{border-top-color:#E9E5F2}
 .refund-summary{color:#43791F}
 .refund-match{background:#E9F8DC;color:#3B7A20}
@@ -310,12 +312,12 @@ dialog input,dialog select,.month-input{border-color:#E3DFF0;background:#FAF9FD}
 
 /* ---------- 设置页 ---------- */
 #settings .settings-header>button{color:var(--muted)}
-#settings .payment-settings>p,#settings .payment-note,#settings .account-preferences #engine-provider,#settings .about-app{color:var(--muted)}
+#settings .payment-settings>p,#settings .payment-note,#settings .account-preferences #engine-provider,#settings .category-preferences #category-summary-count,#settings .category-preferences #classification-rules-summary,#settings .about-app,.category-explanation{color:var(--muted)}
 #settings .payment-note:before{color:var(--muted-soft)}
 #settings .payment-app{background:#F4F2FA}
-#settings .account-preferences>button{border-bottom-color:#E9E5F2}
-#settings .account-preferences i{color:var(--grape)}
-#settings .account-preferences .chevron{color:var(--muted-soft)}
+#settings .account-preferences>button,#settings .category-preferences>button{border-bottom-color:#E9E5F2}
+#settings .account-preferences i,#settings .category-preferences i{color:var(--grape)}
+#settings .account-preferences .chevron,#settings .category-preferences .chevron{color:var(--muted-soft)}
 .settings-list,.setting-row{border-bottom-color:#CBC7DE55}
 .category-row{border-bottom-color:#CBC7DE55}
 .category-detail-row{border-bottom-color:#E5E1EF}
@@ -364,3 +366,34 @@ dialog input,dialog select,.month-input{border-color:#E3DFF0;background:#FAF9FD}
 
 /* ---------- 桌面媒体查询下的旧规则覆盖 ---------- */
 @media(min-width:650px){.bottom-nav{border:0}}
+
+/* ---------- 凭证结构化信息 ---------- */
+.receipt-details{border-top-color:#E9E5F2}
+.receipt-heading{color:var(--muted)}
+.receipt-readonly{background:var(--tint);color:var(--grape-deep)}
+.receipt-field dt{color:var(--muted)}
+.receipt-field dd{color:var(--ink)}
+.receipt-value.is-missing{color:var(--muted-soft)}
+.receipt-verify{border-top-color:#E9E5F2}
+.receipt-evidence-toggle{background:#F4F2FA;color:var(--grape-deep)}
+.receipt-evidence-toggle small{color:var(--muted)}
+.receipt-evidence-item{background:#FAF9FD;border-color:#ECE8F6}
+.receipt-evidence-meta b{color:#453F5E}
+.receipt-source-tag{background:var(--tint);color:var(--grape-deep)}
+.receipt-evidence-raw{color:#5C5575}
+.receipt-provenance-card{background:#FAF9FD;border-color:#ECE8F6}
+.receipt-route-badge.route-node{background:var(--tint);color:var(--grape-deep)}
+.receipt-route-badge.route-ocr{background:#E9F3FE;color:var(--blue-deep)}
+.receipt-provenance-badge{background:#fff;border-color:#DCD4F0;color:var(--ink)}
+.receipt-provenance-note{color:var(--muted)}
+.receipt-evidence-diagnostics{background:#FAF9FD;border-color:#ECE8F6}
+.receipt-diag-header{color:#453F5E}
+.receipt-diag-header small{color:var(--muted)}
+.receipt-diag-row dt{color:var(--muted)}
+.receipt-diag-row dd{color:var(--ink-strong)}
+.receipt-timings-section{border-top-color:#E9E5F2}
+.receipt-timings-title{color:#453F5E}
+.receipt-timing-pill{background:#fff;border-color:#E9E5F2}
+.receipt-timing-name{color:var(--muted)}
+.receipt-timing-ms{color:var(--grape-deep)}
+.receipt-timings-disclaimer{color:var(--muted-soft)}

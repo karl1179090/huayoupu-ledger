@@ -13,6 +13,19 @@ import java.security.MessageDigest
 class ScreenshotStore internal constructor(context: Context, namespace: String = "screenshots") :
     SQLiteOpenHelper(context, "$namespace.db", null, 1) {
     private val directory = File(context.filesDir, namespace).apply { check(isDirectory || mkdirs()) }
+    private val restoring=ThreadLocal<SQLiteDatabase>()
+    internal fun <T> withRestoreDatabase(db:SQLiteDatabase,action:()->T):T {
+        check(restoring.get()==null);restoring.set(db)
+        try { return action() } finally { restoring.remove() }
+    }
+    internal fun requireRestoreDatabase(db:SQLiteDatabase) { check(restoring.get()===db && db.inTransaction()) }
+    private fun writeDatabase()=restoring.get() ?: writableDatabase
+    private fun table(name:String)=if(restoring.get()==null)name else "media.$name"
+    private fun query(sql:String,args:Array<String>?=null)=query(restoring.get() ?: readableDatabase,sql,args)
+    private fun query(db:SQLiteDatabase,sql:String,args:Array<String>?=null):android.database.Cursor {
+        val qualified=if(restoring.get()==null)sql else sql.replace(Regex("\\b(refs|assets)\\b")) { "media.${it.value}" }
+        return db.rawQuery(qualified,args)
+    }
     private val preferences = context.getSharedPreferences("${namespace}_policy", Context.MODE_PRIVATE)
 
     /** Hash assets are immutable: retain a filesystem link while ZIP compression runs without ledger locks. */
@@ -56,16 +69,18 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
                 check(temporary.renameTo(target)) { "无法保存账单截图" }
             } finally { temporary.delete() }
         }
-        val db = writableDatabase
+        if(restoring.get()!=null)require(target.length()==image.size.toLong() && MessageDigest.getInstance("SHA-256").digest(target.readBytes()).joinToString("") { "%02x".format(it) }==hash) { "恢复截图与已有指纹不一致" }
+        val db = writeDatabase()
         val previous = fingerprint(owner)
         db.beginTransaction()
         try {
-            db.insertWithOnConflict("assets", null, ContentValues().apply {
+            db.insertWithOnConflict(table("assets"), null, ContentValues().apply {
                 put("hash", hash); put("bytes", image.size)
             }, SQLiteDatabase.CONFLICT_IGNORE)
-            db.insertWithOnConflict("refs", null, ContentValues().apply {
+            db.insertWithOnConflict(table("refs"), null, ContentValues().apply {
                 put("owner", owner); put("hash", hash); put("created_at", createdAt); put("state", state)
             }, SQLiteDatabase.CONFLICT_REPLACE)
+            if(restoring.get()!=null)AtomicBackupTransaction.checkpoint("media")
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
         if (previous != null && previous != hash) pruneUnreferenced(previous)
@@ -73,17 +88,17 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
     }
 
     @Synchronized fun image(owner: String): ByteArray? {
-        val hash = readableDatabase.rawQuery("SELECT hash FROM refs WHERE owner=?", arrayOf(owner)).use {
+        val hash = query("SELECT hash FROM refs WHERE owner=?", arrayOf(owner)).use {
             if (it.moveToFirst()) it.getString(0) else return null
         }
         val image = file(hash)
         return if (image.isFile) image.readBytes() else null
     }
-    @Synchronized fun contains(owner: String): Boolean = readableDatabase.rawQuery(
+    @Synchronized fun contains(owner: String): Boolean = query(
         "SELECT hash FROM refs WHERE owner=?", arrayOf(owner)).use { it.moveToFirst() && file(it.getString(0)).isFile }
 
     /** One reference query and one filesystem check per distinct asset for a UI snapshot. */
-    @Synchronized fun availableOwners(): Set<String> = readableDatabase.rawQuery("SELECT owner,hash FROM refs",null).use { cursor ->
+    @Synchronized fun availableOwners(): Set<String> = query("SELECT owner,hash FROM refs",null).use { cursor ->
         val files=mutableMapOf<String,Boolean>()
         buildSet { while(cursor.moveToNext()) {
             val hash=cursor.getString(1)
@@ -97,14 +112,17 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
         return buildSet {
             owners.toList().chunked(500).forEach { batch->
                 val placeholders=List(batch.size) { "?" }.joinToString(",")
-                readableDatabase.rawQuery("SELECT owner,hash FROM refs WHERE owner IN ($placeholders)",batch.toTypedArray()).use { c->
+                query("SELECT owner,hash FROM refs WHERE owner IN ($placeholders)",batch.toTypedArray()).use { c->
                     while(c.moveToNext())if(exists.getOrPut(c.getString(1)) { file(c.getString(1)).isFile })add(c.getString(0))
                 }
             }
         }
     }
 
-    fun fingerprint(owner:String):String?=readableDatabase.rawQuery("SELECT hash FROM refs WHERE owner=?",arrayOf(owner)).use {
+    internal fun referenceInfo(owner:String):Pair<Long,String>?=query("SELECT created_at,state FROM refs WHERE owner=?",arrayOf(owner)).use {
+        if(it.moveToFirst())it.getLong(0) to it.getString(1) else null
+    }
+    fun fingerprint(owner:String):String?=query("SELECT hash FROM refs WHERE owner=?",arrayOf(owner)).use {
         if(it.moveToFirst())it.getString(0) else null
     }
 
@@ -113,11 +131,11 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
 
     @Synchronized fun state(owner: String, state: String) {
         if (state in DISCARD) { release(owner); return }
-        writableDatabase.update("refs", ContentValues().apply { put("state", state) }, "owner=?", arrayOf(owner))
+        writeDatabase().update(table("refs"), ContentValues().apply { put("state", state) }, "owner=?", arrayOf(owner))
     }
     @Synchronized fun release(owner: String) {
         val hash = fingerprint(owner) ?: return
-        writableDatabase.delete("refs", "owner=?", arrayOf(owner))
+        writeDatabase().delete(table("refs"), "owner=?", arrayOf(owner))
         pruneUnreferenced(hash)
     }
 
@@ -129,10 +147,10 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
     }
 
     @Synchronized fun stats(): JSONObject {
-        val assets = readableDatabase.rawQuery("SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM assets", null).use {
+        val assets = query("SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM assets", null).use {
             it.moveToFirst(); it.getLong(0) to it.getLong(1)
         }
-        val protectedBytes = readableDatabase.rawQuery("SELECT COALESCE(SUM(bytes),0) FROM assets WHERE hash IN " +
+        val protectedBytes = query("SELECT COALESCE(SUM(bytes),0) FROM assets WHERE hash IN " +
             "(SELECT hash FROM refs WHERE state IN ('CAPTURING','QUEUED','RECOGNIZING','UNDO'))", null).use { it.moveToFirst(); it.getLong(0) }
         return JSONObject().put("count", assets.first).put("bytes", assets.second).put("protectedBytes", protectedBytes)
             .put("maxBytes", MAX_BYTES).put("retentionDays", retentionDays()).put("failedRetentionDays", 7)
@@ -141,9 +159,9 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
     /** Retention/capacity remove images only; callers' bill text, state and icon assets are untouched. */
     @Synchronized fun cleanup(now: Long = System.currentTimeMillis(), maxBytes: Long = MAX_BYTES): JSONObject {
         require(maxBytes >= 0)
-        val db = writableDatabase
+        val db = writeDatabase()
         val days = retentionDays()
-        val references = db.rawQuery("SELECT owner,created_at,state FROM refs", null).use { c ->
+        val references = query(db,"SELECT owner,created_at,state FROM refs", null).use { c ->
             buildList { while (c.moveToNext()) add(Triple(c.getString(0), c.getLong(1), c.getString(2))) }
         }
         for ((owner, createdAt, state) in references) {
@@ -151,23 +169,23 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
             if (state in PROTECTED || state == "HISTORY") continue
             val keepDays = if (state == "FAILED") 7 else days
             if (state in DISCARD || keepDays > 0 && createdAt < now - keepDays * DAY)
-                db.delete("refs", "owner=?", arrayOf(owner))
+                db.delete(table("refs"), "owner=?", arrayOf(owner))
         }
         pruneUnreferenced()
         var total = stats().getLong("bytes")
         // A shared image remains protected while even one queued/running task still uses it.
-        val candidates = db.rawQuery("SELECT a.hash,a.bytes,MIN(r.created_at) AS oldest FROM assets a JOIN refs r ON a.hash=r.hash " +
+        val candidates = query(db,"SELECT a.hash,a.bytes,MIN(r.created_at) AS oldest FROM assets a JOIN refs r ON a.hash=r.hash " +
             "WHERE NOT EXISTS(SELECT 1 FROM refs p WHERE p.hash=a.hash AND p.state IN ('CAPTURING','QUEUED','RECOGNIZING','UNDO')) " +
             "GROUP BY a.hash,a.bytes ORDER BY oldest ASC", null).use { c ->
             buildList { while (c.moveToNext()) add(c.getString(0) to c.getLong(1)) }
         }
         for ((hash, bytes) in candidates) {
             if (total <= maxBytes) break
-            db.delete("refs", "hash=?", arrayOf(hash)); total -= bytes
+            db.delete(table("refs"), "hash=?", arrayOf(hash)); total -= bytes
         }
         pruneUnreferenced()
         // Crash leftovers are harmless and bounded by the same cleanup pass.
-        val known = db.rawQuery("SELECT hash FROM assets", null).use { c -> buildSet { while(c.moveToNext())add(c.getString(0)) } }
+        val known = query(db,"SELECT hash FROM assets", null).use { c -> buildSet { while(c.moveToNext())add(c.getString(0)) } }
         directory.listFiles()?.forEach { asset ->
             if (asset.name.endsWith(".tmp") || asset.name.endsWith(".jpg") && asset.name.removeSuffix(".jpg") !in known) asset.delete()
         }
@@ -175,12 +193,13 @@ class ScreenshotStore internal constructor(context: Context, namespace: String =
     }
 
     private fun pruneUnreferenced(hash: String? = null) {
-        val db = writableDatabase
-        val unused = db.rawQuery("SELECT hash FROM assets WHERE " + (if (hash == null) "" else "hash=? AND ") +
+        if(restoring.get()!=null)return // Rollback may still reference the immutable file.
+        val db = writeDatabase()
+        val unused = query(db,"SELECT hash FROM assets WHERE " + (if (hash == null) "" else "hash=? AND ") +
             "NOT EXISTS(SELECT 1 FROM refs WHERE refs.hash=assets.hash)", hash?.let { arrayOf(it) })
             .use { c -> buildList { while(c.moveToNext()) add(c.getString(0)) } }
         unused.forEach { hash ->
-            if (!file(hash).exists() || file(hash).delete()) db.delete("assets", "hash=?", arrayOf(hash))
+            if (!file(hash).exists() || file(hash).delete()) db.delete(table("assets"), "hash=?", arrayOf(hash))
         }
     }
     private fun file(hash: String) = File(directory, "$hash.jpg")

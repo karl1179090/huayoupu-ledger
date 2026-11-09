@@ -37,7 +37,9 @@ npx --prefix tools/ui-checks playwright install chromium
 PLAYWRIGHT_MODULE="$PWD/tools/ui-checks/node_modules/playwright" node scripts/check-transfer-regressions.cjs
 ```
 
-该入口顺序执行原有五个脚本及转账/独立状态恢复两个脚本。Android 类清单由 `scripts/android-regression-classes.json` 与远端手动模拟器工作流共用，包含小组件；可先用 `python3 scripts/run-android-regressions.py api30 --list` 检查。历史专项验收的精确过滤清单、命令和逐轮实际结果见[验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)，历史记录不代表当前提交已执行的范围。
+该入口顺序执行账本、导航、钱包、转账、分类目录、凭证详情、自动分类规则、只读规则测试、交易时间、银行凭证、节点识别证据、分类删除替代、混排凭证来源与多笔识别结果的十七个浏览器回归脚本。Android 类清单由 `scripts/android-regression-classes.json` 与远端手动模拟器工作流共用，包含小组件及混排／内嵌凭证验收；可先用 `python3 scripts/run-android-regressions.py api30 --list` 检查。历史专项验收的精确过滤清单、命令和逐轮实际结果见[验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)，历史记录不代表当前提交已执行的范围。
+
+多笔银行页的原生回归入口为 `net.ankio.ledger.data.MultiCandidateAcceptanceTest`，覆盖批前日金额存在性匹配、独立同额卡、实际账户待确认、逐项回执故障、取消续传、任务写回中断、JSON／ZIP 批次往返、数据库升级与合成图片的内置 OCR。单笔、退款、转账及 CSV 的专门查重仍运行各自回归。批次输入、决定和子结果由账本数据库持久化，任务快照按稳定操作标识读取；账本批次备份不等于任务队列和媒体的跨库恢复。
 
 开发流程为先在本地完成源码、浏览器、单元测试、Lint、构建及 Android 回归，再推送。以下示例在隔离的 Android 11 模拟器上运行完整 `api30` 清单和外部支付组；切换到隔离的 Android 14 模拟器后，以 `api34` 重复执行，并重新安装合成支付夹具、运行外部支付组。每组使用新的 `--archive-dir`，分别保留报告。
 

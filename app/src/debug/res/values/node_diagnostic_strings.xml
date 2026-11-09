@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="node_diagnostic_app_name">花有谱节点验证（仅测试）</string>
+    <string name="node_diagnostic_accessibility_service_label">花有谱节点验证服务（仅测试）</string>
+</resources>

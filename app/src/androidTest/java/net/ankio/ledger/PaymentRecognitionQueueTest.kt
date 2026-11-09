@@ -94,6 +94,46 @@ class PaymentRecognitionQueueTest {
         }
     }
 
+    @Test fun restoredVerifiedNodeTaskUsesStoredEvidenceWithoutOcrOrASecondWalletEffect()=runBlocking {
+        val receipts=CaptureReceiptIsolation(app)
+        val id=newTask()
+        val snapshot=net.ankio.ledger.core.NodeSnapshot(WECHAT,7,"com.tencent.mm.SyntheticResult",1,100,110,System.currentTimeMillis(),
+            net.ankio.ledger.core.NodeEnvironment("synthetic",1,"test-api34","test-device"),listOf(
+                net.ankio.ledger.core.CaptureNode(0,null,0,net.ankio.ledger.core.NodeBounds(0,0,100,100),"支付成功"),
+                net.ankio.ledger.core.CaptureNode(1,0,1,net.ankio.ledger.core.NodeBounds(0,20,100,40),"付款金额：12.34")))
+        val image=app.tasks.image(id)!!
+        assertTrue(app.tasks.queued(id,image,snapshot))
+        app.tasks.update(id,"RECOGNIZING","合成进程中断")
+        app.tasks.recoverInterrupted()
+        net.ankio.ledger.data.RecognitionTasks(app).use { reopened ->
+            assertEquals("QUEUED",reopened.status(id));assertEquals(snapshot.fingerprint,reopened.nodeSnapshot(id)!!.fingerprint)
+            assertNull(reopened.recognitionTime(id))
+        }
+        val registry=net.ankio.ledger.core.NodeRecognitionRegistry(listOf(net.ankio.ledger.core.NodeLayoutAdapter(
+            net.ankio.ledger.core.NodeLayoutVerification("synthetic-queue",WECHAT,"synthetic",1,"test-api34","test-device",
+                setOf(snapshot.activity),true,"synthetic-queue-pair","synthetic immediate result"),{true}) { _,time ->
+            listOf(net.ankio.ledger.core.TransactionCandidate(net.ankio.ledger.core.CandidateId.SINGLE,
+                net.ankio.ledger.core.ParsedBill(1234,net.ankio.ledger.core.Direction.EXPENSE,"$merchantPrefix-node","其他",time.recognitionAt,
+                    "SYNTHETIC-QUEUE-NODE-${UUID.randomUUID()}",true,"")))
+        }))
+        val calls=AtomicInteger()
+        val backend=net.ankio.ledger.ocr.RecognitionBackend { _,_,_,_,_,_->calls.incrementAndGet();error("stored verified nodes must skip OCR") }
+        val factory={CaptureProcessor(app,OcrClient(app,backend),nodeRegistry=registry)}
+        try {
+            queue.resume(factory)
+            await { queue.size()==0 }
+            assertEquals(task(id).toString(),"SUCCEEDED",app.tasks.status(id))
+            val saved=app.store.get(app.tasks.recordId(id)!!)!!
+            assertEquals(0,calls.get());assertEquals(RecordState.POSTED,saved.state)
+            assertEquals(-1234L,saved.wallet!!.appliedCents)
+            assertEquals("NODE",app.tasks.recognitionEvidence(id)!!.getString("route"))
+            assertTrue(queue.enqueue(id,WECHAT,true,factory))
+            await { queue.size()==0 }
+            assertEquals(0,calls.get());assertEquals(1,app.store.all().count { it.bill.merchant=="$merchantPrefix-node" })
+            assertEquals(1,app.store.walletMovements(saved.wallet.accountUid!!).count { it.recordUid==saved.uid })
+        } finally { receipts.clean(listOf(id)) }
+    }
+
     @Test fun secondCaptureQueuesDurablyWhileFirstModelResponseIsBlocked()=runBlocking {
         val fake=FakeModel()
         val first=newTask();assertTrue(queue.enqueue(first,WECHAT,true,fake.factory))

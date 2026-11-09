@@ -108,7 +108,7 @@ class ScreenshotStorageTest {
         tasks.writableDatabase.version=2;tasks.close()
         ledger=LedgerStore(context,ledgerName,images);tasks=RecognitionTasks(context,taskName,images)
         assertArrayEquals(bytes,ledger.screenshot(record.id));assertArrayEquals(bytes,tasks.image(id))
-        assertEquals(10,ledger.readableDatabase.version);assertEquals(5,tasks.readableDatabase.version)
+        assertEquals(16,ledger.readableDatabase.version);assertEquals(8,tasks.readableDatabase.version)
         assertEquals(0,ledger.readableDatabase.rawQuery("SELECT COUNT(*) FROM capture_images WHERE image IS NOT NULL",null).use { it.moveToFirst();it.getInt(0) })
         assertEquals(0,tasks.readableDatabase.rawQuery("SELECT COUNT(*) FROM tasks WHERE image IS NOT NULL",null).use { it.moveToFirst();it.getInt(0) })
         images.cleanup(now);assertEquals(1,images.stats().getInt("count"))

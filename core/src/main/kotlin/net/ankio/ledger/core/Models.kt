@@ -25,6 +25,8 @@ data class ParsedBill(
     val paymentMethod: PaymentMethodEvidence? = null,
     val standaloneRefund: StandaloneRefundEvidence? = null,
     val transfer: TransferEvidence? = null,
+    val receipt: ReceiptEvidence? = null,
+    val categoryDecision: CategoryDecision? = null,
 )
 
 /** A completed receipt with no original total stays pending until its original payment is verified. */
@@ -35,7 +37,7 @@ data class StandaloneRefundEvidence(
     val originalTransactionId: String? = null,
 )
 
-/** Only evidence beside an explicit payment/arrival account label, never a transaction identity. */
+/** Explicit payment/arrival or bank account evidence, never a transaction identity. UNKNOWN role preserves missing direction. */
 data class PaymentMethodEvidence(
     val medium: String,
     val role: String,
@@ -46,6 +48,8 @@ data class PaymentMethodEvidence(
     val rawValue: String = "",
     val ambiguous: Boolean = false,
     val reason: String? = null,
+    /** An actual debit statement, independent of the app hosting the receipt. */
+    val executed: Boolean = false,
 )
 
 /** Completed refund evidence; amountCents is always computed locally from these cents. */

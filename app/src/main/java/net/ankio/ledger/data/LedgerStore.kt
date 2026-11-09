@@ -34,12 +34,18 @@ sealed class IngestResult {
     data object DuplicateSkipped : IngestResult()
     data object Ignored : IngestResult()
     data class Skipped(val message:String):IngestResult()
+    data class Batch(val result:RecognitionBatchResult):IngestResult()
 }
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 10) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 16) {
     private val backupContext=context.applicationContext
+    @Volatile private var boundBackupTasks:RecognitionTasks?=null
+    internal fun bindBackupTasks(tasks:RecognitionTasks) { boundBackupTasks=tasks }
+    internal fun backupTasks():RecognitionTasks?=boundBackupTasks ?: (backupContext as? net.ankio.ledger.LedgerApp)?.takeIf { name=="ledger.db" }?.tasks
+    internal val backupScreenshots get()=screenshots
+    internal fun recordUidForBackup(id:Long):String?=readableDatabase.rawQuery("SELECT uid FROM records WHERE id=?",arrayOf(id.toString())).use { if(it.moveToFirst())it.getString(0) else null }
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
     }
@@ -75,7 +81,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             received_at INTEGER NOT NULL, amount INTEGER, direction TEXT,
             merchant TEXT NOT NULL, category TEXT NOT NULL, occurred_at INTEGER NOT NULL,
             transaction_id TEXT, reliable INTEGER NOT NULL, time_explicit INTEGER NOT NULL,
-            state TEXT NOT NULL, reason TEXT NOT NULL, duplicate_id INTEGER, note TEXT NOT NULL, standalone_refund TEXT)""")
+            state TEXT NOT NULL, reason TEXT NOT NULL, duplicate_id INTEGER, note TEXT NOT NULL, standalone_refund TEXT, receipt_evidence TEXT)""")
         db.execSQL("CREATE INDEX records_time ON records(occurred_at)")
         db.execSQL("CREATE INDEX records_transaction ON records(transaction_id)")
         db.execSQL("CREATE INDEX records_received ON records(received_at)")
@@ -86,10 +92,15 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         createRefunds(db)
         createIdentitiesAndUndo(db)
         WalletAccounting.create(db)
+        CategoryDirectory.create(db)
+        ClassificationStorage.create(db)
+        AccountingDates.create(db)
+        RecognitionBatchStore.create(db)
+        AtomicBackupTransaction.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..9 && newVersion == 10) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..15 && newVersion == 16) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -121,7 +132,13 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             persistIdentities(db,record.id,recovered)
         } }
         }
-        if (oldVersion < 9) migrateWallets(db) else WalletAccounting.migrateV10(db)
+        if (oldVersion < 9) migrateWallets(db) else if (oldVersion < 10) WalletAccounting.migrateV10(db)
+        if (oldVersion < 11) CategoryDirectory.create(db)
+        if(oldVersion < 12)db.execSQL("ALTER TABLE records ADD COLUMN receipt_evidence TEXT")
+        if(oldVersion<13)ClassificationStorage.create(db)
+        if(oldVersion<14)AccountingDates.migrate(db)
+        if(oldVersion<15)RecognitionBatchStore.create(db)
+        if(oldVersion<16)AtomicBackupTransaction.create(db)
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -204,6 +221,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         db.execSQL("CREATE TABLE merchant_icon_assets (merchant_key TEXT PRIMARY KEY NOT NULL, image BLOB NOT NULL)")
     }
 
+    private fun linkMerchantIcon(db:SQLiteDatabase,id:Long,bill:ParsedBill,image:ByteArray?) {
+        MerchantNames.reliableName(bill)?.let { linkMerchantIcon(db,id,it,image) }
+    }
+
     private fun linkMerchantIcon(db: SQLiteDatabase, id: Long, merchant: String, image: ByteArray?) {
         val key = MerchantNames.key(merchant) ?: return
         // References also exist for bills without a crop, so a later icon serves earlier same-name bills.
@@ -248,12 +269,35 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val result=if(repair) {
             check(db.update("records",ContentValues().apply { put("merchant",bill.merchant) },"id=?",arrayOf(original.id.toString()))==1)
             val previousKey=iconKey(db,original.id)
-            linkMerchantIcon(db,original.id,bill.merchant,image?:merchantIcon(original.id))
+            linkMerchantIcon(db,original.id,bill,image?:merchantIcon(original.id))
             pruneIcon(db,previousKey)
             original.copy(bill=original.bill.copy(merchant=bill.merchant))
         }else original
-        if(sameName)linkMerchantIcon(db,original.id,original.bill.merchant,image)
-        return result
+        if(sameName)linkMerchantIcon(db,original.id,bill,image)
+        val incoming=bill.receipt ?: return result
+        val previous=result.bill.receipt
+        val receipt=when {
+            previous==null -> incoming.copy(time=incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
+            previous.blockId!=incoming.blockId -> previous
+            else -> previous.copy(merchant=previous.merchant ?: incoming.merchant,
+                productDescription=previous.productDescription ?: incoming.productDescription,
+                transactionDescription=previous.transactionDescription ?: incoming.transactionDescription,
+                orderRemark=previous.orderRemark ?: incoming.orderRemark,
+                serviceProvider=previous.serviceProvider ?: incoming.serviceProvider,
+                receiptIssuer=previous.receiptIssuer ?: incoming.receiptIssuer,
+                sourceApp=previous.sourceApp ?: incoming.sourceApp,
+                recognition=previous.recognition ?: incoming.recognition,
+                bank=previous.bank ?: incoming.bank,
+                time=previous.time?.takeIf { it.accountingAt==result.bill.occurredAt }
+                    ?: incoming.time?.takeIf { it.accountingAt==result.bill.occurredAt })
+        }
+        if(receipt==previous)return result
+        check(db.update("records",ContentValues().apply {
+            put("receipt_evidence",ReceiptEvidenceCodec.encode(receipt))
+            put("accounting_date",AccountingDates.dateOnly(result.bill.copy(receipt=receipt)))
+        },
+            "id=?",arrayOf(result.id.toString()))==1)
+        return result.copy(bill=result.bill.copy(receipt=receipt))
     }
 
     /** Internal pre-release v4 used one PNG per record; preserve these when upgrading a preview. */
@@ -311,13 +355,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             put("version",1);put("medium",it.medium);put("role",it.role);put("bankCode",it.bankCode)
             put("cardLast4",it.cardLast4);put("platform",it.platform);put("rawLabel",it.rawLabel.take(80))
             put("rawValue",it.rawValue.take(160));put("ambiguous",it.ambiguous);put("reason",it.reason)
+            if(it.executed)put("executed",true)
         }.toString()
     }
     private fun decodePaymentEvidence(value: String?): PaymentMethodEvidence? = value?.let {
         val json=org.json.JSONObject(it)
         fun optional(key:String)=if(json.isNull(key))null else json.optString(key).takeIf(String::isNotEmpty)
         PaymentMethodEvidence(json.getString("medium"),json.getString("role"),optional("bankCode"),optional("cardLast4"),
-            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"))
+            optional("platform"),json.optString("rawLabel"),json.optString("rawValue"),json.optBoolean("ambiguous"),optional("reason"),json.optBoolean("executed",false))
     }
 
     private fun encodeStandaloneRefund(e:StandaloneRefundEvidence?):String?=e?.let {
@@ -337,7 +382,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         manualAccountUid:String?=null,manualSelected:Boolean=false,incomingEvidence:PaymentMethodEvidence?=record.bill.paymentMethod,
         deleted:Boolean=false,changed:Boolean=true,sourcePackage:String?=record.capture.origin,
         strictTransfer:Boolean=false,deferredDeltas:MutableMap<String,Long>?=null,
-        initialEligibility:WalletEligibility=WalletEligibility.ACTIVE,originalPosted:Boolean?=null):LedgerRecord {
+        initialEligibility:WalletEligibility=WalletEligibility.ACTIVE,originalPosted:Boolean?=null,humanConfirmed:Boolean=false):LedgerRecord {
         val previous=WalletAccounting.link(db,record.uid)
         val oldEffects=WalletAccounting.effects(db,record.uid)
         val oldTransfer=TransferAccounting.read(db,record.uid)
@@ -370,24 +415,59 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             }
             val settings=WalletAccounting.settings(db)
             if(manualSelected && manualAccountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
+            val bank=record.bill.receipt?.bank
+            val actualBankConflict=bank!=null && incomingEvidence?.medium in setOf("WECHAT_BALANCE","ALIPAY_BALANCE","UNSUPPORTED") &&
+                !manualSelected && previous?.manualLocked!=true
+            val accountEvidence=if(actualBankConflict)PaymentMethodEvidence("BANK_CARD",incomingEvidence!!.role,
+                bank?.bankCode,bank?.cardLast4,rawLabel=(record.bill.paymentMethod?.rawLabel.orEmpty()+" / "+incomingEvidence.rawLabel).take(80),
+                rawValue=(record.bill.paymentMethod?.rawValue.orEmpty()+" / "+incomingEvidence.rawValue).take(160),ambiguous=true)
+            else if(bank==null)incomingEvidence else
+                incomingEvidence?.takeIf { it.medium=="BANK_CARD" } ?: record.bill.paymentMethod?.takeIf { it.medium=="BANK_CARD" }
+                ?: PaymentMethodEvidence("BANK_CARD",when(bank.direction) { Direction.EXPENSE->"DEBIT";Direction.INCOME->"CREDIT";else->"UNKNOWN" },
+                    bank.bankCode,bank.cardLast4,ambiguous=bank.ambiguous)
             val resolution=if(isNew && deferredDeltas!=null && previous?.selectionSource=="IMPORT")
                 WalletResolution(link.accountUid,"IMPORT",link.reviewCode,link.evidenceFingerprint,link.manualLocked)
             else WalletResolver.resolve(accounts().map {
                 WalletCandidate(it.uid,it.type.name,it.kind,it.bankCode,it.cardLast4,it.archived)
-            },sourcePackage,incomingEvidence,settings.defaultAccountUid,settings.appBindings,
+            },sourcePackage,accountEvidence,settings.defaultAccountUid,settings.appBindings,
                 if(manualSelected)manualAccountUid else null,
-                previous?.takeIf { oldTransfer==null }?.let { WalletResolution(it.accountUid,it.selectionSource,it.reviewCode,it.evidenceFingerprint,it.manualLocked) })
+                previous?.takeIf { oldTransfer==null }?.let { WalletResolution(it.accountUid,it.selectionSource,it.reviewCode,it.evidenceFingerprint,it.manualLocked) },
+                requireActualBank=record.bill.receipt?.bank!=null)
             if(manualSelected && resolution.accountUid==null)throw WalletException("INVALID_WALLET","请选择有效的资产钱包")
-            val evidence=if(incomingEvidence!=null && resolution.evidenceFingerprint==WalletResolver.fingerprint(incomingEvidence))
-                encodePaymentEvidence(incomingEvidence) else link.paymentEvidence
+            val evidence=if(accountEvidence!=null && resolution.evidenceFingerprint==WalletResolver.fingerprint(accountEvidence))
+                encodePaymentEvidence(accountEvidence) else link.paymentEvidence
             link=link.copy(accountUid=resolution.accountUid,selectionSource=resolution.selectionSource,
                 manualLocked=resolution.manualLocked || link.manualLocked || manualSelected,
                 paymentEvidence=evidence,evidenceFingerprint=resolution.evidenceFingerprint ?: link.evidenceFingerprint,
                 reviewCode=if(final.state!=record.state)link.reviewCode else resolution.reviewCode)
+            if (record.bill.receipt?.bank != null) {
+                val accountReviews=setOf("PAYMENT_METHOD_UNMATCHED","PAYMENT_METHOD_AMBIGUOUS","PAYMENT_EVIDENCE_CONFLICT","WALLET_REQUIRED")
+                val heldAccount=previous?.reviewCode in accountReviews && !manualSelected && !link.manualLocked
+                val heldDirection=previous?.reviewCode=="BANK_DIRECTION_REQUIRED" && !humanConfirmed
+                val accountReview=if(link.manualLocked)null else when {
+                    heldAccount -> previous?.reviewCode
+                    link.reviewCode in accountReviews -> link.reviewCode
+                    record.bill.receipt?.bank?.ambiguous==true -> "PAYMENT_METHOD_AMBIGUOUS"
+                    link.accountUid==null -> "PAYMENT_METHOD_UNMATCHED"
+                    else -> null
+                }
+                val review=accountReview ?: if(record.bill.direction==null || heldDirection)"BANK_DIRECTION_REQUIRED" else null
+                if(review!=null) {
+                    final=final.copy(state=RecordState.REVIEW,reason=when(review) {
+                        "BANK_DIRECTION_REQUIRED" -> "请确认银行交易收支方向后入账"
+                        "PAYMENT_EVIDENCE_CONFLICT","PAYMENT_METHOD_AMBIGUOUS" -> "银行账户证据冲突，请选择实际账户后入账"
+                        else -> "未找到凭证中的银行卡，请选择实际账户后入账"
+                    })
+                    link=link.copy(accountUid=if(accountReview!=null)null else link.accountUid,reviewCode=review)
+                } else if(link.reviewCode=="BANK_DIRECTION_REQUIRED") link=link.copy(reviewCode=null)
+            }
             if(final.state==RecordState.POSTED && link.accountUid==null) {
                 if(!isNew && oldEffects.isNotEmpty())throw WalletException("WALLET_REQUIRED","请选择钱包后入账")
-                final=record.copy(state=RecordState.REVIEW,reason="请选择钱包后入账")
-                link=link.copy(reviewCode="WALLET_REQUIRED")
+                val review=link.reviewCode ?: "WALLET_REQUIRED"
+                final=record.copy(state=RecordState.REVIEW,reason=if(review=="PAYMENT_METHOD_AMBIGUOUS")
+                    "银行账户证据冲突，请选择实际账户后入账" else if(review=="PAYMENT_METHOD_UNMATCHED")
+                    "未找到凭证中的银行卡，请选择实际账户后入账" else "请选择钱包后入账")
+                link=link.copy(reviewCode=review)
             } else if(record.state==RecordState.REVIEW && previous?.reviewCode=="WALLET_REQUIRED" &&
                 record.reason=="请选择钱包后入账" && link.accountUid!=null && record.bill.reliable && record.duplicateId==null) {
                 final=record.copy(state=RecordState.POSTED,reason="")
@@ -459,7 +539,24 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             throw WalletException("STALE_RECORD_REVISION","账单已更新，请重新核对")
     }
 
-    data class CommittedCapture(val recordUid:String,val record:LedgerRecord?)
+    @Synchronized fun recognitionBatch(operationKey:String):RecognitionBatchResult?=RecognitionBatchStore.result(this,operationKey)
+    @Synchronized fun freezeRecognitionBatch(capture:Capture,candidates:List<TransactionCandidate>,operationKey:String,zoneId:String,
+        snapshot:ClassificationSnapshot,policy:RecognitionPolicy):RecognitionBatchResult=
+        RecognitionBatchStore.freeze(this,capture,candidates,operationKey,zoneId,snapshot,policy)
+    @Synchronized fun submitBatchCandidate(operationKey:String,candidateId:CandidateId,screenshot:ByteArray?=null):RecognitionBatchResult=
+        RecognitionBatchStore.submit(this,operationKey,candidateId,screenshot)
+    @Synchronized fun failBatchCandidate(operationKey:String,candidateId:CandidateId)=RecognitionBatchStore.failed(this,operationKey,candidateId)
+    @Synchronized fun recognitionBatchBackup():org.json.JSONArray=RecognitionBatchStore.export(this)
+    @Synchronized fun restoreRecognitionBatches(batches:org.json.JSONArray)=RecognitionBatchStore.restore(this,batches)
+
+    data class CommittedCapture(val recordUid:String,val record:LedgerRecord?,val candidateId:CandidateId=CandidateId.SINGLE)
+
+    fun committedCandidate(operationKey:String,candidateId:CandidateId):CommittedCapture? =
+        committedCapture(candidateOperationKey(operationKey,candidateId))?.copy(candidateId=candidateId)
+
+    fun ingestCandidate(capture:Capture,candidate:TransactionCandidate,operationKey:String,eventKey:String?=null,
+        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null):CandidateSubmission =
+        CandidateSubmission(candidate.id,ingestRecognition(capture,candidate.bill,candidateOperationKey(operationKey,candidate.id),eventKey,screenshot,merchantIcon))
 
     /** This identity lives with the financial commit, independently of recognition.db updates. */
     @Synchronized fun committedCapture(operationKey:String):CommittedCapture? {
@@ -478,14 +575,14 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     @Synchronized fun ingestRecognition(capture:Capture,bill:ParsedBill,operationKey:String,eventKey:String?=null,
-        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null):IngestResult {
+        screenshot:ByteArray?=null,merchantIcon:ByteArray?=null,independentCandidate:Boolean=false):IngestResult {
         val db=writableDatabase;db.beginTransaction()
         try {
             committedCapture(operationKey)?.let { committed ->
                 db.setTransactionSuccessful()
                 return if(committed.record==null)IngestResult.Skipped("账单已移除，未新增记账") else IngestResult.DuplicateSkipped
             }
-            val result=ingest(capture,bill,eventKey,screenshot,merchantIcon)
+            val result=ingest(capture,bill,eventKey,screenshot,merchantIcon,independentCandidate=independentCandidate)
             val record=when(result) {
                 is IngestResult.Saved->result.record
                 IngestResult.DuplicateSkipped->eventKey?.let(::committedPaymentEvent)?.record ?: matchingIdentity(capture,bill)
@@ -509,7 +606,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     @Synchronized
-    fun ingest(capture: Capture, bill: ParsedBill, eventKey: String? = null, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, requireReview: Boolean = false): IngestResult {
+    fun ingest(capture: Capture, bill: ParsedBill, eventKey: String? = null, screenshot: ByteArray? = null, merchantIcon: ByteArray? = null, requireReview: Boolean = false, independentCandidate:Boolean=false): IngestResult {
         require(screenshot == null || screenshot.isNotEmpty() && screenshot.size <= 5 * 1024 * 1024) { "Invalid screenshot size" }
         require(merchantIcon == null || merchantIcon.isNotEmpty() && merchantIcon.size <= 128 * 1024) { "Invalid icon size" }
         val db = writableDatabase
@@ -521,7 +618,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 buildList { while(c.moveToNext())add(read(c)) }
             }.any { old ->
                 old.identities.any { it in incomingIdentities } ||
-                    old.bill.amountCents==bill.amountCents && old.bill.direction==bill.direction &&
+                    !independentCandidate && old.bill.amountCents==bill.amountCents && old.bill.direction==bill.direction &&
                         old.capture.origin==capture.origin && old.capture.text.filterNot(Char::isWhitespace)==capture.text.filterNot(Char::isWhitespace)
             }
             if(recentlyDeleted) { db.setTransactionSuccessful();return IngestResult.Skipped("账单已删除") }
@@ -553,6 +650,16 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     evidence.feeCents!=null && details.feeCents!=null && evidence.feeCents!=details.feeCents ||
                         evidence.feeMode!=null && details.feeMode!=null && evidence.feeCents!=0L && evidence.feeMode!=details.feeMode
                 } } == true
+                if(directionConflict && bill.direction!=null && bill.receipt?.bank!=null && identified.wallet?.manualLocked!=true) {
+                    val presentation=enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
+                    val pending=presentation.copy(bill=presentation.bill.copy(direction=null),state=RecordState.REVIEW,
+                        reason="银行交易方向证据冲突，请确认收支方向后入账")
+                    check(db.update("records",values(pending),"id=?",arrayOf(pending.id.toString()))==1)
+                    appendPaymentScreenshot(db,pending,capture,screenshot,"identity_conflict")
+                    val reviewed=syncWallet(db,pending,incomingEvidence=bill.paymentMethod)
+                    db.setTransactionSuccessful()
+                    return IngestResult.Saved(reviewed,supplemented=true)
+                }
                 if(amountConflict || directionConflict || feeConflict) {
                     val linked=identified.wallet?.copy(reviewCode="TRANSFER_IDENTITY_CONFLICT",revision=identified.wallet.revision+1)
                     if(linked!=null)WalletAccounting.saveLink(db,linked)
@@ -579,17 +686,17 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val supplemented=appendPaymentScreenshot(db,identified,capture,screenshot)
                 // Strong identity also owns ordinary incomplete drafts. Complete the original
                 // draft under the same reliability gate as exact-duplicate supplementation.
-                val promoted=identified.state==RecordState.REVIEW && identified.duplicateId==null &&
+                val promoted=identified.state==RecordState.REVIEW && identified.duplicateId==null && identified.bill.receipt?.bank==null &&
                     identified.bill.refund==null && identified.bill.standaloneRefund==null &&
                     identified.transfer==null && identified.bill.transfer==null && bill.transfer==null &&
                     identified.capture.source in setOf(Source.OCR,Source.IMAGE) && capture.source in setOf(Source.OCR,Source.IMAGE) &&
                     !requireReview && bill.reliable && bill.amountCents?.let { it in 1..Money.MAX_CENTS }==true &&
                     bill.direction in setOf(Direction.EXPENSE,Direction.INCOME)
-                val presentation=if(promoted)identified.copy(bill=bill,state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
+                val presentation=if(promoted)identified.copy(bill=bill.copy(category=identified.bill.category,categoryDecision=identified.bill.categoryDecision),state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
                     else enrichPaymentPresentation(db,identified,capture,bill,merchantIcon)
                 if(promoted) {
                     check(db.update("records",values(presentation),"id=?",arrayOf(presentation.id.toString()))==1)
-                    linkMerchantIcon(db,presentation.id,presentation.bill.merchant,merchantIcon)
+                    linkMerchantIcon(db,presentation.id,presentation.bill,merchantIcon)
                 }
                 val presented=syncWallet(db,presentation,
                     incomingEvidence=bill.paymentMethod,changed=enriched || promoted || presentation!=identified)
@@ -598,18 +705,18 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     updated=promoted && presented.state==RecordState.POSTED,supplemented=supplemented)
                     else IngestResult.DuplicateSkipped
             }
-            val automatic = if(!requireReview) uniqueAutomaticPayment(capture,bill) else null
+            val automatic = if(!independentCandidate && !requireReview) uniqueAutomaticPayment(capture,bill) else null
             if(automatic!=null) {
                 val completed=syncWallet(db,completePaymentIdentity(db,automatic,bill),incomingEvidence=bill.paymentMethod)
                 val supplemented=appendPaymentScreenshot(db,completed,capture,screenshot)
-                linkMerchantIcon(db,completed.id,completed.bill.merchant,merchantIcon)
+                linkMerchantIcon(db,completed.id,completed.bill,merchantIcon)
                 db.setTransactionSuccessful()
                 return IngestResult.Saved(completed,supplemented=supplemented)
             }
-            val repeated=if(!requireReview && eventKey==null)uniqueRepeatedPayment(capture,bill) else null
+            val repeated=if(!independentCandidate && !requireReview && eventKey==null)uniqueRepeatedPayment(capture,bill) else null
             if(repeated!=null) {
                 val supplemented=appendPaymentScreenshot(db,repeated,capture,screenshot)
-                linkMerchantIcon(db,repeated.id,repeated.bill.merchant,merchantIcon)
+                linkMerchantIcon(db,repeated.id,repeated.bill,merchantIcon)
                 val linked=syncWallet(db,repeated,incomingEvidence=bill.paymentMethod,changed=false)
                 db.setTransactionSuccessful()
                 return IngestResult.Saved(linked,supplemented=supplemented)
@@ -650,7 +757,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     if(!(primaryIssuerConflict && old.bill.transactionId==bill.transactionId) &&
                         old.identities.none { oldId->incomingIdentities.any { it.scope==oldId.scope && it.value!=oldId.value } })add(old.existing())
                 } } }
-            val detected = DuplicateDetector.find(capture, bill, near)
+            val detected = if(independentCandidate)Duplicate.None else DuplicateDetector.find(capture, bill, near)
             val identityOwners=incomingIdentities.flatMap { identity->db.rawQuery("SELECT record_id FROM record_identities WHERE scope=? AND value=?",arrayOf(identity.scope,identity.value))
                 .use { c->buildList { while(c.moveToNext())add(c.getLong(0)) } } }.distinct()
             // A shared alias with conflicting other issuer IDs is ambiguous, even when
@@ -658,24 +765,25 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val duplicate=if(detected is Duplicate.Exact && identityOwners.size>1)Duplicate.Possible(detected.id) else detected
             if (duplicate is Duplicate.Exact) {
                 val previous = requireNotNull(get(duplicate.id))
-                val promoted=previous.state==RecordState.REVIEW && previous.duplicateId==null && previous.bill.refund==null &&
+                val promoted=previous.state==RecordState.REVIEW && previous.duplicateId==null && previous.bill.receipt?.bank==null && previous.bill.refund==null &&
                     previous.capture.source in setOf(Source.OCR,Source.IMAGE) && !requireReview && bill.reliable
-                var original=if(promoted)previous.copy(bill=bill,state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
+                var original=if(promoted)previous.copy(bill=bill.copy(category=previous.bill.category,categoryDecision=previous.bill.categoryDecision),state=RecordState.POSTED,reason=bill.reason,duplicateId=null)
                     else enrichPaymentPresentation(db,previous,capture,bill,merchantIcon)
                 if(promoted)check(db.update("records",values(original),"id=?",arrayOf(original.id.toString()))==1)
-                if(promoted)linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon)
+                if(promoted)linkMerchantIcon(db,original.id,original.bill,merchantIcon)
                 persistIdentities(db,original.id,(original.identities+incomingIdentities).distinct())
                 val supplemented = bill.reliable && appendPaymentScreenshot(db, original, capture, screenshot)
                 original=syncWallet(db,original,incomingEvidence=bill.paymentMethod,changed=promoted)
                 db.setTransactionSuccessful()
                 return if (supplemented || promoted || original!=previous) IngestResult.Saved(original, supplemented=supplemented) else IngestResult.DuplicateSkipped
             }
-            val automaticCandidate=automaticPaymentCandidates(capture,bill).firstOrNull { isAutomaticPayment(it) }
+            val automaticCandidate=if(independentCandidate)null else automaticPaymentCandidates(capture,bill).firstOrNull { isAutomaticPayment(it) }
             val possible = duplicate as? Duplicate.Possible ?: refundedPaymentCandidate?.let { Duplicate.Possible(it.id) }
                 ?: automaticCandidate?.let { Duplicate.Possible(it.id) }
             val reason = if(refundedPaymentCandidate!=null) "疑似为已退款账单的原付款页面，请核对后保存"
                 else if (possible != null) "疑似与已有账单重复，请核对后保存" else bill.reason
-            val draft = LedgerRecord(capture = capture, bill = bill.copy(reason = reason),
+            val draft = LedgerRecord(capture = capture, bill = bill.copy(reason = reason,
+                category = CategoryDirectory.recognitionName(db, bill.direction, bill.category)),
                 state = if (!requireReview && bill.reliable && bill.amountCents != null && bill.direction != null && possible == null)
                     RecordState.POSTED else RecordState.REVIEW,
                 reason = reason,
@@ -688,7 +796,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 db.insertOrThrow("capture_images", null, ContentValues().apply { put("record_id", id) })
             }
             insertHistory(db, id, RecordCaptureHistory(1,capture.receivedAt,"payment",bill.amountCents,0,capture.text,screenshot != null))
-            linkMerchantIcon(db, id, bill.merchant, merchantIcon)
+            linkMerchantIcon(db, id, bill, merchantIcon)
             syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
             db.setTransactionSuccessful()
             return IngestResult.Saved(requireNotNull(get(id)))
@@ -771,7 +879,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                         db.update("records",ContentValues().apply { put("note",copy.note) },"id=?",arrayOf(current.id.toString()))
                         syncWallet(db,requireNotNull(get(current.id)))
                     }
-                    if(MerchantNames.key(current.bill.merchant)==MerchantNames.key(copy.bill.merchant))linkMerchantIcon(db,current.id,current.bill.merchant,merchantIcon(copy.id))
+                    if(MerchantNames.key(current.bill.merchant)==MerchantNames.key(copy.bill.merchant))linkMerchantIcon(db,current.id,current.bill,merchantIcon(copy.id))
                     redirectCaptureReceipts(db,copy.uid,current.uid)
                     delete(copy.id);merged[copy.id]=current.id
                     db.setTransactionSuccessful()
@@ -785,7 +893,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val entries=captureHistory(pending.id)
                 if(entries.isEmpty())appendPaymentScreenshot(db,original,pending.capture,screenshot(pending.id))
                 else entries.forEach { entry -> appendPaymentScreenshot(db,original,pending.capture.copy(text=entry.rawText,receivedAt=entry.at),historyScreenshot(pending.id,entry.sequence)) }
-                linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon(pending.id))
+                linkMerchantIcon(db,original.id,original.bill,merchantIcon(pending.id))
                 redirectCaptureReceipts(db,pending.uid,original.uid)
                 delete(pending.id);merged[pending.id]=original.id
                 db.setTransactionSuccessful()
@@ -806,7 +914,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         try {
             db.update("records",ContentValues().apply { put("merchant",recognized.merchant) },"id=?",arrayOf(id.toString()))
             val previousKey=iconKey(db,id)
-            linkMerchantIcon(db,id,recognized.merchant,icon);pruneIcon(db,previousKey)
+            linkMerchantIcon(db,id,recognized,icon);pruneIcon(db,previousKey)
             syncWallet(db,requireNotNull(get(id)));db.setTransactionSuccessful();return true
         } finally { db.endTransaction() }
     }
@@ -831,7 +939,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized
     fun saveEdited(record: LedgerRecord, walletAccountUid:String?=null,manualWalletSelected:Boolean=false,
         expectedRevision:Long?=record.wallet?.revision,submissionToken:String?=null,
-        transferDetails:RecordTransferDetails?=record.transfer): LedgerRecord {
+        transferDetails:RecordTransferDetails?=record.transfer,manualCategorySelected:Boolean=false): LedgerRecord {
         val db=writableDatabase;db.beginTransaction()
         try {
         val token=submissionToken ?: if(record.id==0L)record.uid else null
@@ -864,9 +972,18 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 toSelectionSource=if(toChanged)"MANUAL" else details.toSelectionSource,
                 feeManualLocked=details.feeManualLocked || old==null || details.feeCents!=old.feeCents || details.feeMode!=old.feeMode)
         }
+        val originalTime=previous?.bill?.receipt?.time
+        val timeChanged=previous!=null && previous.bill.occurredAt!=record.bill.occurredAt
+        val receipt=record.bill.receipt?.let { evidence ->
+            if(originalTime==null)evidence else evidence.copy(time=if(timeChanged)originalTime.edited(record.bill.occurredAt) else originalTime)
+        }
         val posted = record.copy(identities=previous?.identities ?: record.identities,
             transfer=if(record.bill.direction==Direction.TRANSFER)manualTransfer else null,
-            bill = record.bill.copy(reliable = true, reason = provenance),
+            bill = record.bill.copy(reliable = true, reason = provenance, receipt=receipt,
+                timeExplicit=if(timeChanged)true else record.bill.timeExplicit, categoryDecision=if(record.bill.direction==Direction.TRANSFER)null else
+                if(previous==null || record.bill.category!=previous.bill.category || record.bill.direction!=previous.bill.direction || manualCategorySelected)
+                    CategoryDecision(CategoryDirectory.ensure(db,record.bill.direction,record.bill.category)?.id,CategorySource.MANUAL,true,explanation="人工选择分类")
+                else previous.bill.categoryDecision),
             state = RecordState.POSTED, reason = provenance, duplicateId = null)
             val previousKey = if (record.id == 0L) null else iconKey(db, record.id)
             val id = if (record.id == 0L) db.insertOrThrow("records", null, values(posted)) else {
@@ -877,9 +994,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             persistIdentities(db,id,identities(posted))
             if (record.id == 0L) insertHistory(db,id,RecordCaptureHistory(1,record.capture.receivedAt,"payment",amount,0,record.capture.text,false))
             db.delete("merchant_icons", "record_id = ?", arrayOf(id.toString()))
-            linkMerchantIcon(db, id, posted.bill.merchant, null)
+            linkMerchantIcon(db, id, posted.bill, null)
             pruneIcon(db, previousKey)
-            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true,originalPosted=previous?.state==RecordState.POSTED)
+            val saved=syncWallet(db,posted.copy(id=id),record.id==0L,if(record.id==0L)"POST" else "EDIT",walletAccountUid,manualWalletSelected,strictTransfer=true,originalPosted=previous?.state==RecordState.POSTED,humanConfirmed=true)
             WalletAccounting.remember(db,token,"RECORD_SAVE",saved.uid)
             db.setTransactionSuccessful()
             return saved
@@ -1038,9 +1155,10 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         // selectionArgs are strings; CASE has no column affinity, so compare an integer parameter.
         return query("state='POSTED' AND direction='EXPENSE' AND "+
             "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND "+
-            "(occurred_at BETWEEN ? AND ? OR transaction_id=? OR EXISTS(SELECT 1 FROM record_identities i "+
+            "(occurred_at BETWEEN ? AND ? OR (source='OCR' AND received_at BETWEEN ? AND ?) OR transaction_id=? OR EXISTS(SELECT 1 FROM record_identities i "+
             "WHERE i.record_id=records.id AND i.scope=? AND i.value=?))",
             arrayOf(refund.originalAmountCents.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
+                (bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
                 bill.transactionId ?: "",refund.provider,bill.transactionId ?: ""))
     }
 
@@ -1053,10 +1171,17 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             (original.bill.transactionId.isNullOrBlank() || incoming.transactionId.isNullOrBlank() || refundIdentityMatches(original,incoming))
     }
 
+    /** Recognition fallback is accounting time; the native acquisition instant still corroborates a live payment. */
+    private fun automaticPaymentMatchAt(record:LedgerRecord):Long {
+        val time=record.bill.receipt?.time
+        return if(record.capture.source==Source.OCR && !record.bill.timeExplicit &&
+            record.reason.startsWith("已识别即时支付成功页") && time?.source=="RECOGNITION_FALLBACK" &&
+            time.accountingAt==record.bill.occurredAt)record.capture.receivedAt else record.bill.occurredAt
+    }
     private fun isAutomaticPayment(record:LedgerRecord):Boolean = record.state==RecordState.POSTED &&
         record.capture.source==Source.OCR && !record.bill.timeExplicit && record.bill.transactionId.isNullOrBlank() &&
         record.reason.startsWith("已识别即时支付成功页") &&
-        kotlin.math.abs(record.capture.receivedAt-record.bill.occurredAt)<=15_000
+        kotlin.math.abs(record.capture.receivedAt-automaticPaymentMatchAt(record))<=15_000
 
     /** Only a unique native live capture can gain identity from an explicitly timed order detail. */
     private fun uniqueAutomaticPayment(capture:Capture,bill:ParsedBill):LedgerRecord? {
@@ -1065,7 +1190,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 it.bill.transactionId==bill.transactionId })return null
         // Count even candidates with conflicting IDs; ambiguity must never pick an arbitrary payment.
         return automaticPaymentCandidates(capture,bill).singleOrNull()?.takeIf {
-            isAutomaticPayment(it) && it.bill.refund==null && it.bill.occurredAt-bill.occurredAt in -5_000L..120_000L
+            isAutomaticPayment(it) && it.bill.refund==null && automaticPaymentMatchAt(it)-bill.occurredAt in -5_000L..120_000L
         }
     }
 
@@ -1077,15 +1202,20 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val merchant=MerchantNames.key(bill.merchant) ?: return emptyList()
         val gross=bill.refund?.originalAmountCents ?: bill.amountCents ?: return emptyList()
         return query("state='POSTED' AND direction='EXPENSE' AND "+
-            "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND occurred_at BETWEEN ? AND ?",
-            arrayOf(gross.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString())).filter { old -> old.state==RecordState.POSTED && old.bill.direction==Direction.EXPENSE &&
+            "(CASE WHEN refund_provider IS NULL THEN amount ELSE refund_original END)=CAST(? AS INTEGER) AND "+
+            "(occurred_at BETWEEN ? AND ? OR (source='OCR' AND received_at BETWEEN ? AND ?))",
+            arrayOf(gross.toString(),(bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString(),
+                (bill.occurredAt-120_000).toString(),(bill.occurredAt+120_000).toString())).filter { old -> old.state==RecordState.POSTED && old.bill.direction==Direction.EXPENSE &&
             paymentProvider(old.capture)==provider && !identitiesConflict(old,capture,bill) && (old.bill.refund?.originalAmountCents ?: old.bill.amountCents)==gross &&
-            MerchantNames.key(old.bill.merchant)==merchant && kotlin.math.abs(old.bill.occurredAt-bill.occurredAt)<=120_000 }
+            MerchantNames.key(old.bill.merchant)==merchant && kotlin.math.abs(automaticPaymentMatchAt(old)-bill.occurredAt)<=120_000 }
     }
 
     private fun completePaymentIdentity(db:SQLiteDatabase,original:LedgerRecord,bill:ParsedBill):LedgerRecord {
+        val time=bill.receipt?.time?.takeIf { it.accountingAt==bill.occurredAt }
+            ?: original.bill.receipt?.time?.takeIf { it.accountingAt==bill.occurredAt }
+        val receipt=(original.bill.receipt ?: bill.receipt)?.copy(time=time)
         val completed=original.copy(bill=original.bill.copy(transactionId=bill.transactionId,
-            occurredAt=bill.occurredAt,timeExplicit=true,reason=""),reason="")
+            occurredAt=bill.occurredAt,timeExplicit=true,reason="",receipt=receipt),reason="")
         check(db.update("records",values(completed),"id=?",arrayOf(original.id.toString()))==1)
         persistIdentities(db,original.id,(original.identities+TransactionIdentities.from(original.capture,bill)).distinct())
         return requireNotNull(get(completed.id))
@@ -1097,7 +1227,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         return refundAmountCandidates(bill).filter { candidate -> compatibleRefund(candidate,bill) &&
             (refundIdentityMatches(candidate,bill) ||
                 merchant!=null && merchant==MerchantNames.key(candidate.bill.merchant) &&
-                    kotlin.math.abs(candidate.bill.occurredAt-bill.occurredAt)<=120_000) }
+                    kotlin.math.abs(automaticPaymentMatchAt(candidate)-bill.occurredAt)<=120_000) }
     }
 
     private fun standaloneRefundCandidates(capture:Capture,evidence:StandaloneRefundEvidence,exactOnly:Boolean):List<LedgerRecord> {
@@ -1145,7 +1275,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         }
         insertHistory(db,id,RecordCaptureHistory(1,capture.receivedAt,"refund_pending",null,evidence.refundedCents,capture.text,image!=null,
             "single",evidence.refundId,evidence.refundedCents))
-        linkMerchantIcon(db,id,bill.merchant,merchantIcon)
+        linkMerchantIcon(db,id,bill,merchantIcon)
         syncWallet(db,pending.copy(id=id),isNew=true,kind="REFUND")
         return IngestResult.Saved(requireNotNull(get(id)))
     }
@@ -1190,7 +1320,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val original=if(isAutomaticPayment(target))completePaymentIdentity(db,target,bill) else target
             val result=applyRefund(db,original,capture,bill,image)
             if(MerchantNames.key(original.bill.merchant)==MerchantNames.key(bill.merchant))
-                linkMerchantIcon(db,original.id,original.bill.merchant,merchantIcon)
+                linkMerchantIcon(db,original.id,original.bill,merchantIcon)
             return result
         }
         val candidates=matchingRefundCandidates(capture,bill)
@@ -1243,7 +1373,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             insertHistory(db,id,RecordCaptureHistory(1,capture.receivedAt,
                 if(refund.refundedCents==refund.originalAmountCents)"full_refund" else "partial_refund",
                 bill.amountCents,refund.refundedCents,capture.text,image!=null,"cumulative",null,refund.refundedCents))
-            linkMerchantIcon(db,id,bill.merchant,merchantIcon)
+            linkMerchantIcon(db,id,bill,merchantIcon)
             syncWallet(db,record.copy(id=id),isNew=true,kind="POST")
             return IngestResult.Saved(requireNotNull(get(id)))
         } catch(error:Throwable) { screenshots.release(imageOwner(id));throw error }
@@ -1384,7 +1514,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     @Synchronized fun restoreMerchantIcon(id:Long,image:ByteArray) {
         val record=requireNotNull(get(id)) { "账单已不存在" }
         require(image.isNotEmpty() && image.size<=5*1024*1024)
-        val key=MerchantNames.key(record.bill.merchant) ?: return
+        val key=MerchantNames.reliableName(record.bill)?.let(MerchantNames::key) ?: return
         writableDatabase.insertWithOnConflict("merchant_icon_assets",null,ContentValues().apply {
             put("merchant_key",key);put("image",image)
         },SQLiteDatabase.CONFLICT_IGNORE)
@@ -1599,43 +1729,141 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             links.associate { it.recordUid to WalletAccounting.effects(db,it.recordUid) },walletImportAliases(),ImportAuditStore.read(db))
     }
 
+    @Synchronized fun classificationMigrationBaseline():ClassificationSnapshot = ClassificationStorage.migrationBaseline(readableDatabase)
+    @Synchronized fun classificationRules():ClassificationSnapshot = ClassificationStorage.configuration(readableDatabase)
+    @Synchronized fun previewClassification(input:ClassificationInput,draftRule:ClassificationRule?=null):ClassificationTestResult {
+        if(input.direction !in listOf(Direction.EXPENSE,Direction.INCOME))
+            throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
+        val prepared=draftRule?.let { ClassificationStorage.prepared(readableDatabase,it) }
+        val preview=ClassificationEngine.preview(prepared?.first ?: classificationRules(),input)
+        val category=CategoryDirectory.requireCategory(readableDatabase,
+            CategoryReplacementStorage.resolve(readableDatabase,requireNotNull(preview.decision.categoryId)),input.direction)
+        return ClassificationTestResult(preview.copy(decision=preview.decision.copy(categoryId=category.id)),category,prepared?.second?.id)
+    }
+    private fun classificationTestRecord(recordId:Long):LedgerRecord {
+        val record=get(recordId) ?: throw ClassificationException("RULE_INPUT","账单已不存在，请重新选择")
+        if(record.bill.direction !in listOf(Direction.EXPENSE,Direction.INCOME))
+            throw ClassificationException("RULE_INPUT","请选择收入或支出账单进行测试")
+        return record
+    }
+    @Synchronized fun previewClassification(recordId:Long,draftRule:ClassificationRule?=null):ClassificationTestResult {
+        val record=classificationTestRecord(recordId)
+        return previewClassification(ClassificationInput.from(record.bill,record.capture),draftRule)
+    }
+    @Synchronized fun classificationRuleDraftFromBill(recordId:Long):ClassificationRuleDraft {
+        val record=classificationTestRecord(recordId)
+        val input=ClassificationInput.from(record.bill,record.capture)
+        val category=categoryFor(record) ?: throw ClassificationException("RULE_TARGET","账单分类已失效，请先选择有效分类")
+        val conditions=buildList {
+            input.merchant?.takeIf(ClassificationCodec::validKeyword)?.let { add(ClassificationCondition(ClassificationField.MERCHANT,ClassificationOperator.EQUALS,it)) }
+            input.orderContent.firstOrNull(ClassificationCodec::validKeyword)?.let { add(ClassificationCondition(ClassificationField.ORDER_CONTENT,ClassificationOperator.EQUALS,it)) }
+        }
+        val source=when(input.captureSource) {
+            Source.OCR -> "LIVE"+(input.sourcePackage?.let { ":$it" } ?: "")
+            Source.IMAGE -> "IMAGE"+(input.platform?.let { ":$it" } ?: "")
+            else -> null
+        }
+        val name=(input.merchant.orEmpty().filterNot(Char::isISOControl).trim().take(76).ifBlank { "来自账单" })+"规则"
+        return ClassificationRuleDraft(recordId,input,ClassificationRule("",name,true,input.direction,category.id,0,conditions,source=source))
+    }
+    @Synchronized fun saveClassificationRule(rule:ClassificationRule):ClassificationRule = classificationTransaction { ClassificationStorage.save(it,rule) }
+    @Synchronized fun deleteClassificationRule(id:String) = classificationTransaction { ClassificationStorage.delete(it,id) }
+    @Synchronized fun reorderClassificationRules(direction:Direction,ids:List<String>) = classificationTransaction { ClassificationStorage.reorder(it,direction,ids) }
+    @Synchronized fun setBuiltinClassificationRuleEnabled(id:String,enabled:Boolean) = classificationTransaction { ClassificationStorage.setBuiltinEnabled(it,id,enabled) }
+    @Synchronized fun copyBuiltinClassificationRule(id:String):ClassificationRule = ClassificationStorage.copyBuiltin(readableDatabase,id)
+    @Synchronized fun holdClassificationSnapshot(key:String,snapshot:ClassificationSnapshot?=null,taskDatabase:String?=null):ClassificationSnapshot = classificationTransaction {
+        ClassificationStorage.hold(it,key,snapshot ?: ClassificationStorage.configuration(it),taskDatabase)
+    }
+    @Synchronized fun reconcileClassificationSnapshots(taskDatabase:String,tasks:List<StoredClassificationSnapshot>) = classificationTransaction { ClassificationStorage.reconcile(it,taskDatabase,tasks) }
+    @Synchronized fun releaseClassificationSnapshot(key:String) = classificationTransaction { ClassificationStorage.release(it,key) }
+    @Synchronized fun forgetClassificationSnapshot(key:String) = classificationTransaction { ClassificationStorage.forget(it,key) }
+    @Synchronized fun classificationBackup():ClassificationBackup = ClassificationStorage.backup(readableDatabase)
+    private fun <T> classificationTransaction(action:(SQLiteDatabase)->T):T {
+        val db=writableDatabase;db.beginTransaction()
+        return try { action(db).also { db.setTransactionSuccessful() } } finally { db.endTransaction() }
+    }
+    @Synchronized fun classify(bill:ParsedBill,snapshot:ClassificationSnapshot,capture:Capture?=null):ParsedBill {
+        val direction=bill.direction?.takeIf { it in listOf(Direction.EXPENSE,Direction.INCOME) } ?: return bill
+        val decision=ClassificationEngine.classify(snapshot,ClassificationInput.from(bill,capture),bill.categoryDecision)
+        val category=CategoryDirectory.requireCategory(readableDatabase,CategoryReplacementStorage.resolve(readableDatabase,requireNotNull(decision.categoryId)),direction)
+        return bill.copy(category=category.name,categoryDecision=decision.copy(categoryId=category.id))
+    }
+    private fun guardClassificationReferences(db:SQLiteDatabase,id:String) {
+        if(CategoryDirectory.find(db,id)?.isFallback==true)throw CategoryException("CATEGORY_SYSTEM","系统兜底分类不能删除")
+        val count=ClassificationStorage.references(db,id)
+        if(count>0)throw CategoryException("CATEGORY_REFERENCED","该分类仍被分类规则或识别任务引用，请先处理后再删除",count)
+    }
+
     fun customCategories(): List<CustomCategory> = readableDatabase.query("custom_categories", null,
         null, null, null, null, "direction ASC, rowid ASC").use { cursor -> buildList {
         while (cursor.moveToNext()) add(CustomCategory(cursor.getString(cursor.getColumnIndexOrThrow("name")),
             Direction.valueOf(cursor.getString(cursor.getColumnIndexOrThrow("direction")))))
     } }
 
-    @Synchronized
-    fun addCategory(category: CustomCategory): Boolean {
-        category.validate()
-        require(category.name!="转账手续费") { "转账手续费为系统分类，请使用其他分类名称" }
-        return writableDatabase.insertWithOnConflict("custom_categories", null, categoryValues(category),
-            SQLiteDatabase.CONFLICT_IGNORE) != -1L
+    fun categoryDirectory(direction: Direction? = null): List<LedgerCategory> = CategoryDirectory.list(readableDatabase, direction)
+
+    fun category(id: String, direction: Direction): LedgerCategory = CategoryDirectory.requireCategory(readableDatabase, id, direction)
+
+    fun categoryFor(record: LedgerRecord): LedgerCategory? = record.bill.direction?.takeIf { it != Direction.TRANSFER }?.let {
+        CategoryDirectory.byName(readableDatabase, it, record.bill.category)
     }
 
-    @Synchronized fun deleteCategory(category: CustomCategory) {
+    @Synchronized fun saveCategory(id: String? = null, name: String, direction: Direction, icon: String = "tag"): LedgerCategory = categoryTransaction {
+        CategoryDirectory.save(it, id, name, direction, icon)
+    }
+
+    @Synchronized fun reorderCategories(direction: Direction, ids: List<String>) = categoryTransaction {
+        CategoryDirectory.reorder(it, direction, ids)
+    }
+
+    @Synchronized fun previewCategoryDeletion(id:String):CategoryDeletionPreview = CategoryReplacementStorage.preview(readableDatabase,id)
+    @Synchronized fun confirmCategoryDeletion(id:String,replacementId:String?,previewToken:String):CategoryDeletionPreview = categoryTransaction {
+        CategoryReplacementStorage.delete(it,id,replacementId,previewToken)
+    }
+
+    @Synchronized fun removeCategory(id: String) = categoryTransaction { guardClassificationReferences(it,id); CategoryDirectory.remove(it, id) }
+
+    private fun <T> categoryTransaction(action: (SQLiteDatabase) -> T): T {
+        val db = writableDatabase; db.beginTransaction()
+        try { val result = action(db); db.setTransactionSuccessful(); return result } finally { db.endTransaction() }
+    }
+
+    @Synchronized
+    fun addCategory(category: CustomCategory): Boolean = categoryTransaction { db ->
+        category.validate(); CategoryDirectory.validateName(category.name); CategoryDirectory.validateDirection(category.direction)
+        if (CategoryDirectory.byNormalized(db, category.direction, category.name) != null) false
+        else { CategoryDirectory.save(db, null, category.name, category.direction, "tag"); true }
+    }
+
+    @Synchronized fun deleteCategory(category: CustomCategory) = categoryTransaction { db ->
         category.validate()
-        // Past bills keep their original category text after removal from the picker.
-        writableDatabase.delete("custom_categories", "direction = ? AND name = ?",
-            arrayOf(category.direction.name, category.name))
+        val existing = CategoryDirectory.byName(db, category.direction, category.name)
+            ?: throw CategoryException("CATEGORY_NOT_FOUND", "分类已不存在，请刷新后重试")
+        guardClassificationReferences(db,existing.id)
+        CategoryDirectory.remove(db, existing.id)
     }
 
     /** Compatibility API: merging saved history never posts a new financial transaction. */
     @Synchronized
     fun merge(records: List<LedgerRecord>, accounts: List<LedgerAccount> = emptyList(),
-              categories: List<CustomCategory> = emptyList()): Int {
+              categories: List<CustomCategory> = emptyList(), categoryDirectory: List<LedgerCategory> = emptyList(),
+              categoryBindings: Map<String, String> = emptyMap()): Int {
         val db = writableDatabase
         db.beginTransaction()
         try {
             var imported = 0
-            records.forEach { record ->
+            val mappedCategories = CategoryDirectory.merge(db, categoryDirectory)
+            val incomingCategories = categoryDirectory.associateBy { it.direction to it.name }
+            records.forEach { original ->
+                val category = (categoryBindings[original.uid] ?: incomingCategories[original.bill.direction to original.bill.category]?.id)?.let { mappedCategories[it] }
+                val record = if (category == null) original else original.copy(bill = original.bill.copy(category = category.name,categoryDecision=original.bill.categoryDecision?.copy(categoryId=category.id)))
                 // UUIDs identify records in repeated backups. Do not overwrite subsequent local edits.
                 val exists = db.rawQuery("SELECT 1 FROM records WHERE uid = ?", arrayOf(record.uid)).use { it.moveToFirst() }
                 if (!exists) {
                     val id = db.insertOrThrow("records", null, values(record.copy(id = 0, duplicateId = null)))
                     persistIdentities(db,id,identities(record))
                     WalletAccounting.saveLink(db,RecordWalletLink(record.uid,WalletEligibility.RESTORE_EXCLUDED))
-                    linkMerchantIcon(db, id, record.bill.merchant, null)
+                    linkMerchantIcon(db, id, record.bill, null)
                     imported++
                 }
             }
@@ -1644,8 +1872,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 val exists = db.rawQuery("SELECT 1 FROM accounts WHERE uid = ?", arrayOf(account.uid)).use { it.moveToFirst() }
                 if (!exists) db.insertOrThrow("accounts", null, accountValues(account.copy(id = 0)))
             }
-            categories.forEach { category ->
+            categories.forEach { original ->
+                val mapped = incomingCategories[original.direction to original.name]?.id?.let { mappedCategories[it] }
+                val category = if (mapped == null) original else original.copy(name = mapped.name)
                 category.validate()
+                CategoryDirectory.ensure(db, category.direction, category.name)
                 db.insertWithOnConflict("custom_categories", null, categoryValues(category), SQLiteDatabase.CONFLICT_IGNORE)
             }
             db.setTransactionSuccessful()
@@ -1715,7 +1946,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                     validateImportedModel(record)
                     require(record.bill.direction!=Direction.TRANSFER || record.bill.refund==null && record.bill.standaloneRefund==null) { "转账不能包含消费退款" }
                     val id=db.insertOrThrow("records",null,values(record.copy(id=0,duplicateId=null)))
-                    persistIdentities(db,id,identities(record));linkMerchantIcon(db,id,record.bill.merchant,null)
+                    persistIdentities(db,id,identities(record));linkMerchantIcon(db,id,record.bill,null)
                     insertHistory(db,id,RecordCaptureHistory(1,record.capture.receivedAt,
                         if(record.bill.refund==null)"payment" else if(record.bill.amountCents==0L)"full_refund" else "partial_refund",
                         record.bill.amountCents,record.bill.refund?.refundedCents ?: 0L,record.capture.text,false))
@@ -1808,14 +2039,24 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
     }
 
     private fun values(r: LedgerRecord) = ContentValues().apply {
+        val category=r.bill.direction?.takeIf { it in setOf(Direction.EXPENSE,Direction.INCOME) }?.let { direction ->
+            val originalId=r.bill.categoryDecision?.categoryId
+            val resolvedId=originalId?.let { CategoryReplacementStorage.resolve(writableDatabase,it) }
+            if(resolvedId!=null)CategoryDirectory.requireCategory(writableDatabase,resolvedId,direction)
+            else CategoryDirectory.ensure(writableDatabase,direction,r.bill.category)
+        }
         put("uid", r.uid); put("source", r.capture.source.name); put("origin", r.capture.origin)
         put("raw_text", r.capture.text); put("received_at", r.capture.receivedAt)
         put("amount", r.bill.amountCents); put("direction", r.bill.direction?.name)
-        put("merchant", r.bill.merchant); put("category", r.bill.category)
+        put("merchant", r.bill.merchant); put("category", category?.name ?: r.bill.category)
+        put("category_id", category?.id)
         put("occurred_at", r.bill.occurredAt); put("transaction_id", r.bill.transactionId)
         put("reliable", if (r.bill.reliable) 1 else 0); put("time_explicit", if (r.bill.timeExplicit) 1 else 0)
         put("state", r.state.name); put("reason", r.reason); put("duplicate_id", r.duplicateId)
         put("note", r.note);put("standalone_refund",encodeStandaloneRefund(r.bill.standaloneRefund))
+        put("receipt_evidence",ReceiptEvidenceCodec.encode(r.bill.receipt))
+        put("accounting_date",AccountingDates.dateOnly(r.bill))
+        put("category_decision",r.bill.categoryDecision?.let { ClassificationCodec.decision(it.copy(categoryId=category?.id)).toString() })
         put("transaction_identities",TransactionIdentities.encode(identities(r)))
         put("refund_provider", r.bill.refund?.provider);put("refund_original", r.bill.refund?.originalAmountCents)
         put("refund_amount", r.bill.refund?.refundedCents);put("refund_mode",r.bill.refund?.mode);put("refund_id",r.bill.refund?.refundId)
@@ -1832,7 +2073,9 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
                 text("merchant"), text("category"), number("occurred_at"), optionalText("transaction_id"),
                 number("reliable") == 1L, text("reason"), number("time_explicit") == 1L,
                 optionalText("refund_provider")?.let { RefundInfo(it,number("refund_original"),number("refund_amount"),text("refund_mode"),optionalText("refund_id")) },
-                standaloneRefund=c.getColumnIndex("standalone_refund").takeIf { it>=0 && !c.isNull(it) }?.let { decodeStandaloneRefund(c.getString(it)) }),
+                standaloneRefund=c.getColumnIndex("standalone_refund").takeIf { it>=0 && !c.isNull(it) }?.let { decodeStandaloneRefund(c.getString(it)) },
+                categoryDecision=c.getColumnIndex("category_decision").takeIf { it>=0 && !c.isNull(it) }?.let { ClassificationCodec.readDecision(org.json.JSONObject(c.getString(it))) },
+                receipt=c.getColumnIndex("receipt_evidence").takeIf { it>=0 && !c.isNull(it) }?.let { ReceiptEvidenceCodec.decode(c.getString(it)) }),
             RecordState.valueOf(text("state")), text("reason"), optionalNumber("duplicate_id"), text("note"),
             TransactionIdentities.decode(text("transaction_identities")))
     }

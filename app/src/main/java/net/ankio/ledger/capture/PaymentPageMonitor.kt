@@ -94,7 +94,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         if(check?.isActive==true)return
         // A new window can arrive during the final query of an earlier pass.
         // Keep one pending wakeup instead of dropping all events while busy.
-        check=service.ledger.scope.launch(start=CoroutineStart.LAZY) {
+        check=service.ledger.recognitionWork.launch(start=CoroutineStart.LAZY) {
             for(request in checks) {
                 if(!ready())continue
                 checking=true;checkPasses++
@@ -148,10 +148,11 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         match
     }
     /** Query again at the acquisition boundary. Old matches never authorize a new frame. */
-    suspend fun confirms(match:PaymentMatch):Boolean=readLock.withLock {
-        val page=readPage(match.packageName,match.windowId).value?:return@withLock false
-        visits.detect(page)?.let { it.activity==match.activity && it.signature==match.signature && it.eventIdentity==match.eventIdentity }==true
+    suspend fun confirmedPage(match:PaymentMatch):PaymentPage?=readLock.withLock {
+        val page=readPage(match.packageName,match.windowId).value?:return@withLock null
+        page.takeIf { visits.detect(it)?.let { observed -> observed.activity==match.activity && observed.signature==match.signature && observed.eventIdentity==match.eventIdentity }==true }
     }
+    suspend fun confirms(match:PaymentMatch):Boolean=confirmedPage(match)!=null
     suspend fun manualCheck(pkg:String,window:Int,shortcut:Boolean=false):CaptureProbeResult<PaymentPage> = readLock.withLock {
         if(!manualApplicationAllowed(pkg,shortcut))return@withLock CaptureProbeResult(null,"application_not_selected")
         val result=readManualCapturePage { readPage(pkg,window,700,automatic=false,shortcut=shortcut) }
@@ -163,6 +164,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
     private fun manualApplicationAllowed(pkg:String,shortcut:Boolean)=if(shortcut)service.ledger.channels.shortcutAllowed(pkg) else service.ledger.channels.shakeAllowed(pkg)
     private suspend fun readPage(expectedPackage:String?=null,expectedWindow:Int?=null,timeout:Long=180,automatic:Boolean=true,shortcut:Boolean=false):CaptureProbeResult<PaymentPage> =
         probe.readResult(timeout,onLateResult=::lateProbeReady) {
+            val readStarted=SystemClock.elapsedRealtime()
             val detail=JSONObject().put("stage","windows").put("at",System.currentTimeMillis())
             fun missing(stage:String):PaymentPage? { probeDetails=JSONObject(detail.toString()).put("stage",stage);return null }
             val available=service.windows
@@ -170,6 +172,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
             val root=try {
                 val selected=selectCaptureWindow(available.map { CaptureWindow(it.id,it.type,it.isActive,it.isFocused,it.layer,null,it.isInPictureInPictureMode) })?:return@readResult missing("no_selected_window")
                 detail.put("selectedWindow",selected.id).put("selectedType",selected.type)
+                    .put("contentGeneration",service.captureContentGeneration(selected.id))
                 if(selected.type!=android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION)return@readResult missing("not_application_window")
                 val activity=activities[selected.id].orEmpty()
                 val pkg=packages[selected.id] ?: if(!automatic)expectedPackage.orEmpty() else ""
@@ -195,37 +198,57 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
                 root.recycle();probeDetails=JSONObject(detail.toString()).put("stage","navigation_metadata")
                 return@readResult PaymentPage(pkg,window,activity,emptyList())
             }
-            val queue=java.util.ArrayDeque<Pair<AccessibilityNodeInfo,Int>>()
-            queue.add(root to 0)
-            val texts=mutableListOf<String>();var editable=false;var count=0;var chars=0;var clipped=false
+            val generation=detail.getLong("contentGeneration")
+            data class Pending(val node:AccessibilityNodeInfo,val depth:Int,val parent:Int?)
+            val queue=java.util.ArrayDeque<Pending>()
+            queue.add(Pending(root,0,null))
+            val texts=mutableListOf<String>();val nodes=mutableListOf<CaptureNode>();var editable=false;var count=0;var chars=0;var clipped=false
             try {
                 while(queue.isNotEmpty()) {
-                    val (node,depth)=queue.removeFirst()
+                    val (node,depth,parent)=queue.removeFirst()
                     try {
                         // The measured Alipay result has 100 nodes but reaches depth 28.
                         // Keep bounded traversal and reject any partial tree, including one
                         // whose unvisited children might contain an authentication field.
+                        if(node.windowId!=window) { detail.put("limit","node_window_changed");clipped=true;break }
                         if(++count>400 || depth>64) {
                             detail.put("limit",if(count>400)"nodes" else "depth").put("depth",depth)
                             clipped=true;break
                         }
-                        if(node.isVisibleToUser) {
-                            // Never read the value or description of a password/input field.
-                            if(node.isEditable || node.isPassword) { editable=true;break }
-                            listOfNotNull(node.text?.toString(),node.contentDescription?.toString()).distinct().forEach {
-                                chars+=it.length
-                                if(it.isNotBlank() && it.length<=2048)texts.add(it)
-                            }
-                        }
+                        val visible=node.isVisibleToUser
+                        // Never read the value or description of a password/input field.
+                        if(visible && (node.isEditable || node.isPassword)) { editable=true;break }
+                        val text=if(visible)node.text?.toString() else null
+                        val description=if(visible)node.contentDescription?.toString() else null
+                        val values=listOfNotNull(text,description).distinct()
+                        if(values.any { it.length>2048 }) { detail.put("limit","node_text");clipped=true;break }
+                        chars+=values.sumOf(String::length)
+                        texts.addAll(values.filter(String::isNotBlank))
                         if(chars>16000) { detail.put("limit","text");clipped=true;break }
-                        for(i in 0 until node.childCount.coerceAtMost(80))node.getChild(i)?.let { queue.add(it to depth+1) }
+                        val bounds=android.graphics.Rect();node.getBoundsInScreen(bounds)
+                        val nodeId=nodes.size
+                        nodes.add(CaptureNode(nodeId,parent,depth,NodeBounds(bounds.left,bounds.top,bounds.right,bounds.bottom),text,description,
+                            node.className?.toString().orEmpty().take(512),node.viewIdResourceName.orEmpty().take(512),visible,node.isEnabled,node.isClickable,
+                            node.isSelected,node.isChecked,node.isScrollable,node.isEditable,node.isPassword))
+                        for(i in 0 until node.childCount.coerceAtMost(80))node.getChild(i)?.let { queue.add(Pending(it,depth+1,nodeId)) }
                         if(node.childCount>80) { detail.put("limit","children");clipped=true }
                     } finally { node.recycle() }
                 }
-            } finally { queue.forEach { it.first.recycle() } }
+            } finally { queue.forEach { it.node.recycle() } }
             detail.put("nodes",count).put("textCount",texts.size).put("editable",editable)
             probeDetails=JSONObject(detail.toString()).put("stage",if(clipped)"tree_limit" else "page_read")
-            if(clipped)null else PaymentPage(pkg,window,activity,texts,editable)
+            if(clipped)null else if(editable)PaymentPage(pkg,window,activity,texts,true)
+            else if(service.captureContentGeneration(window)!=generation)missing("content_changed")
+            else {
+                val info=service.packageManager.getPackageInfo(pkg,0)
+                val environment=NodeEnvironment(info.versionName.orEmpty().take(128),info.longVersionCode,
+                    "${Build.VERSION.RELEASE}/api${Build.VERSION.SDK_INT}/${Build.FINGERPRINT}".take(256),"${Build.MANUFACTURER}/${Build.MODEL}".take(256))
+                val snapshot=NodeSnapshot(pkg,window,activity,generation,readStarted,SystemClock.elapsedRealtime(),System.currentTimeMillis(),environment,nodes)
+                // Bound the complete UTF-8 payload, including hierarchy and all metadata,
+                // before pixels. A character-only cap cannot protect SQLite CursorWindow.
+                if(runCatching { net.ankio.ledger.data.NodeSnapshotCodec.json(snapshot) }.isFailure)missing("snapshot_limit")
+                else if(service.captureContentGeneration(window)!=generation)missing("content_changed") else snapshot.page()
+            }
         }
     fun diagnostics()=JSONObject(observation.toString()).put("enabled",service.ledger.channels.automaticEnabled())
         .put("probe",JSONObject(probeDetails.toString())).put("flags",service.serviceInfo.flags)

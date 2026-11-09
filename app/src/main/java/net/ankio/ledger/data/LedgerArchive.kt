@@ -30,6 +30,7 @@ object LedgerArchive {
         internal val files: Map<String, File> = emptyMap(),
         internal val historyAssets: Map<String, Map<Int, String>> = emptyMap(),
         internal val iconAssets: Map<String, String> = emptyMap(),
+        internal val taskAssets:Map<String,String> = emptyMap(),
         val legacy: Boolean = false,
     ) : Closeable {
         val recordCount get() = backup.records.size
@@ -46,11 +47,16 @@ object LedgerArchive {
 
     /** Ledger rows and media are fixed first; compression and destination I/O hold no ledger lock. */
     fun write(store:LedgerStore,channels:ChannelSettings,output:OutputStream):Summary=StagedLedgerBackup.capture(store).use { snapshot->
-        val ledger=JSONObject(LedgerBackup.encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets))
+        val ledger=JSONObject(LedgerBackup.encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory,snapshot.classification,snapshot.recognitionBatches,snapshot.recognitionTasks,snapshot.recognitionReceipts,snapshot.captureEvents))
         val histories=JSONObject();val icons=JSONObject(snapshot.iconAssets)
         snapshot.histories.forEach { (uid,entries)->histories.put(uid,JSONArray(entries.map { entry->
             LedgerBackup.historyJson(entry).put("asset",snapshot.historyAssets[uid]?.get(entry.sequence) ?: JSONObject.NULL)
         })) }
+        for(i in 0 until snapshot.recognitionTasks.length()) {
+            val row=snapshot.recognitionTasks.getJSONObject(i)
+            row.put("image",JSONObject.NULL).put("asset",snapshot.taskAssets[row.getString("operation_uid")] ?: JSONObject.NULL)
+        }
+        ledger.put("recognitionTasks",snapshot.recognitionTasks)
         ledger.put("histories",histories)
         val manifest=JSONObject().put("format","simple-ledger-archive").put("version",1).put("ledger",ledger).put("merchantIcons",icons).toString().toByteArray(Charsets.UTF_8)
         require(manifest.size<=MAX_MANIFEST_BYTES) { "备份清单超过容量限制" }
@@ -171,9 +177,18 @@ object LedgerArchive {
                 require(uid in uids) { "商户图标没有关联账单" }
                 iconAssets[uid] = checkedReference(icons.get(uid), files)
             }
-            val references = historyAssets.values.flatMap { it.values }.toSet() + iconAssets.values
+            val taskAssets=linkedMapOf<String,String>()
+            for(i in 0 until backup.recognitionTasks.length()) {
+                val row=backup.recognitionTasks.getJSONObject(i);require(row.isNull("image"))
+                if(!row.isNull("imageHash")) {
+                    val hash=checkedReference(row.get("asset"),files)
+                    require(hash==row.getString("imageHash"))
+                    taskAssets[row.getString("operation_uid")]=hash
+                } else require(row.isNull("asset"))
+            }
+            val references = taskAssets.values.toSet() + historyAssets.values.flatMap { it.values }.toSet() + iconAssets.values
             require(references == files.keys) { "备份包含未关联的图片" }
-            return PreparedBackup(backup, directory, files, historyAssets, iconAssets)
+            return PreparedBackup(backup, directory, files, historyAssets, iconAssets,taskAssets)
         } catch (error: Throwable) {
             directory.listFiles()?.forEach { it.delete() }
             directory.delete()
@@ -188,7 +203,7 @@ object LedgerArchive {
         if(prepared.legacy)return LedgerBackup.restoreDetailed(store,prepared.backup)
         // Recheck all staged media before any ledger mutation, including changes since ZIP preflight.
         prepared.files.forEach { (hash,file)->attachmentBytes(prepared,hash);validateImage(file) }
-        return LedgerBackup.restoreDetailed(store,prepared.backup) { record->
+        return LedgerBackup.restoreDetailed(store,prepared.backup,taskImageProvider={operation->prepared.taskAssets[operation]?.let { attachmentBytes(prepared,it) }}) { record->
             prepared.backup.histories[record.uid]?.let { entries->store.restoreHistory(record.id,entries) { restored->
                 prepared.historyAssets[record.uid]?.get(restored.entry.sequence)?.let { attachmentBytes(prepared,it) }
             } }

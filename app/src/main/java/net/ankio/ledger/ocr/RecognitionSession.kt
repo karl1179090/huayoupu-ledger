@@ -4,7 +4,7 @@ import android.content.Context
 import java.security.KeyStore
 import java.util.concurrent.atomic.AtomicLong
 
-class RecognitionException(val userMessage:String):Exception(userMessage)
+open class RecognitionException(val userMessage:String):Exception(userMessage)
 
 /** Local recognition lifecycle. Former remote credentials are never read or reused. */
 class RecognitionSession(context:Context) {

@@ -40,12 +40,22 @@ class ExpenseWidgetHostProbeTest {
     }
     @Test fun explicitlyRequestedHostPhase() {
         val phase=InstrumentationRegistry.getArguments().getString("widgetHostPhase")
-        assumeTrue("Use scripts/verify-widget-host-lifecycle.py with an explicit phase",phase in setOf("setup","verify","cleanup"))
+        assumeTrue("Use scripts/verify-widget-host-lifecycle.py with an explicit phase",phase in setOf("setup","verify","cleanup","inspect"))
         assertTrue("Synthetic host probes only",android.os.Build.MODEL.contains("sdk_gphone"))
         val token=requireNotNull(InstrumentationRegistry.getArguments().getString("widgetHostToken"))
         UUID.fromString(token)
         val file=File(app.cacheDir,"widget-host-fixture.json")
         when(phase) {
+            "inspect" -> {
+                val id=requireNotNull(InstrumentationRegistry.getArguments().getString("widgetHostWidgetId")).toInt()
+                val manager=AppWidgetManager.getInstance(app)
+                val info=requireNotNull(manager.getAppWidgetInfo(id))
+                assertEquals(ComponentName(app,ExpenseWidgetProvider::class.java),info.provider)
+                fun options()=manager.getAppWidgetOptions(id).apply {keySet()}.toString()
+                val before=options()
+                assertEquals(before,options())
+                println("WIDGET_HOST_PHASE phase=$phase provider=${info.provider} widgetId=$id options=$before")
+            }
             "setup" -> {
                 assertEquals("Use a fresh isolated synthetic ledger",0L,app.store.readableDatabase.rawQuery("SELECT COUNT(*) FROM records",null).use {it.moveToFirst();it.getLong(0)})
                 assertTrue(app.store.accounts().isEmpty());assertTrue(taskIds().isEmpty())

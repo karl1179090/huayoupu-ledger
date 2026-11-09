@@ -8,7 +8,8 @@ import java.time.ZoneId
 
 /** Shared expense projection. Amounts are cents throughout; wallet eligibility does not filter statistics. */
 class LedgerStatistics(private val store: LedgerStore) {
-    data class Category(val key: String, val name: String, val direction: Direction, val amountCents: Long, val count: Long)
+    data class Category(val key: String, val name: String, val direction: Direction, val amountCents: Long, val count: Long,
+        val categoryId: String? = null, val icon: String = "tag")
     data class Day(val day: Int, val direction: Direction, val amountCents: Long, val date: String)
     data class Totals(val expense: Long = 0, val income: Long = 0, val expenseCount: Long = 0,
         val incomeCount: Long = 0, val transferCount: Long = 0, val totalCount: Long = 0) {
@@ -24,7 +25,8 @@ class LedgerStatistics(private val store: LedgerStore) {
                 .put("start", bucket.startMillis).put("end", bucket.endMillis).put("label", bucket.label)
                 .put("current", bucket.current).put("future", bucket.future).put("expenseCents", bucketAmounts[index].toString())) } })
             .put("categories", JSONArray().apply { categories.forEach { put(JSONObject().put("key", it.key).put("name", it.name)
-                .put("direction", it.direction.name).put("amount", it.amountCents.toString()).put("count", it.count)) } })
+                .put("direction", it.direction.name).put("amount", it.amountCents.toString()).put("count", it.count)
+                .put("categoryId",it.categoryId ?: JSONObject.NULL).put("icon",it.icon)) } })
             .put("days", JSONArray().apply { days.forEach { put(JSONObject().put("day", it.day).put("date",it.date).put("direction", it.direction.name).put("amount", it.amountCents.toString())) } })
     }
 
@@ -37,8 +39,9 @@ class LedgerStatistics(private val store: LedgerStore) {
     fun month(month: String, zone: ZoneId = ZoneId.systemDefault()): JSONObject = synchronized(store) {
         val w = LedgerReadView(store).window(month,zone)
         readSnapshot {
-            val current = aggregate(w.start, w.end, zone)
-            current.json().put("month", month).put("previous", aggregate(w.previous, w.start, zone).totals.json())
+            val date=java.time.YearMonth.parse(month).atDay(1)
+            val current = aggregate(w.start, w.end, zone,calendarStart=date,calendarEnd=date.plusMonths(1))
+            current.json().put("month", month).put("previous", aggregate(w.previous, w.start, zone,calendarStart=date.minusMonths(1),calendarEnd=date).totals.json())
                 .put("postedCount", store.readableDatabase.rawQuery("SELECT COUNT(*) FROM records r WHERE r.state='POSTED' AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)", null).use { it.moveToFirst(); it.getLong(0) })
         }
     }
@@ -49,20 +52,23 @@ class LedgerStatistics(private val store: LedgerStore) {
         try { val result = action(); db.setTransactionSuccessful(); return result } finally { db.endTransaction() }
     }
 
-    private fun aggregate(start: Long, end: Long, zone: ZoneId, range: ExpensePeriodRange? = null, includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown): Snapshot {
+    private fun aggregate(start: Long, end: Long, zone: ZoneId, range: ExpensePeriodRange? = null, includeBreakdown: Boolean = true, includeDays: Boolean = includeBreakdown,calendarStart:java.time.LocalDate?=range?.startDate,calendarEnd:java.time.LocalDate?=range?.endDate): Snapshot {
         var expense = 0L; var income = 0L; var expenses = 0L; var incomes = 0L; var transfers = 0L; var count = 0L
         val amounts = LongArray(range?.buckets?.size ?: 0)
         val categories = linkedMapOf<Pair<Direction, String>, Pair<Long, Long>>()
         val days = linkedMapOf<Pair<java.time.LocalDate, Direction>, Long>()
-        store.readableDatabase.rawQuery("""SELECT r.direction,r.amount,r.category,r.occurred_at,t.fee_cents FROM records r
-            LEFT JOIN record_transfer_details t ON t.record_uid=r.uid WHERE r.state='POSTED' AND r.occurred_at>=? AND r.occurred_at<?
-            AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)""", arrayOf(start.toString(), end.toString())).use { c ->
+        val directory = if (includeBreakdown) store.categoryDirectory().associateBy { it.direction to it.name } else emptyMap()
+        val dates=if(calendarStart!=null)AccountingDates.calendar(calendarStart,requireNotNull(calendarEnd),zone) else AccountingDates.within(start,end)
+        store.readableDatabase.rawQuery("""SELECT r.direction,r.amount,r.category,r.occurred_at,t.fee_cents,r.accounting_date FROM records r
+            LEFT JOIN record_transfer_details t ON t.record_uid=r.uid WHERE r.state='POSTED' AND ${dates.sql}
+            AND NOT EXISTS(SELECT 1 FROM record_deletions d WHERE d.record_id=r.id)""", dates.args.toTypedArray()).use { c ->
             while (c.moveToNext()) {
                 count = add(count, 1)
                 val direction = Direction.valueOf(c.getString(0))
                 val original = c.getLong(1)
                 require(!c.isNull(1) && original in 0..Money.MAX_CENTS) { "INVALID_AMOUNT" }
                 val occurred = c.getLong(3)
+                val calendarDay=if(c.isNull(5))null else java.time.LocalDate.parse(c.getString(5))
                 val cents = when (direction) {
                     Direction.EXPENSE -> original
                     Direction.INCOME -> original
@@ -76,7 +82,9 @@ class LedgerStatistics(private val store: LedgerStore) {
                 val contributionDirection = if (direction == Direction.INCOME) Direction.INCOME else Direction.EXPENSE
                 if (contributionDirection == Direction.EXPENSE) {
                     expense = add(expense, cents); expenses = add(expenses, 1)
-                    range?.bucketIndex(occurred)?.takeIf { it >= 0 }?.let { amounts[it] = add(amounts[it], cents) }
+                    val bucket=range?.let { period -> if(calendarDay==null)period.bucketIndex(occurred)
+                        else period.buckets.indexOfFirst { calendarDay>=it.startDate && calendarDay<it.endDate } }
+                    bucket?.takeIf { it>=0 }?.let { amounts[it] = add(amounts[it], cents) }
                 } else { income = add(income, cents); incomes = add(incomes, 1) }
                 if (includeBreakdown) {
                 val category = if (direction == Direction.TRANSFER) TRANSFER_FEE_KEY else "category:"+c.getString(2)
@@ -85,14 +93,17 @@ class LedgerStatistics(private val store: LedgerStore) {
                 categories[key] = add(prior.first, cents) to add(prior.second, 1)
                 }
                 if (includeDays) {
-                val day = Instant.ofEpochMilli(occurred).atZone(zone).toLocalDate() to contributionDirection
+                val day = (calendarDay ?: Instant.ofEpochMilli(occurred).atZone(zone).toLocalDate()) to contributionDirection
                 days[day] = add(days[day] ?: 0, cents)
                 }
             }
         }
         if (range != null) check(amounts.fold(0L, ::add) == expense)
         return Snapshot(range, start, end, zone.id, Totals(expense, income, expenses, incomes, transfers, count), amounts.toList(),
-            categories.map { (key, value) -> Category(key.second, if (key.second == TRANSFER_FEE_KEY) "转账手续费" else key.second.removePrefix("category:").let { if(it=="转账手续费")"转账手续费（自定义）" else it }, key.first, value.first, value.second) }
+            categories.map { (key, value) ->
+                val category = directory[key.first to key.second.removePrefix("category:")].takeIf { key.second != TRANSFER_FEE_KEY }
+                Category(key.second, if (key.second == TRANSFER_FEE_KEY) "转账手续费" else key.second.removePrefix("category:").let { if(it=="转账手续费")"转账手续费（自定义）" else it }, key.first, value.first, value.second,
+                    category?.id, category?.icon ?: "tag") }
                 .sortedWith(compareByDescending<Category> { it.amountCents }.thenBy { it.key }),
             days.map { (key, value) -> Day(key.first.dayOfMonth, key.second, value,key.first.toString()) }.sortedBy { it.date })
     }

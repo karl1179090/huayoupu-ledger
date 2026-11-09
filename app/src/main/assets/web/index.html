@@ -152,7 +152,10 @@
     <section id="capture-gallery" class="capture-gallery" aria-label="原始截图" hidden=""></section>
     <div aria-label="选择支付截图" class="scanner" onclick="viewOrPickImage()" role="button" tabindex="0">
      <img alt="本笔账单的识别截图" hidden="" id="capture-preview"/>
-     <span class="capture-attachment-copy"><b>原始截图</b><small>点击查看大图</small></span><i class="fa-solid fa-expand capture-expand" aria-hidden="true"></i>
+     <span class="missing-screenshot-icon" id="missing-screenshot-icon" hidden=""><i aria-hidden="true" class="fa-regular fa-image"></i></span>
+     <span class="capture-attachment-copy"><b>原始截图</b><small>点击查看大图</small></span>
+     <span class="missing-screenshot-badge" id="missing-screenshot-badge" hidden="">未保留截图</span>
+     <i class="fa-solid fa-expand capture-expand" aria-hidden="true"></i>
      <span class="corner tl">
      </span>
      <span class="corner tr">
@@ -216,11 +219,14 @@
       <div class="record-chips">
        <button aria-label="修改分类与收支方向" id="category" type="button">餐饮</button>
        <button aria-label="修改交易时间" id="time-label" type="button"></button>
+       <span class="time-basis" hidden="" id="time-basis"></span>
        <input aria-label="交易时间" id="occurred-at" type="hidden"/>
       </div>
+      <p id="category-explanation" class="category-explanation" hidden=""></p>
       <p id="refund-summary" class="refund-summary" hidden=""></p>
       <button type="button" id="record-wallet" class="wallet-choice" onclick="chooseWallet('record')"><i class="fa-solid fa-wallet" aria-hidden="true"></i><span>选择钱包</span><span class="chevron">›</span></button>
       <div id="record-transfer" class="transfer-form" hidden></div><p id="wallet-explanation" class="wallet-explanation"></p>
+      <section id="receipt-details" class="receipt-details" aria-label="凭证信息" hidden></section>
       <div class="form-row edit note-row">
        <i class="fa-regular fa-address-book">
        </i>
@@ -246,6 +252,9 @@
       <button hidden="" id="raw-text-button" type="button">
        识别原文
       </button>
+      <button hidden="" id="create-rule-from-bill" type="button">
+       <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>据此创建规则
+      </button>
      </div>
      <div class="actions">
       <button hidden="" id="delete-record" class="delete-action" type="button">删除账单</button>
@@ -254,6 +263,7 @@
       </button>
      </div>
     </form>
+    <section class="batch-results-view" id="batch-view" aria-label="多笔识别结果" hidden=""></section>
    </section>
    <section aria-label="我的" class="screen app screen-settings" id="settings">
     <header class="v21-header settings-header">
@@ -324,6 +334,10 @@
       </span>
      </button>
      <button id="shake-applications" class="wallet-choice" onclick="openShakeWhitelist()"><i class="fa-solid fa-list-check" aria-hidden="true"></i><span>应用白名单</span><small id="shake-application-count">请选择应用</small><span class="chevron">›</span></button>
+    </section>
+    <section class="card category-preferences" aria-label="分类管理">
+     <button id="category-settings" type="button" onclick="openCategoryManager()"><i aria-hidden="true" class="fa-solid fa-tag"></i><b>分类管理</b><small id="category-summary-count">支出与收入分类</small><span class="chevron">›</span></button>
+     <button id="classification-rules-settings" type="button" onclick="openClassificationRules()"><i aria-hidden="true" class="fa-solid fa-wand-magic-sparkles"></i><b>自动分类规则</b><small id="classification-rules-summary">按商家自动归类</small><span class="chevron">›</span></button>
     </section>
     <section class="card account-preferences" aria-label="账户与偏好">
      <button id="backup"><i aria-hidden="true" class="fa-solid fa-folder-open"></i><b>账单与备份</b><span class="chevron">›</span></button>
