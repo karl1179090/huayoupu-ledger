@@ -6,6 +6,10 @@ val nodeDiagnostic = providers.gradleProperty("ledgerNodeDiagnostic").getOrElse(
 providers.gradleProperty("ledgerAppBuildDir").orNull?.let { layout.buildDirectory.set(file(it)) }
 val ledgerAbi = providers.gradleProperty("ledgerAbi").getOrElse("arm64-v8a")
 require(ledgerAbi in listOf("arm64-v8a", "x86_64")) { "Unsupported ledger ABI" }
+val ledgerVersionCode = providers.gradleProperty("ledgerVersionCode").getOrElse("97").toInt()
+val ledgerVersionName = providers.gradleProperty("ledgerVersionName").getOrElse("0.5.91-v6")
+require(ledgerVersionCode in 1..2_100_000_000) { "Invalid Android versionCode" }
+require(Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?").matches(ledgerVersionName)) { "Invalid versionName" }
 
 val webProtectionDirectory = rootProject.layout.projectDirectory.dir("tools/web-protection")
 val installReleaseWebTools by tasks.registering(Exec::class) {
@@ -60,8 +64,8 @@ android {
         applicationId = "net.ankio.ledger"
         minSdk = 30
         targetSdk = 36
-        versionCode = 97
-        versionName = "0.5.91-v6"
+        versionCode = ledgerVersionCode
+        versionName = ledgerVersionName
         buildConfigField("boolean", "NODE_DIAGNOSTIC", "false")
         manifestPlaceholders["nodeDiagnosticsEnabled"] = "false"
         manifestPlaceholders["ledgerApplicationLabel"] = "花有谱"

@@ -82,6 +82,7 @@ def check(files):
     names = {name for name, _ in files}
     required = ROOT_FILES | {'gradle/wrapper/gradle-wrapper.jar', 'gradle/wrapper/gradle-wrapper.properties',
                             'app/src/main/AndroidManifest.xml', 'scripts/prepare-ledger-build.py',
+                            'scripts/ledger-release.py', 'gradle/release-version.json',
                             'scripts/prepare-ledger-v6-assets.py', 'scripts/prepare-paddle-sdk.py',
                             'third_party/ocr-runtime/config/upstream-lock.json',
                             'third_party/ocr-runtime/config/ledger-v6-runtime-lock.json',

@@ -62,7 +62,7 @@ GitHub 共享模拟器使用 `--widget-timing record`：继续执行全部组件
 
 [Android Emulator (manual)](.github/workflows/android-emulator.yml) 仅由 `workflow_dispatch` 触发。工作流合并到默认分支后，在 GitHub 的 **Actions → Android Emulator (manual) → Run workflow** 选择待测分支即可运行 Android 11／14 及各自的外部支付回归。两套系统独立执行并上传各自的报告；失败仍会显示为失败，自动检查与 Release 不依赖其结果。
 
-[Release](.github/workflows/release.yml) 仍要求标签对应的同一提交已在 `main` 的自动 Android 工作流中全部通过，并使用该轮构建的 APK 与源码。固定签名、SHA256、版本、ABI、提交来源和非调试包校验继续保留。发布说明只声明自动检查的通过范围，不声称手动模拟器回归已通过。
+[Release](.github/workflows/release.yml) 在受信任的 main push 通过 source、browser、verify、ARM64 APK 后，由同一次 Android 工作流直接调用；也保留手动标签发布。版本由 `gradle/release-version.json` 的固定基准及 main first-parent 距离确定，同提交重跑版本不变。发布只使用指定 main 构建的 APK 与源码，逐个检查最新 job attempt，不等待包含发布任务自身的整轮运行。固定签名、SHA256、版本、ABI、提交来源和非调试包校验继续保留；先验证草稿实际上传字节，再公开。已发布同提交不覆盖，较旧版本不回退 Latest。发布说明只声明自动检查的通过范围，不声称手动模拟器回归已通过。
 
 ## 支付自动识别回归检查点
 

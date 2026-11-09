@@ -12,7 +12,7 @@
 
 <p align="center"><a href="https://github.com/karl1179090/huayoupu-ledger/releases/latest">下载 Android APK</a> · <a href="https://github.com/karl1179090/huayoupu-ledger/actions/workflows/android.yml">构建与测试</a></p>
 
-**钱包互转、独立文件迁移与开销组件属于当前待发布的开发分支。** 最新发布版下载入口保持不变；本分支的逐项验证与未覆盖范围见[开发验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)。
+钱包互转、独立文件迁移、开销组件、交易识别与自定义分类规则已合入 main。各版本功能以 Release 为准；逐项验证与未覆盖范围见[开发验证记录](.github/VERIFICATION-TRANSFERS-IMPORT-EXPORT-AND-WIDGET.md)及[识别与分类验收记录](docs/verification/recognition-and-category-rules.md)。
 
 识别与分类升级的组合流程、实际适配范围和未测项见[组合验收记录](docs/verification/recognition-and-category-rules.md)。
 

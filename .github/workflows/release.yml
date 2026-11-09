@@ -1,6 +1,17 @@
 name: Publish Android APK
 
 on:
+  workflow_call:
+    inputs:
+      commit:
+        required: true
+        type: string
+      run_id:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -14,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  group: publish-android-release
   cancel-in-progress: false
 
 jobs:
@@ -27,14 +38,18 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      REQUESTED_COMMIT: ${{ inputs.commit || '' }}
+      BUILD_RUN_ID: ${{ inputs.run_id || '' }}
       EXPECTED_CERT_SHA256: 62101969d492aa5538794aa6e4f8f1e99ac37a3de42f384468c9b8e2a9b0c014
     steps:
       - name: Validate version tag
         run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]'
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -42,15 +57,18 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: build-tools;35.0.0
-      # Only android.yml gates publishing; manual emulator regressions are independent.
-      - name: Require successful automatic Android checks for this exact commit
+      # Check the four build gates, never the publishing job of this same run.
+      - name: Require successful checks for the exact main commit
         run: |
           set -euo pipefail
-          commit=$(git rev-parse HEAD)
-          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$commit"
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow android.yml --commit "$commit" --branch main --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          test -n "$run_id" || { echo 'Push this commit to main and run automatic Android checks before publishing.'; exit 1; }
-          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 15
+          commit="$REQUESTED_COMMIT"
+          if [ -z "$commit" ]; then commit=$(git rev-parse "$RELEASE_TAG^{commit}"); fi
+          run_id="$BUILD_RUN_ID"
+          if [ -z "$run_id" ]; then
+            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow android.yml --commit "$commit" --branch main --event push --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          fi
+          test -n "$run_id" || { echo 'No automatic main build exists for this commit.'; exit 1; }
+          python scripts/ledger-release.py wait-for-checks --run-id "$run_id" --commit "$commit"
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name android-arm64 --dir release
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name checked-source --dir release
           echo "RELEASE_COMMIT=$commit" >> "$GITHUB_ENV"
@@ -62,10 +80,9 @@ jobs:
           python - <<'PY'
           import hashlib, json, os, pathlib, zipfile
           metadata = json.loads(pathlib.Path('build-info.json').read_text())
-          assert metadata['commit'] == os.environ['RELEASE_COMMIT'], 'APK commit does not match the tag'
-          assert 'v' + metadata['version'] == os.environ['RELEASE_TAG'], 'Tag must match the app version'
-          assert metadata['package'] == 'net.ankio.ledger'
-          assert metadata['abi'] == 'arm64-v8a' and metadata['signed'] is True
+          import runpy
+          runpy.run_path('../scripts/ledger-release.py')['validate_metadata'](
+              metadata, os.environ['RELEASE_COMMIT'], os.environ['RELEASE_TAG'])
           apk, = pathlib.Path('.').glob('*.apk')
           assert apk.name == metadata['filename'] and not apk.name.endswith('-unsigned.apk')
           assert hashlib.sha256(apk.read_bytes()).hexdigest() == metadata['sha256']
@@ -79,6 +96,13 @@ jobs:
           grep -Fx "Signer #1 certificate SHA-256 digest: $EXPECTED_CERT_SHA256" verified-signature.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "${apk[0]}" > apk-badging.txt
           if grep -q 'application-debuggable' apk-badging.txt; then echo 'Refusing to publish a debuggable APK'; exit 1; fi
+          python - <<'PY'
+          import json, pathlib, re
+          metadata = json.loads(pathlib.Path('build-info.json').read_text())
+          badging = pathlib.Path('apk-badging.txt').read_text()
+          assert re.search(r"versionCode='(\d+)'", badging).group(1) == str(metadata['versionCode'])
+          assert re.search(r"versionName='([^']+)'", badging).group(1) == metadata['version']
+          PY
       - name: Publish downloadable APK and matching source
         run: |
           set -euo pipefail
@@ -93,4 +117,4 @@ jobs:
           - 同时提供 APK SHA-256 校验值、构建信息和对应的完整公开源码 ZIP。
           - 从本地调试版切换时，若提示签名不一致，请先在应用内导出备份，再卸载旧版、安装并恢复备份。
           EOF
-          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title "花有谱 ${RELEASE_TAG#v}" --notes-file "$RUNNER_TEMP/release-notes.md" release/*.apk release/*.sha256 release/Huayoupu-Ledger-source.zip release/build-info.json
+          python scripts/ledger-release.py publish --directory release --commit "$RELEASE_COMMIT" --tag "$RELEASE_TAG" --notes "$RUNNER_TEMP/release-notes.md"

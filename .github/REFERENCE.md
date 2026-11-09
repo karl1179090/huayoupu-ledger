@@ -158,7 +158,7 @@ Manifest 不声明 `READ_SMS` / `RECEIVE_SMS` / `POST_NOTIFICATIONS`，没有注
 
 ## 备份与账单迁移
 
-入口：**我的 → 账单与备份**。以下转账、独立钱包文件、完整备份及组件说明针对当前待发布开发分支；已发布 APK 的功能以其版本为准。
+入口：**我的 → 账单与备份**。以下说明对应 main 当前的转账、独立钱包文件、完整备份及组件功能；已发布 APK 的功能以其版本为准。
 
 | 格式 | 适合用途 | 包含内容 |
 | --- | --- | --- |
@@ -234,18 +234,21 @@ bash ./gradlew -PledgerPython=python3 -PledgerAbi=arm64-v8a :app:assembleRelease
 <details>
 <summary>GitHub 自动打包、签名与发布</summary>
 
-[Android 工作流](workflows/android.yml) 并行运行源码检查、浏览器回归、Android 模拟器回归和 ARM64 打包。打包不依赖模拟器任务，可在 Actions 的 `android-arm64` 产物中查看结果；只有官方仓库 main 的受信任构建会使用发布签名，PR 与其他分支只输出标明 `unsigned` 的编译产物。
+[Android 工作流](workflows/android.yml) 自动执行源码检查、浏览器回归、JVM 单测、Lint 及 ARM64 打包；模拟器回归由独立工作流手动触发。main push 的四项构建检查全部成功后，同一次运行的 publish 任务自动调用发布流程。只有 karl1179090/huayoupu-ledger 的 main 受信任构建使用发布签名，PR 与其他分支输出标明 unsigned 的编译产物。
 
 签名使用仓库 Actions Secrets 中的 `ANDROID_KEYSTORE_BASE64`（PKCS#12 文件的 Base64）与 `ANDROID_KEYSTORE_PASSWORD`，密钥别名为 `huiming-ledger`。私钥、密码和本地备份均留在仓库之外；fork 若要签名发布，需要配置自己的密钥、仓库条件和 Release 中的公开证书 SHA-256。不要为了新版本重新生成签名，否则旧版无法直接覆盖升级。
 
-[发布工作流](workflows/release.yml) 由 `v*` 标签触发，也可手动指定已有标签。标签必须为应用 `versionName` 加 `v`，并指向已推送 main 的同一个提交，例如：
+版本基准由 `gradle/release-version.json` 固定：从启用自动发布时的 main 提交开始，first-parent 距离 N 对应 versionCode=97+N、versionName=0.5.(91+N)-v6。同一提交重跑始终使用相同版本；功能分支内部的提交不单独增加 main 的距离。普通开发构建使用基准版本，发布构建通过 ledgerVersionCode / ledgerVersionName 属性传入计算值。后续升级主／次版本时需显式维护基准。
+
+[发布工作流](workflows/release.yml) 自动创建与 APK 版本一致、指向已验证提交的标签；也保留 v* 标签触发和手动补发已有标签，例如：
 
 ```sh
-git tag v0.5.85-v6
-git push origin v0.5.85-v6
+gh workflow run release.yml --repo karl1179090/huayoupu-ledger -f tag=v0.5.92-v6
 ```
 
-发布流程等待该提交的全部 Android 工作流任务成功，下载同一次构建的 APK 和检查过的源码，核对提交、版本、ARM64 ABI、校验值、APK 签名与固定证书，再上传至 GitHub Releases。任一检查失败均不发布；已存在的 Release 不会被覆盖。Release 页面可直接下载，无需进入 Actions 查找构建产物。
+发布流程仅等待该提交 source、browser、verify、ARM64 APK 的最新执行成功，不等待包含发布自身的整轮运行。它下载同一次 main push 的 APK 与检查过的源码，核对提交、版本名与版本码、ARM64 ABI、校验值、非调试标志和固定签名证书；先上传草稿并读回验证字节，再公开 Release。已发布的同提交跳过且不覆盖资产；未完成草稿可重试，较旧任务不会把 Latest 回退。发布任务串行执行，快速连续 push 时 GitHub 可合并等待中的发布任务，保留最新待发布任务。
+
+Release 同页提供 APK、两份 SHA-256 校验文件、源码 ZIP 及 build-info.json。从源码 ZIP 复现版本时使用 build-info.json 中的版本参数，例如 `bash ./gradlew -PledgerPython=python3 -PledgerAbi=arm64-v8a -PledgerVersionCode=98 -PledgerVersionName=0.5.92-v6 :app:assembleRelease`；本地输出仍需签名后安装。
 
 </details>
 
