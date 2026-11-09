@@ -470,6 +470,126 @@ class ExpenseWidgetAcceptanceTest {
         } finally {if(original=="null")shell("settings delete system font_scale") else shell("settings put system font_scale $original")}
     }
 
+    @Test fun monthlyAmountsAreCloserToTheirOwnDateThanTheFollowingWeek()=withWidget {bound->
+        data class Case(val name:String,val day:String,val width:Int,val height:Int,val font:Float,
+            val todayCents:Long=12345L,val screenshot:Boolean=false)
+        val cases=listOf(
+            Case("four-weeks","2021-02-10",350,334,1f),
+            Case("five-weeks-tall","2026-06-10",350,440,1f),
+            Case("compact-boundary","2026-11-10",350,314,1f),
+            Case("regular-boundary","2026-11-10",350,315,1f),
+            Case("six-weeks-tall","2026-11-10",350,440,1.3f,screenshot=true),
+            Case("today-zero","2026-11-10",280,280,1.3f,todayCents=0L),
+            Case("six-weeks-minimum","2026-11-10",280,280,1.5f,screenshot=true),
+            Case("long-amount","2026-11-10",350,334,1.5f,todayCents=1234567L,screenshot=true))
+        val zone=ZoneId.of("Asia/Shanghai")
+        val original=shell("settings get system font_scale").trim()
+        val density=app.resources.displayMetrics.density
+        val report=org.json.JSONObject().put("api",android.os.Build.VERSION.SDK_INT)
+            .put("densityDpi",app.resources.displayMetrics.densityDpi)
+            .put("evidenceKind","Android production RemoteViews.apply; not a Launcher screenshot")
+        val observations=org.json.JSONArray();report.put("cases",observations)
+        fun rect(value:android.graphics.Rect)=org.json.JSONArray(listOf(value.left,value.top,value.right,value.bottom).map {it/density})
+        fun ink(root:android.view.ViewGroup,text:TextView):android.graphics.Rect {
+            val view=bounds(root,text);val layout=requireNotNull(text.layout)
+            val result=android.graphics.Rect()
+            for(line in 0 until layout.lineCount) {
+                val start=layout.getLineStart(line);val end=layout.getLineEnd(line)
+                if(start==end)continue
+                val paint=android.text.TextPaint(text.paint)
+                (text.text as? android.text.Spanned)?.getSpans(start,end,android.text.style.MetricAffectingSpan::class.java)
+                    ?.forEach {it.updateMeasureState(paint)}
+                val glyphs=android.graphics.Rect();paint.getTextBounds(text.text.toString(),start,end,glyphs)
+                val left=view.left+text.totalPaddingLeft-text.scrollX
+                val baseline=view.top+text.totalPaddingTop-text.scrollY+layout.getLineBaseline(line)
+                result.union(android.graphics.Rect(left+kotlin.math.floor(layout.getLineLeft(line).toDouble()).toInt(),
+                    baseline+glyphs.top,left+kotlin.math.ceil(layout.getLineRight(line).toDouble()).toInt(),baseline+glyphs.bottom))
+                assertEquals("amount must not be ellipsized",0,layout.getEllipsisCount(line))
+                assertTrue("text exceeds its available line width: ${text.text}",
+                    layout.getLineRight(line)-layout.getLineLeft(line)<=text.width-text.totalPaddingLeft-text.totalPaddingRight+1)
+            }
+            assertTrue("text ink outside TextView: ${text.text}: $result / $view",result.isEmpty || view.contains(result))
+            return result
+        }
+        try {
+            for(case in cases) {
+                shell("settings put system font_scale ${case.font}")
+                await("spacing font ${case.font}") {app.resources.configuration.fontScale==case.font}
+                val today=java.time.LocalDate.parse(case.day)
+                val now=today.atTime(12,0).atZone(zone).toInstant()
+                val range=ExpensePeriodBuckets.create(ExpensePeriod.MONTH,now,zone)
+                val facts=(1..today.lengthOfMonth()).filter {it%5!=0 || it==today.dayOfMonth}.map {day->
+                    val date=today.withDayOfMonth(day)
+                    LedgerStatistics.Day(day,Direction.EXPENSE,if(date==today)case.todayCents else day*137L,date.toString())
+                }
+                val amounts=MutableList(range.buckets.size){0L}
+                facts.forEach {fact->
+                    val at=java.time.LocalDate.parse(fact.date).atTime(12,0).atZone(zone).toInstant().toEpochMilli()
+                    val bucket=range.bucketIndex(at);amounts[bucket]=Math.addExact(amounts[bucket],fact.amountCents)
+                }
+                val snapshot=LedgerStatistics.Snapshot(range,range.startMillis,range.endMillis,zone.id,
+                    LedgerStatistics.Totals(expense=facts.sumOf {it.amountCents},expenseCount=facts.count {it.amountCents>0}.toLong()),
+                    amounts,emptyList(),facts)
+                val calendar=ExpenseWidgetCalendar.create(snapshot)
+                val observation=org.json.JSONObject().put("name",case.name).put("month",today.toString().take(7))
+                    .put("optionsDp",org.json.JSONArray(listOf(case.width,case.height))).put("fontScale",case.font)
+                val cells=org.json.JSONArray();observation.put("cells",cells);observations.put(observation)
+                rendered(bound,snapshot,now,case.width,case.height) {root->
+                    val body=bounds(root,root.findViewById(R.id.widget_chart_area))
+                    observation.put("rootDp",org.json.JSONArray(listOf(root.width/density,root.height/density))).put("bodyDp",rect(body))
+                    if(case.screenshot)saveHost(root,"widget-spacing-${case.name}-${app.resources.displayMetrics.densityDpi}.png")
+                    try {
+                        fun view(name:String,index:Int)=root.findViewById<android.view.View>(app.resources.getIdentifier("${name}_$index","id",app.packageName))
+                        fun date(index:Int)=listOf(view("widget_day_date",index),view("widget_day_today",index))
+                            .single {it.visibility==android.view.View.VISIBLE} as TextView
+                        for((index,cell) in calendar.cells.withIndex()) {
+                            val holder=view("widget_day_cell",index)
+                            if(cell.date==null) {assertEquals(android.view.View.INVISIBLE,holder.visibility);continue}
+                            val day=requireNotNull(cell.date);val isToday=day==today
+                            val label=date(index);val money=view("widget_day_amount",index) as TextView
+                            val cellBounds=bounds(root,holder)
+                            val dateBounds=ink(root,label).apply {if(isToday)union(bounds(root,label))}
+                            val amountBounds=ink(root,money).apply {if(isToday)union(bounds(root,money))}
+                            val row=org.json.JSONObject().put("date",day.toString()).put("today",isToday)
+                                .put("cellDp",rect(cellBounds)).put("dateDp",rect(dateBounds)).put("amountDp",rect(amountBounds))
+                                .put("text",money.text.toString()).put("cents",cell.expenseCents.toString())
+                            cells.put(row)
+                            assertEquals(day.dayOfMonth.toString(),label.text.toString())
+                            assertTrue("day outside calendar body: $day",body.contains(cellBounds))
+                            assertTrue("date outside its day: $day",cellBounds.contains(dateBounds))
+                            assertTrue("date description changed: $day",holder.contentDescription.toString().contains(day.toString()))
+                            if(money.text.isEmpty()) {assertEquals(0L,cell.expenseCents);continue}
+                            assertEquals(cell.expenseCents,displayedCents(money.text.toString()))
+                            assertTrue("amount outside its day: $day",cellBounds.contains(amountBounds))
+                            val ownGap=amountBounds.top-dateBounds.bottom
+                            row.put("ownGapDp",ownGap/density)
+                            assertTrue("date/amount overlap: ${case.name} $day $dateBounds / $amountBounds",ownGap>=0)
+                            val next=index+7
+                            if(next<calendar.cells.size && calendar.cells[next].date!=null) {
+                                val nextLabel=date(next)
+                                val nextDate=ink(root,nextLabel).apply {if(calendar.cells[next].date==today)union(bounds(root,nextLabel))}
+                                val nextGap=nextDate.top-amountBounds.bottom
+                                row.put("nextDateDp",rect(nextDate)).put("nextGapDp",nextGap/density)
+                                assertTrue("amount must group with its own date: ${case.name} $day own=${ownGap/density}dp next=${nextGap/density}dp",
+                                    ownGap<nextGap)
+                            }
+                        }
+                        observation.put("passed",true)
+                    } catch(failure:Throwable) {
+                        observation.put("passed",false).put("failure",failure.toString())
+                        saveHost(root,"widget-spacing-failed-${case.name}-${app.resources.displayMetrics.densityDpi}.png")
+                        throw failure
+                    }
+                }
+            }
+        } finally {
+            val file=java.io.File(requireNotNull(app.getExternalFilesDir(null)),"widget-spacing-geometry-${app.resources.displayMetrics.densityDpi}.json")
+            file.writeText(report.toString(2))
+            shell("cp ${file.absolutePath} /data/local/tmp/${file.name}");file.delete()
+            if(original=="null")shell("settings delete system font_scale") else shell("settings put system font_scale $original")
+        }
+    }
+
     @Test fun headerRefreshHitAreaDoesNotCoverAmountInk()=withWidget {bound->
         val now=Instant.parse("2026-11-06T04:00:00Z");val range=ExpensePeriodBuckets.create(ExpensePeriod.WEEK,now,ZoneId.of("Asia/Shanghai"))
         val amounts=List(7){if(it==4)12345L else 0L}
