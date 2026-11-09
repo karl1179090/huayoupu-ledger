@@ -188,4 +188,15 @@ class BankReceiptParserTest {
         assertEquals("BANK_CARD", bill.paymentMethod!!.medium)
         assertTrue(bill.reliable)
     }
+    @Test fun inlineAccountProofDoesNotInventUnsupportedTypesOrHideConflictingOrMalformedTails() {
+        fun bill(type:String,vararg extra:String)=LocalOcrBillParser.parse((listOf("招商银行微银行","交易成功提醒",
+            "交易类型：$type","交易金额：23.71元")+extra).map(::LocalOcrLine),0,0,now,origin="image")!!
+        val unknown=bill("非适配交易（尾号0007）")
+        assertNull(unknown.direction);assertFalse(unknown.reliable);assertEquals("0007",unknown.paymentMethod!!.cardLast4)
+        val conflicting=bill("网上快捷支付（尾号0007）","交易卡号：尾号0008")
+        assertFalse(conflicting.reliable);assertTrue(conflicting.paymentMethod!!.ambiguous)
+        val malformed=bill("网上快捷支付（尾号OOO7）")
+        assertNull(malformed.direction);assertFalse(malformed.reliable);assertTrue(malformed.paymentMethod!!.ambiguous)
+    }
+
 }

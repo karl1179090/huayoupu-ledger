@@ -38,4 +38,25 @@ class TransactionPageParserTest {
         assertFalse(parsed.single().rawText!!.contains("交易失败"))
     }
 
+    @Test fun bankPortalHeadersAndInlineTailsRemainInTheirOwnTransactionBlocks() {
+        fun card(tail:String,amount:String,date:String,y:Int)=listOf(
+            LocalOcrLine("招商银行微银行",30,y,550,y+30),LocalOcrLine("交易成功提醒",30,y+50,450,y+80),
+            LocalOcrLine("交易时间：",30,y+100,180,y+130),LocalOcrLine(date,250,y+100,650,y+130),
+            LocalOcrLine("交易类型：",30,y+150,180,y+180),LocalOcrLine("网上快捷支付（尾号$tail）",250,y+150,750,y+180),
+            LocalOcrLine("交易金额：",30,y+200,180,y+230),LocalOcrLine("人民币$amount",250,y+200,650,y+230),
+            LocalOcrLine("账户余额：",30,y+250,180,y+280),LocalOcrLine("88,888.88元",250,y+250,650,y+280))
+        val lines=card("0007","23.71","11月01日 09:12",100)+LocalOcrLine("昨天20:30",350,480,650,510)+
+            card("0008","68.42","11月02日 17:24",600)
+        val parsed=TransactionPageParser.parse(lines,1080,1600,time,origin="image")
+        assertEquals(listOf(Direction.EXPENSE,Direction.EXPENSE),parsed.map { it.bill.direction })
+        assertEquals(listOf(2371L,6842L),parsed.map { it.bill.amountCents })
+        assertEquals(listOf("0007","0008"),parsed.map { it.bill.paymentMethod!!.cardLast4 })
+        assertTrue(parsed.all { it.bill.paymentMethod!!.bankCode=="cmb" && it.bill.reliable })
+        assertTrue(parsed.all { it.rawText!!.startsWith("招商银行微银行") && it.bill.merchant.isEmpty() })
+        assertEquals(listOf("2026-11-01","2026-11-02"),parsed.map { it.bill.receipt!!.time!!.localDate })
+        assertTrue(parsed.all { !it.bill.receipt!!.time!!.rawText.contains("20:30") })
+        assertTrue(TransactionPageParser.parse(lines,1080,1600,time,policy=RecognitionPolicy.AUTOMATIC_PAYMENT,
+            origin="payment_auto:com.tencent.mm").isEmpty())
+    }
+
 }

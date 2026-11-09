@@ -7,6 +7,8 @@ object BankReceiptParser {
     private val accountLabel = Regex("^(?:交易卡号|交易账号|交易账户|卡号|账号|账户(?!余额|变动|信息)|卡尾号|尾号)[：:]?")
     private val amountLabel = Regex("^(?:交易金额|消费金额|支出金额|收入金额|发生金额|金额)[：:]?")
     private val tail = Regex("(?:尾号|尾数|[＊*]{2,})[：: ]*([0-9]{4})(?![0-9])|(?<![0-9])([0-9]{4})(?![0-9])")
+    private val inlineTypeTail = Regex("^(.+?)\\((?:尾号|尾数)([0-9]{4})\\)$")
+    private val inlineTailHint = Regex("尾号|尾数")
     private val expenseTypes = setOf("网上快捷支付", "快捷支付", "消费", "刷卡消费", "银联消费")
     private val incomeTypes = setOf("工资入账", "工资收入", "利息入账")
 
@@ -52,8 +54,10 @@ object BankReceiptParser {
         val amounts=parsedAmounts.filterNotNull().filter { it in 1..Money.MAX_CENTS }.distinct()
         if (amounts.isEmpty()) return null
         val amount=amounts.singleOrNull()?.takeIf { parsedAmounts.all { cents -> cents!=null && cents in 1..Money.MAX_CENTS } }
-        val types = values(typeLabel)
-        val direction = when (types.singleOrNull()) {
+        val typeFields=fields(typeLabel)
+        val types=typeFields.map { normalize(it.value).filterNot(Char::isWhitespace) }
+        val typeNames=types.map { inlineTypeTail.matchEntire(it)?.groupValues?.get(1) ?: it }.distinct()
+        val direction = when (typeNames.singleOrNull()) {
             in expenseTypes -> Direction.EXPENSE
             in incomeTypes -> Direction.INCOME
             else -> null
@@ -64,7 +68,8 @@ object BankReceiptParser {
         val methods=(if(direction==null)listOf(Direction.EXPENSE,Direction.INCOME) else listOf(direction)).mapNotNull {
             PaymentMethodParser.parse(scoped,it,origin)?.takeIf { method -> method.medium!="UNKNOWN" || method.ambiguous }
         }.distinctBy { listOf(it.medium,it.bankCode,it.cardLast4,it.ambiguous) }
-        val accounts=values(accountLabel)+methods.map { normalize(it.rawValue).filterNot(Char::isWhitespace) }.filter(String::isNotBlank)
+        val typeAccounts=types.filter { inlineTailHint.containsMatchIn(it) }
+        val accounts=values(accountLabel)+typeAccounts+methods.map { normalize(it.rawValue).filterNot(Char::isWhitespace) }.filter(String::isNotBlank)
         val banks=(issuerHeaders.map { it.first } + fields(Regex("^(?:银行作者|凭证来源|出具机构|出具方)[：:]?")).flatMap { BankCodes.find(it.value) } +
             values(accountLabel).flatMap(BankCodes::find) + methods.mapNotNull { it.bankCode }).toSet()
         val tails=(accounts.flatMap { tail.findAll(it).map { match -> match.groupValues[1].ifBlank { match.groupValues[2] } }.toList() } +
@@ -72,14 +77,18 @@ object BankReceiptParser {
         val malformedTail=accounts.any { value -> Regex("尾号|尾数|[＊*]{2,}|[0-9]").containsMatchIn(value) && !tail.containsMatchIn(value) }
         val unsupportedOrConflicting=methods.any { it.ambiguous || it.medium!="BANK_CARD" } ||
             issuerHeaders.any { Regex("信用卡|贷记卡").containsMatchIn(it.second.text) }
-        val ambiguous=malformedTail || unsupportedOrConflicting || banks.size!=1 || tails.size>1 || scoped.count { heading.containsMatchIn(it.text) }>1
+        val malformedTypeTail=typeAccounts.any { inlineTypeTail.matchEntire(it)==null }
+        val ambiguous=malformedTail || malformedTypeTail || unsupportedOrConflicting || banks.size!=1 || tails.size>1 || scoped.count { heading.containsMatchIn(it.text) }>1
         val reasons = buildList {
             if (amount == null) add("交易金额不明确")
             if (direction == null) add("请确认银行交易收支方向")
             if (ambiguous) add("银行账户证据冲突，请确认实际账户")
         }
+        val accountSource=fields(accountLabel).firstOrNull() ?: typeFields.firstOrNull { inlineTailHint.containsMatchIn(it.value) }
+        val accountSourceLabel=accountSource?.rawText?.lineSequence()?.first()?.let { line ->
+            (accountLabel.find(normalize(line)) ?: typeLabel.find(normalize(line)))?.value?.trim(':','：') }.orEmpty()
         val evidence = PaymentMethodEvidence("BANK_CARD", when(direction) { Direction.INCOME -> "CREDIT"; Direction.EXPENSE -> "DEBIT"; else -> "UNKNOWN" },
-            banks.singleOrNull(), tails.singleOrNull(), rawLabel=methods.firstOrNull()?.rawLabel ?: fields(accountLabel).firstOrNull()?.rawText?.lineSequence()?.first()?.let { accountLabel.find(normalize(it))?.value?.trim(':','：') }.orEmpty(), rawValue=accounts.distinct().joinToString(" / ").take(160),
+            banks.singleOrNull(), tails.singleOrNull(), rawLabel=methods.firstOrNull()?.rawLabel ?: accountSourceLabel, rawValue=accounts.distinct().joinToString(" / ").take(160),
             ambiguous=ambiguous)
         val bankCode=banks.singleOrNull()
         val issuer=issuerHeaders.firstOrNull { it.first==bankCode }?.second
@@ -87,7 +96,7 @@ object BankReceiptParser {
         val receipt = base.copy(
             receiptIssuer=issuer?.let { line -> BankCodes.entries.firstOrNull { it.code==bankCode }?.label?.let { ReceiptField(it,line.text.take(2048)) } }
                 ?: base.receiptIssuer ?: unknownIssuer?.let { ReceiptField(it.text.trim(),it.text) },
-            bank=BankReceiptEvidence(bankCode, tails.singleOrNull(), fields(typeLabel).singleOrNull(), direction, ambiguous))
+            bank=BankReceiptEvidence(bankCode, tails.singleOrNull(), typeFields.singleOrNull(), direction, ambiguous))
         val time=TransactionTimeResolver.resolve(scoped,timeContext)
         return ParsedBill(amount, direction, merchant, "其他", time.accountingAt,
             LocalOcrBillParser.transactionId(scoped), reasons.isEmpty(), reasons.joinToString("；"),
