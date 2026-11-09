@@ -219,7 +219,7 @@ object ExpenseWidgetUpdater {
                 } else {
                     val body=RemoteViews(context.packageName,R.layout.widget_calendar)
                     val today=now.atZone(zone).toLocalDate()
-                    val compactHeight=height<315
+                    val compactHeight=height<320
                     val dateFont=if(compactHeight)9.5f else 13f
                     val amountFont=if(compactHeight)6.5f else 8.5f
                     calendar.cells.forEachIndexed {index,cell->
