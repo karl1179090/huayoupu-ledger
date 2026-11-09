@@ -128,6 +128,87 @@ class ShakeWhitelistCaptureTest {
         assertEquals(2,(taskIds()-previousTasks).size)
     }
 
+    @Test fun publicUnknownLayoutMeasuresRealAcquisitionAndOneBundledOcrAttempt() = observePublicAttempt(false)
+
+    @Test fun publicSyntheticQualifiedLayoutMeasuresRealAcquisitionWithoutOcr() = observePublicAttempt(true)
+
+    /** Two constructed emulator routes, not a population sample or real payment benchmark. */
+    private fun observePublicAttempt(syntheticNode:Boolean) {
+        val beforeRecords=app.store.all().map { it.id }.toSet()
+        val completed=AtomicInteger()
+        if(syntheticNode)service.processorFactory=nodeFactory()
+        else {
+            val local=net.ankio.ledger.ocr.LocalRecognitionClient(app)
+            val backend=object:net.ankio.ledger.ocr.RecognitionBackend {
+                override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                    livePaymentAt:Long?,policy:net.ankio.ledger.core.RecognitionPolicy,origin:String):net.ankio.ledger.ocr.RecognitionResult = error("frozen context required")
+                override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
+                    livePaymentAt:Long?,policy:net.ankio.ledger.core.RecognitionPolicy,origin:String,
+                    recognitionTime:()->net.ankio.ledger.core.RecognitionTimeContext):net.ankio.ledger.ocr.RecognitionResult {
+                    calls.incrementAndGet()
+                    return local.recognizePrepared(image,onPrepared=onPrepared,stillAllowed=stillAllowed,
+                        livePaymentAt=livePaymentAt,policy=policy,origin=origin,recognitionTime=recognitionTime).also {
+                        if(it.phaseTimingsMs.containsKey("ocr"))completed.incrementAndGet()
+                    }
+                }
+            }
+            service.processorFactory={CaptureProcessor(app,OcrClient(app,backend))}
+        }
+        startFixture("safe")
+        val requests=service.screenshotRequests
+        val started=SystemClock.elapsedRealtime()
+        var task:Long?=null
+        try {
+            service.captureOnShake()
+            val deadline=started+30_000
+            while(SystemClock.elapsedRealtime()<deadline) {
+                task=(taskIds()-previousTasks).singleOrNull()
+                if(task?.let { app.tasks.status(it) !in setOf("CAPTURING","QUEUED","RECOGNIZING") }==true && app.captureQueue.size()==0)break
+                SystemClock.sleep(30)
+            }
+            val terminal=SystemClock.elapsedRealtime()
+            val id=requireNotNull(task) { "Public trigger did not create a task: ${app.channels.lastStatus()}" }
+            val evidence=app.tasks.recognitionEvidence(id)
+            val timings=evidence?.optJSONObject("phaseTimingsMs") ?: JSONObject()
+            val phases=JSONObject()
+            for(phase in listOf("nodeRead","screenshot","route","ocr","parse","save")) {
+                phases.put(phase,JSONObject().put("state",when {
+                    timings.has(phase)->"measured"
+                    phase=="ocr" && syntheticNode->"not_run"
+                    else->"missing"
+                }).put("millis",if(timings.has(phase))timings.getLong(phase) else JSONObject.NULL))
+            }
+            val snapshot=app.tasks.nodeSnapshot(id)
+            val output=java.io.File(app.filesDir,"t15-acceptance").apply { mkdirs() }
+            val row=JSONObject().put("attemptId",UUID.randomUUID().toString()).put("trigger","ScreenCaptureService.captureOnShake")
+                .put("serial",InstrumentationRegistry.getArguments().getString("ledgerAcceptanceSerial") ?: JSONObject.NULL)
+                .put("api",Build.VERSION.SDK_INT).put("model",Build.MODEL).put("systemFingerprint",Build.FINGERPRINT)
+                .put("fixturePackage",fixturePackage).put("fixtureMode","safe")
+                .put("registry",if(syntheticNode)"test_only_synthetic" else "production_unknown_layout")
+                .put("parseScope",if(syntheticNode)"synthetic_adapter" else "production_transaction_parser")
+                .put("operationKey",app.tasks.operationKey(id)).put("taskId",id).put("status",app.tasks.status(id))
+                .put("backendEntered",calls.get()).put("ocrExecutedConfirmed",completed.get())
+                .put("triggerElapsedMs",started).put("persistedTerminalObservedElapsedMs",terminal)
+                .put("intervalMeaning","public trigger to persisted terminal observed; readiness excluded; model warmth uncontrolled")
+                .put("screenshotRequestDelta",service.screenshotRequests-requests).put("phases",phases)
+                .put("taskEvidence",evidence).put("actualNodeReadStartedMs",snapshot?.readStartedMs)
+                .put("actualNodeReadCompletedMs",snapshot?.readCompletedMs)
+                .put("recordCount",app.store.all().count { it.id !in beforeRecords })
+            java.io.File(output,"attempts.jsonl").appendText(row.toString()+"\n")
+            assertEquals(row.toString(),if(syntheticNode)"NODE" else "OCR",evidence?.getString("route"))
+            assertEquals(1,service.screenshotRequests-requests)
+            assertNotNull(snapshot);assertEquals(fixturePackage,snapshot!!.packageName)
+            assertTrue(snapshot.readCompletedMs>=snapshot.readStartedMs)
+            for(phase in listOf("nodeRead","screenshot","route","parse","save"))assertTrue("$phase absent: $row",timings.has(phase))
+            assertEquals(if(syntheticNode)0 else 1,calls.get())
+            assertEquals(if(syntheticNode)0 else 1,completed.get())
+            if(syntheticNode)assertFalse(timings.has("ocr")) else assertTrue(timings.has("ocr"))
+            assertTrue(row.toString(),app.tasks.status(id) in setOf("SUCCEEDED","REVIEW","NO_BILL"))
+        } finally {
+            app.store.all().filter { it.id !in beforeRecords }.forEach { app.store.delete(it.id) }
+        }
+    }
+
     @Test fun ordinaryScreenshotFailurePostsReliableNodesWithoutOcrAndKeepsMissingImageEvidence() {
         startFixture("safe")
         service.processorFactory=nodeFactory()
