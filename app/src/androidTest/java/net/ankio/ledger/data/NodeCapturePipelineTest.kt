@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import net.ankio.ledger.LedgerApp
+import net.ankio.ledger.WebUiProbe
 import net.ankio.ledger.capture.CaptureProcessor
 import net.ankio.ledger.core.*
 import net.ankio.ledger.ocr.*
@@ -282,6 +283,146 @@ class NodeCapturePipelineTest {
             assertEquals(0,calls);assertEquals("FAILED",app.tasks.status(task))
             assertEquals(records,app.store.all());assertEquals(accounts,app.store.accounts())
         } finally { app.tasks.delete(task) }
+    }
+
+    /** Real task/receipt history through the packaged WebView, not a browser bridge fixture. */
+    @Test fun missingNodeTaskAndBillViewsKeepSupplementalImagesAndDoNotChangeFunds()=runBlocking<Unit> {
+        app.taskRecovery.await()
+        val settings=app.store.walletSettings()
+        val cash=app.store.saveAccount(LedgerAccount(name="合成缺图界面现金",amountCents=30000,kind="cash"))
+        val accounts=mutableListOf(cash);val tasks=mutableListOf<Long>();val records=mutableSetOf<Long>()
+        app.store.setDefaultWallet(cash.uid);app.store.setAppWallet(PaymentApps.WECHAT,null)
+        val bitmap=android.graphics.Bitmap.createBitmap(100,200,android.graphics.Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.rgb(50,140,110))
+        }
+        val image=try { java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }.toByteArray() } finally { bitmap.recycle() }
+        val processor=CaptureProcessor(app,OcrClient(app,RecognitionBackend { _,_,_,_,_,_->error("node UI acceptance must not invoke OCR") }),{time})
+        fun task()=app.tasks.create(Source.OCR,"shake:${PaymentApps.WECHAT}").also(tasks::add)
+        fun readOnlyView(block:()->Unit) {
+            val balances=app.store.accounts().associate { it.uid to it.amountCents }
+            val movements=app.store.walletSnapshot().movements
+            block()
+            assertEquals("Viewing evidence must not change balances",balances,app.store.accounts().associate { it.uid to it.amountCents })
+            assertEquals("Viewing evidence must not create wallet movements",movements,app.store.walletSnapshot().movements)
+        }
+        fun screenshot(name:String,web:WebUiProbe) {
+            val captured=androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+            try {
+                val file=java.io.File(app.cacheDir,"t13-native-ui/$name.png");file.parentFile!!.mkdirs()
+                file.outputStream().use { assertTrue(captured.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it)) }
+                java.io.File(file.parentFile,"$name.json").writeText(web.text("JSON.stringify({snapshot:JSON.parse(LedgerNative.snapshot()),record:draft.id?JSON.parse(LedgerNative.recordDetails(draft.id)).record:null,origin:location.origin,csp:document.querySelector('meta[http-equiv=\"Content-Security-Policy\"]')?.content,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},visibleEvidence:document.querySelector('#receipt-provenance')?.innerText||''})"))
+            } finally { captured.recycle() }
+        }
+        try {
+            androidx.test.core.app.ActivityScenario.launch(net.ankio.ledger.ui.MainActivity::class.java).use { scenario ->
+                val web=WebUiProbe(scenario);web.ready()
+                assertEquals("https://appassets.androidplatform.net",web.text("location.origin"))
+                fun open(script:String) {
+                    web.run("if(document.querySelector('#sheet').open)closeSheet();cancelEditor(true);refresh();$script")
+                    web.await("recordPanelOpen && !document.querySelector('#record-panel')._morph")
+                }
+                fun assertMissing(state:String) {
+                    assertEquals(state,web.text("draft.recognitionEvidence.screenshot.state"))
+                    assertEquals("true",web.value("document.querySelector('#receipt-provenance').innerText.includes('页面节点') && document.querySelector('#receipt-provenance').innerText.includes('截图')"))
+                    assertEquals("0",web.value("document.querySelectorAll('#capture-gallery .history-image:not(:disabled)').length"))
+                    web.run("document.querySelector('.scanner').click()")
+                    assertEquals("false",web.value("document.querySelector('#sheet').open && document.querySelector('#sheet').classList.contains('capture-viewer')"))
+                    web.await("!document.querySelector('.toast')?.classList.contains('show')")
+                }
+                val missing=mutableListOf<Pair<Long,LedgerRecord>>()
+                for(reason in listOf(net.ankio.ledger.capture.ScreenshotFailureReason.UNAVAILABLE,net.ankio.ledger.capture.ScreenshotFailureReason.TIMEOUT)) {
+                    if(reason==net.ankio.ledger.capture.ScreenshotFailureReason.TIMEOUT) {
+                        val wechat=app.store.saveAccount(LedgerAccount(name="合成缺图界面零钱",amountCents=30000,kind="wechat")).also(accounts::add)
+                        app.store.setAppWallet(PaymentApps.WECHAT,wechat.uid)
+                    }
+                    val id=task();val snapshot=QualifiedWechatNodeFixture.page(amount=if(reason==net.ankio.ledger.capture.ScreenshotFailureReason.UNAVAILABLE)"12.34" else "23.45",
+                        merchant="合成缺图界面${reason.name}-${UUID.randomUUID()}")
+                    assertTrue(app.tasks.queuedWithoutScreenshot(id,snapshot,processor.prepareNodeFallback(id,snapshot,PaymentApps.WECHAT)!!,reason))
+                    // Keep this genuine in-flight task out of the application queue while its UI is inspected.
+                    app.tasks.markNodeRecognizing(id)
+                    readOnlyView {
+                        open("openTask($id)");web.await("draft.recognitionTaskId===$id")
+                        assertMissing(reason.name);screenshot("task-${reason.name.lowercase()}",web)
+                    }
+                    val saved=(processor.processWithoutScreenshot(Source.OCR,PaymentApps.WECHAT,id) { true } as IngestResult.Saved).record
+                    records+=saved.id;missing+=id to saved
+                    assertEquals(if(reason==net.ankio.ledger.capture.ScreenshotFailureReason.UNAVAILABLE)RecordState.REVIEW else RecordState.POSTED,saved.state)
+                    assertEquals(listOf(false),app.store.captureHistory(saved.id).map { it.hasScreenshot })
+                    readOnlyView {
+                        open("openTask($id)");web.await("draft.id===${saved.id} && !draft.recognitionTaskId")
+                        assertMissing(reason.name)
+                        assertEquals("1",web.value("draft.history.length"))
+                        assertEquals("false",web.value("draft.hasScreenshot || draft.history[0].hasScreenshot"))
+                        assertEquals(if(saved.state==RecordState.REVIEW)"待确认" else "已入账",web.text("document.querySelector('#import .pending').textContent"))
+                        screenshot("bill-${reason.name.lowercase()}",web)
+                    }
+                }
+
+                // The original missing capture remains missing; a later real image belongs to history item 2.
+                val (supplementTask,original)=missing.last()
+                val supplement=app.store.ingest(original.capture.copy(receivedAt=time.recognitionAt+1000),original.bill,screenshot=image) as IngestResult.Saved
+                assertEquals(original.id,supplement.record.id)
+                assertEquals(listOf(false,true),app.store.captureHistory(original.id).map { it.hasScreenshot })
+                assertNull(app.store.screenshot(original.id))
+                readOnlyView {
+                    open("openTask($supplementTask)");web.await("draft.id===${original.id} && draft.history.length===2")
+                    assertEquals("TIMEOUT",web.text("draft.recognitionEvidence.screenshot.state"))
+                    assertEquals("false",web.value("draft.hasScreenshot"))
+                    web.run("document.querySelector('[data-history-sequence=\"1\"]').click()")
+                    assertEquals("false",web.value("document.querySelector('#sheet').open && document.querySelector('#sheet').classList.contains('capture-viewer')"))
+                    web.await("!document.querySelector('.toast')?.classList.contains('show')")
+                    web.await("document.querySelector('[data-history-sequence=\"2\"] img')?.naturalWidth>0")
+                    web.run("document.querySelector('[data-history-sequence=\"2\"]').click()")
+                    web.await("document.querySelector('#sheet').open && document.querySelector('#sheet-title').textContent.includes('补充截图') && document.querySelector('#sheet .capture-full')?.naturalWidth>0 && document.querySelector('#sheet .capture-full').src.includes('/record-history/${original.id}/2.jpg')")
+                    screenshot("supplement-retained-image",web)
+                }
+
+                val availableTask=task();val availableSnapshot=QualifiedWechatNodeFixture.page(amount="34.56",merchant="合成有图界面-${UUID.randomUUID()}")
+                assertTrue(app.tasks.queued(availableTask,image,availableSnapshot))
+                val available=(processor.processPrepared(image,Source.OCR,PaymentApps.WECHAT,availableTask) { true } as IngestResult.Saved).record
+                records+=available.id
+                val legacy=(app.store.ingest(Capture(Source.IMAGE,"image","合成历史无识别元数据",time.recognitionAt),
+                    ParsedBill(99,Direction.EXPENSE,"合成历史界面","其他",time.recognitionAt,"SYNTHETIC-LEGACY-${UUID.randomUUID()}",true,"",true),screenshot=image) as IngestResult.Saved).record
+                records+=legacy.id
+                for((record,isLegacy) in listOf(available to false,legacy to true))readOnlyView {
+                    open("openRecord(${record.id})");web.await("draft.id===${record.id}")
+                    assertEquals("true",web.value("draft.hasScreenshot && draft.history[0].hasScreenshot"))
+                    assertEquals("0",web.value("document.querySelectorAll('#receipt-provenance .receipt-missing-screenshot-badge').length"))
+                    if(isLegacy)assertEquals("true",web.value("draft.recognitionEvidence==null"))
+                    else assertEquals("AVAILABLE",web.text("draft.recognitionEvidence.screenshot.state"))
+                    web.await("document.querySelector('[data-history-sequence=\"1\"] img')?.naturalWidth>0")
+                    web.run("document.querySelector('[data-history-sequence=\"1\"]').click()")
+                    web.await("document.querySelector('#sheet').open && document.querySelector('#sheet .capture-full')?.naturalWidth>0")
+                    screenshot(if(isLegacy)"legacy-retained-image" else "available-node-retained-image",web)
+                }
+
+                // Capacity eviction removes pixels, while each old history item's text and time remain readable.
+                app.screenshots.cleanup(maxBytes=0);app.changed()
+                for((record,isLegacy) in listOf(available to false,legacy to true)) {
+                    val entry=app.store.captureHistory(record.id).single()
+                    assertFalse(entry.hasScreenshot);assertNull(app.store.screenshot(record.id))
+                    readOnlyView {
+                        open("openRecord(${record.id})");web.await("draft.id===${record.id} && draft.history.length===1")
+                        assertEquals("false",web.value("draft.hasScreenshot || draft.history[0].hasScreenshot"))
+                        if(isLegacy)assertEquals("true",web.value("draft.recognitionEvidence==null"))
+                        else assertEquals("AVAILABLE",web.text("draft.recognitionEvidence.screenshot.state"))
+                        web.run("document.querySelector('[data-history-sequence=\"1\"]').click()")
+                        web.await("document.querySelector('#sheet').open && document.querySelector('#sheet .sheet-copy')?.textContent.includes('未保存或已清理')")
+                        assertEquals("0",web.value("document.querySelectorAll('#sheet .capture-full').length"))
+                        web.run("document.querySelector('#capture-description summary').click()")
+                        assertEquals(entry.rawText,web.text("document.querySelector('#capture-description .raw-text').textContent"))
+                        assertEquals("true",web.value("document.querySelector('#capture-description .capture-caption').textContent.includes(localTime(${entry.at}).replace('T',' '))"))
+                        screenshot(if(isLegacy)"legacy-evicted-image-text" else "available-node-evicted-image-text",web)
+                    }
+                }
+            }
+        } finally {
+            records.forEach(app.store::delete)
+            tasks.forEach { id ->app.tasks.operationKey(id)?.let { app.store.writableDatabase.delete("wallet_submissions","token=?",arrayOf(it)) };app.tasks.delete(id) }
+            app.store.setDefaultWallet(settings.defaultAccountUid);app.store.setAppWallet(PaymentApps.WECHAT,settings.appBindings[PaymentApps.WECHAT])
+            accounts.forEach { account ->app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(account.uid));app.store.deleteAccount(account.id) }
+            app.changed()
+        }
     }
 
     @Test fun unknownInvalidConflictingAndImportedEvidenceUseExactlyOneOcrAndSharedSubmission()=runBlocking<Unit> {
