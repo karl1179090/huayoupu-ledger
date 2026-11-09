@@ -506,7 +506,7 @@ class ExpenseWidgetAcceptanceTest {
         val manager=AppWidgetManager.getInstance(app)
         ExpenseWidgetProvider.ids(app).filter {it!=bound.id}.forEach {id->
             existing.put(org.json.JSONObject().put("id",id).put("provider",manager.getAppWidgetInfo(id)?.provider.toString())
-                .put("options",manager.getAppWidgetOptions(id).toString()))
+                .put("options",manager.getAppWidgetOptions(id).apply {keySet()}.toString()))
         }
         report.put("existingWidgets",existing)
         val observations=org.json.JSONArray();report.put("cases",observations)
