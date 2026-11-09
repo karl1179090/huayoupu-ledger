@@ -62,6 +62,20 @@ class CompleteBackupUiTest {
                 web.await("!document.querySelector('#sheet').open && document.querySelector('.toast').classList.contains('show') && getComputedStyle(document.querySelector('.toast')).display!=='none'")
                 web.run("window.__t14Painted=false;requestAnimationFrame(()=>requestAnimationFrame(()=>{window.__t14Painted=true}))")
                 web.await("window.__t14Painted===true")
+                val drawn=java.util.concurrent.CountDownLatch(1)
+                instrumentation.runOnMainSync {
+                    val activity=androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).filterIsInstance<MainActivity>().single()
+                    val view=activity.webView
+                    view.postVisualStateCallback(0,object:android.webkit.WebView.VisualStateCallback() {
+                        override fun onComplete(requestId:Long) {
+                            val listener=object:android.view.ViewTreeObserver.OnDrawListener {
+                                override fun onDraw() { view.post { view.viewTreeObserver.removeOnDrawListener(this);drawn.countDown() } }
+                            }
+                            view.viewTreeObserver.addOnDrawListener(listener);view.postInvalidateOnAnimation()
+                        }
+                    })
+                }
+                assertTrue(drawn.await(10,java.util.concurrent.TimeUnit.SECONDS))
                 val message=web.text("document.querySelector('.toast').textContent")
                 if(kind !in setOf("invalid","pause"))assertFalse(message.contains("现有账单未修改"))
                 val output=File(app.filesDir,"t14-ui").apply { mkdirs() }

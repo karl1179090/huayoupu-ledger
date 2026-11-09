@@ -89,10 +89,13 @@ class CompleteBatchRestoreTest {
             val candidate=TransactionCandidate(CandidateId("single_card"),bill)
             source.freezeRecognitionBatch(capture,listOf(candidate),key,"Asia/Shanghai",tasks.classificationSnapshot(id)!!,RecognitionPolicy.USER_INITIATED)
             val posted=source.submitBatchCandidate(key,candidate.id).items.single();tasks.update(id,"SUCCEEDED","已记账",posted.recordId)
-            target.saveAccount(wallet.copy(id=0,amountCents=20000));target.setDefaultWallet(wallet.uid)
+            target.saveAccount(wallet.copy(id=0,amountCents=21000));target.setDefaultWallet(wallet.uid)
+            target.ingest(Capture(Source.MANUAL,"manual","合成既有账单",1730525400000L),bill.copy(amountCents=1000,merchant="合成既有",transactionId="OTHER-$prefix",occurredAt=1730525400000L))
+            restored.create(Source.IMAGE,"image")
             val local=(target.ingest(capture,bill) as IngestResult.Saved).record
             val edited=target.saveEdited(local.copy(bill=local.bill.copy(category="本地人工用途"),note="本地保留"))
             val backup=LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream())
+            assertNotEquals(posted.recordId,local.id)
             repeat(2) { LedgerBackup.restore(target,backup) }
             assertEquals(edited,target.get(local.id));assertEquals(19500L,target.getAccountByUid(wallet.uid)!!.amountCents)
             assertEquals(local.uid,target.committedCandidate(key,candidate.id)!!.recordUid)
