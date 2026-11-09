@@ -318,7 +318,7 @@ class NodeCapturePipelineTest {
                 val web=WebUiProbe(scenario);web.ready()
                 assertEquals("https://appassets.androidplatform.net",web.text("location.origin"))
                 fun open(script:String) {
-                    web.run("if(document.querySelector('#sheet').open)closeSheet();cancelEditor(true);refresh();$script")
+                    web.run("if(document.querySelector('#sheet').open)closeSheet(false);if(recordPanelOpen||recordPanelClosing)closeRecordPanel(false);cancelEditor(true);refresh();$script")
                     web.await("document.querySelector('#record-panel').open && !document.querySelector('#record-panel').hidden && !recordPanelClosing && !document.querySelector('#record-panel').classList.contains('fluid-active')")
                 }
                 fun assertMissing(state:String) {
