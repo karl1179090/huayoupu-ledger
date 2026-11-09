@@ -20,6 +20,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
 
     @Synchronized fun enqueue(id:Long,pkg:String,automatic:Boolean,
         factory:()->CaptureProcessor={CaptureProcessor(app)},feedback:(String,Boolean)->Unit={message,loading->deliver(id,message,loading)}):Boolean {
+        if(!app.recognitionWork.accepting)return false
         if(jobs.containsKey(id))return true
         if(!hasCapacity())return false
         val imported=!automatic && pkg=="image" && app.tasks.isImageImport(id)
@@ -30,7 +31,12 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             (if(imported)true else hasCapturePermission() &&
                 if(automatic)app.channels.autoAllowed(pkg) && app.channels.automaticGeneration(pkg)==epoch
                 else shake!=null && app.channels.shakeAuthorized(shake))
-        val work=app.scope.launch(start=CoroutineStart.LAZY) {
+        val work=app.recognitionWork.launch(start=CoroutineStart.LAZY,onCompletion={
+            synchronized(this@PaymentRecognitionQueue) { jobs.remove(id) }
+            app.changed()
+            runCatching { app.screenshots.cleanup() }
+            resume()
+        }) {
             try {
                 taskRecovery.await()
                 modelPermit.withPermit {
@@ -57,19 +63,13 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
             }
         }
         jobs[id]=Entry(automatic,pkg,work,shake?.shortcut==true,imported)
-        // Cancellation can win before a lazy coroutine enters its body, so a
-        // body-level finally cannot be the owner of queue removal.
-        work.invokeOnCompletion {
-            synchronized(this@PaymentRecognitionQueue) { jobs.remove(id) }
-            app.changed()
-            runCatching { app.screenshots.cleanup() }
-            resume()
-        }
+        if(work.isCancelled) { jobs.remove(id);return false }
         work.start();return true
     }
 
     /** Resume only durable unfinished children; recognition input and decisions already belong to ledger.db. */
     @Synchronized fun retryBatch(id:Long):Boolean {
+        if(!app.recognitionWork.accepting)return false
         val key=app.tasks.operationKey(id) ?: return false
         val batch=app.store.recognitionBatch(key) ?: return false
         if(batch.complete || app.tasks.status(id) !in setOf("FAILED","CANCELLED") || !hasCapacity() || app.tasks.image(id)==null)return false
@@ -117,6 +117,7 @@ class PaymentRecognitionQueue(private val app:LedgerApp,
 
     /** Called after service connection as well as application start, never while permission is still binding. */
     @Synchronized fun resume(factory:()->CaptureProcessor={CaptureProcessor(app)},feedback:((Long,String,Boolean)->Unit)?=null) {
+        if(!app.recognitionWork.accepting)return
         if(!taskRecovery.isCompleted || taskRecovery.isCancelled)return
         for((id,origin) in app.tasks.pendingQueued()) {
             if(jobs.containsKey(id))continue

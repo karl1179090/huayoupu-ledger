@@ -29,7 +29,7 @@ class CategoryMigrationTest {
             fixture(name)
             var directory = emptyList<LedgerCategory>()
             repeat(2) { pass -> LedgerStore(context, name).use { store ->
-                assertEquals(15, store.readableDatabase.version)
+                assertEquals(16, store.readableDatabase.version)
                 val records = store.all().associateBy { it.id }
                 assertEquals(setOf(1L, 2L, 3L, 4L, 5L, 7L), records.keys)
                 assertEquals(mapOf(1L to "餐饮美食", 2L to "餐饮", 3L to "餐饮", 4L to "合成陌生类别", 5L to "合成一级/二级", 7L to "日用购物"), records.mapValues { it.value.bill.category })
@@ -71,7 +71,7 @@ class CategoryMigrationTest {
             }
             LedgerStore(context, name).use { repaired ->
                 assertEquals("餐饮美食", repaired.get(1)!!.bill.category)
-                assertEquals(15, repaired.readableDatabase.version)
+                assertEquals(16, repaired.readableDatabase.version)
                 assertEquals(100000L, repaired.getAccount(1)!!.amountCents)
             }
         } finally { context.deleteDatabase(name) }

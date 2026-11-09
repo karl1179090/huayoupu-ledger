@@ -449,7 +449,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             app.changed(true)
         }
         val deletion=app.store.pendingDeletion()
-        app.scope.launch {
+        app.recognitionWork.launch {
             kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
             app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord)
             app.changed(true)
@@ -487,7 +487,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
             JSONObject().put("ok",true).put("id",id).put("expiresAt",app.store.pendingDeletion()?.expiresAt ?: 0)
                 .put("expectedRevision",revision?.let { it+1 } ?: JSONObject.NULL)
         }
-        if(action=="DELETE")app.scope.launch {
+        if(action=="DELETE")app.recognitionWork.launch {
             kotlinx.coroutines.delay(net.ankio.ledger.data.LedgerStore.UNDO_WINDOW_MS+150)
             app.store.purgeExpiredDeletes().forEach(app.tasks::deleteForRecord);app.changed(true)
         }

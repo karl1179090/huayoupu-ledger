@@ -37,14 +37,14 @@ class ImageImporter(private val app: LedgerApp, private val client: net.ankio.le
         state.value = ImageImportState.Idle
     }
 
-    @Synchronized fun start(uri: Uri) {
-        if (state.value == ImageImportState.Working) return
+    @Synchronized fun start(uri: Uri) = app.recognitionWork.admit(Unit) {
+        if (state.value == ImageImportState.Working) return@admit
         val token = ++generation
         val recognitionGeneration = app.recognitionSession.generation
         previewBytes = null
         val taskId=app.tasks.create(Source.IMAGE,"image");activeTask=taskId;app.changed()
         state.value = ImageImportState.Working
-        job = app.scope.launch {
+        job = app.recognitionWork.launch {
             try {
                 val preview = ImageDecoder.decodeBitmap(ImageDecoder.createSource(app.contentResolver, uri)) { decoder, info, _ ->
                     val longest = maxOf(info.size.width, info.size.height)

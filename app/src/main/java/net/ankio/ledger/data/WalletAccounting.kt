@@ -42,7 +42,7 @@ data class WalletSnapshot(val settings: WalletSettings, val links: List<RecordWa
     val transfers: List<RecordTransferDetails> = emptyList(), val effects: Map<String, Map<String, Long>> = emptyMap(),
     val aliases: Map<String,String> = emptyMap(), val audits: List<ImportAudit> = emptyList())
 data class RestoreSummary(val imported:Int,val excludedRecords:Int,val retainedAccounts:Int,val restoredAccounts:Int,
-    val identityConflicts:Int=0,val aliasConflicts:Int=0,val skippedRecords:Int=0)
+    val identityConflicts:Int=0,val aliasConflicts:Int=0,val skippedRecords:Int=0) { internal var recordMapping:Map<String,String?> = emptyMap() }
 class WalletException(val code: String, message: String): IllegalArgumentException(message)
 
 /** Called only while holding LedgerStore's write lock and a ledger.db transaction. */

@@ -13,6 +13,26 @@ import java.util.UUID
 /** Recognition attempts are durable local data, independently of a valid financial transaction. */
 class RecognitionTasks(context:Context,private val name:String="recognition.db",private val screenshots:ScreenshotStore=ScreenshotStore.get(context),
     private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,8) {
+    internal fun stageBackupImage(id:Long,directory:java.io.File)=screenshots.stageFile(imageOwner(id),directory)
+    internal fun backupImageHash(id:Long)=screenshots.fingerprint(imageOwner(id))
+    internal fun restoreImage(db:SQLiteDatabase,id:Long,image:ByteArray,at:Long,status:String) { screenshots.requireRestoreDatabase(db);screenshots.put(imageOwner(id),image,at,status) }
+    internal fun fullBackup():JSONArray {
+        val rows=readableDatabase.rawQuery("SELECT * FROM tasks ORDER BY id",null).use { c -> JSONArray().apply { while(c.moveToNext()) {
+            val row=JSONObject()
+            RecognitionTaskBackup.columns.forEach { column -> val index=c.getColumnIndexOrThrow(column)
+                row.put(column,if(c.isNull(index))JSONObject.NULL else if(column in setOf("created_at","recognition_at"))c.getLong(index) else c.getString(index)) }
+            val id=c.getLong(c.getColumnIndexOrThrow("id"))
+            row.put("localId",id).put("localRecordId",if(c.isNull(c.getColumnIndexOrThrow("record_id")))JSONObject.NULL else c.getLong(c.getColumnIndexOrThrow("record_id")))
+            screenshots.referenceInfo(imageOwner(id))?.let { row.put("imageCreatedAt",it.first).put("imageState",it.second) }
+            row.put("imageHash",screenshots.fingerprint(imageOwner(id))?.takeIf { screenshots.contains(imageOwner(id)) } ?: JSONObject.NULL)
+            put(row)
+        } } }
+        for(i in 0 until rows.length()) { val row=rows.getJSONObject(i)
+            val uid=(if(row.isNull("localRecordId"))null else classificationStore?.recordUidForBackup(row.getLong("localRecordId")))
+                ?: classificationStore?.committedCapture("recognition:${row.getString("operation_uid")}")?.recordUid
+            row.remove("localRecordId");row.put("recordUid",uid ?: JSONObject.NULL)
+        };return rows
+    }
     // Read the immutable ledger migration baseline before SQLiteOpenHelper acquires its own lock.
     private val migrationBaseline=classificationStore?.classificationMigrationBaseline() ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
     private var classificationsReconciled=false
@@ -401,5 +421,6 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             update(id,if(resume)"QUEUED" else "FAILED",if(resume)"已恢复截图，等待识别" else "上次识别被系统中断，请重新摇动或导入截图")
         }
     }
+    init { classificationStore?.bindBackupTasks(this) }
     companion object { val STATUSES=setOf("CAPTURING","QUEUED","RECOGNIZING","SUCCEEDED","REVIEW","FAILED","NO_BILL","DUPLICATE","CANCELLED","SKIPPED") }
 }

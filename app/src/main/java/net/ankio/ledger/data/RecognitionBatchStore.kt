@@ -101,10 +101,33 @@ internal object RecognitionBatchStore {
     fun export(store:LedgerStore):org.json.JSONArray=store.readableDatabase.rawQuery("SELECT batch_json FROM recognition_batches ORDER BY operation_key",null).use { c ->
         org.json.JSONArray().apply { while(c.moveToNext())put(org.json.JSONObject(c.getString(0))) }
     }
-    fun restore(store:LedgerStore,batches:org.json.JSONArray) {
+    fun restore(store:LedgerStore,batches:org.json.JSONArray,records:Map<String,String?> = emptyMap(),categories:Map<String,LedgerCategory> = emptyMap()) {
+        fun mapped(uid:String?)=uid?.let { records[it] ?: it }
         for(index in 0 until batches.length()) {
-            val batch=RecognitionBatchCodec.decode(batches.getJSONObject(index).toString())
-            if(read(store,batch.operationKey)==null)write(store.writableDatabase,batch)
+            val incoming=RecognitionBatchCodec.decode(batches.getJSONObject(index).toString())
+            val batch=incoming.copy(items=incoming.items.map { item ->
+                val bill=item.candidate.bill
+                val category=bill.categoryDecision?.categoryId?.let(categories::get)
+                    ?: categories.values.firstOrNull { it.direction==bill.direction && it.name==bill.category }
+                item.copy(candidate=item.candidate.copy(bill=if(category==null)bill else bill.copy(category=category.name,
+                    categoryDecision=bill.categoryDecision?.copy(categoryId=category.id))),
+                    recordUID=mapped(item.recordUID),historyRecordUID=mapped(item.historyRecordUID))
+            })
+            val local=read(store,batch.operationKey)
+            if(local==null)write(store.writableDatabase,batch)
+            else {
+                fun frozen(b:FrozenRecognitionBatch)=b.copy(items=b.items.map { item ->
+                    val bill=item.candidate.bill
+                    val category=bill.categoryDecision?.categoryId?.let { CategoryDirectory.find(store.readableDatabase,CategoryReplacementStorage.resolve(store.readableDatabase,it)) }
+                    item.copy(status="PENDING",reason="",recordUID=null,candidate=item.candidate.copy(bill=if(category==null)bill else bill.copy(category=category.name,categoryDecision=bill.categoryDecision?.copy(categoryId=category.id))))
+                })
+                require(frozen(local)==frozen(batch)) { "识别批次标识与本地冻结证据冲突" }
+                val combined=local.copy(items=local.items.zip(batch.items).map { (old,new) ->
+                    if(old.status in setOf("PENDING","FAILED"))new
+                    else { if(new.status !in setOf("PENDING","FAILED"))require(old.status==new.status && old.recordUID==new.recordUID) { "识别批次回执冲突" };old }
+                })
+                write(store.writableDatabase,combined)
+            }
         }
     }
 }

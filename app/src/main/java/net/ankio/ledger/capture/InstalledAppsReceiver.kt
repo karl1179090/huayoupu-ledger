@@ -13,7 +13,7 @@ class InstalledAppsReceiver:BroadcastReceiver() {
         val pkg=intent.data?.schemeSpecificPart?:return
         InstalledAppsRepository.get(context).invalidate()
         val pending=goAsync()
-        context.ledger.scope.launch {
+        context.ledger.recognitionWork.launch {
             try {
                 if(intent.action in setOf(Intent.ACTION_PACKAGE_REMOVED,Intent.ACTION_PACKAGE_FULLY_REMOVED) && !intent.getBooleanExtra(Intent.EXTRA_REPLACING,false))
                     context.ledger.channels.setShakePackage(pkg,false)

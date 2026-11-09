@@ -94,7 +94,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         if(check?.isActive==true)return
         // A new window can arrive during the final query of an earlier pass.
         // Keep one pending wakeup instead of dropping all events while busy.
-        check=service.ledger.scope.launch(start=CoroutineStart.LAZY) {
+        check=service.ledger.recognitionWork.launch(start=CoroutineStart.LAZY) {
             for(request in checks) {
                 if(!ready())continue
                 checking=true;checkPasses++
