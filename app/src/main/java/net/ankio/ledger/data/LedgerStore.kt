@@ -2042,7 +2042,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         val category=r.bill.direction?.takeIf { it in setOf(Direction.EXPENSE,Direction.INCOME) }?.let { direction ->
             val originalId=r.bill.categoryDecision?.categoryId
             val resolvedId=originalId?.let { CategoryReplacementStorage.resolve(writableDatabase,it) }
-            if(resolvedId!=null && resolvedId!=originalId)CategoryDirectory.requireCategory(writableDatabase,resolvedId,direction)
+            if(resolvedId!=null)CategoryDirectory.requireCategory(writableDatabase,resolvedId,direction)
             else CategoryDirectory.ensure(writableDatabase,direction,r.bill.category)
         }
         put("uid", r.uid); put("source", r.capture.source.name); put("origin", r.capture.origin)

@@ -6,6 +6,10 @@ import net.ankio.ledger.core.*
 
 /** ledger.db owns both immutable batch decisions and independently atomic child commits. */
 internal object RecognitionBatchStore {
+    fun hasUnfinished(db:SQLiteDatabase,key:String):Boolean=db.rawQuery(
+        "SELECT batch_json FROM recognition_batches WHERE operation_key=?",arrayOf(key)).use {
+        it.moveToFirst() && RecognitionBatchCodec.decode(it.getString(0)).items.any { item -> item.status in setOf("PENDING","FAILED") }
+    }
     fun create(db:SQLiteDatabase) { db.execSQL("""CREATE TABLE IF NOT EXISTS recognition_batches(
         operation_key TEXT PRIMARY KEY NOT NULL,batch_json TEXT NOT NULL)""")
         db.execSQL("CREATE INDEX IF NOT EXISTS records_batch_day_amount ON records(state,amount,accounting_date,occurred_at)")

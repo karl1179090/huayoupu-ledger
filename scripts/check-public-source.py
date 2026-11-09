@@ -14,7 +14,9 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DIRECTORIES = {'app', 'core', 'gradle', 'scripts', 'tools', 'third_party', '.github'}
-ROOT_FILES = {'README.md', 'NOTICE.md', 'LICENSE', 'CONTRIBUTING.md', 'SECURITY.md',
+PUBLIC_DOC_DIRECTORIES = {'docs/agents', 'docs/adr', 'docs/specs', 'docs/tickets', 'docs/verification'}
+PUBLIC_DOC_FILES = {'docs/recognition-node-fast-path.md'}
+ROOT_FILES = {'README.md', 'NOTICE.md', 'LICENSE', 'CONTRIBUTING.md', 'SECURITY.md', 'AGENTS.md', 'GLOSSARY.md',
               '.gitignore', '.gitattributes', 'build.gradle.kts', 'settings.gradle.kts',
               'gradle.properties', 'gradlew', 'gradlew.bat'}
 PRIVATE_PARTS = {'build', 'node_modules', '__pycache__', '.gradle', '.kotlin', '.tools', '.git'}
@@ -35,7 +37,8 @@ def publishable(name):
     path = PurePosixPath(name)
     if path.is_absolute() or '..' in path.parts or not path.parts:
         return False
-    if path.parts[0] not in DIRECTORIES and name not in ROOT_FILES:
+    public_doc = name in PUBLIC_DOC_FILES or any(path.is_relative_to(directory) for directory in PUBLIC_DOC_DIRECTORIES)
+    if path.parts[0] not in DIRECTORIES and name not in ROOT_FILES and not public_doc:
         return False
     if PRIVATE_PARTS.intersection(path.parts) or path.suffix.lower() in PRIVATE_SUFFIXES:
         return False
@@ -53,9 +56,9 @@ def public_files():
         raw = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=ROOT)
         names = raw.decode('utf-8').split('\0')
     else:
-        names = [p.relative_to(ROOT).as_posix() for directory in DIRECTORIES if (ROOT / directory).is_dir()
+        names = [p.relative_to(ROOT).as_posix() for directory in DIRECTORIES | PUBLIC_DOC_DIRECTORIES if (ROOT / directory).is_dir()
                  for p in (ROOT / directory).rglob('*') if p.is_file()]
-        names += [name for name in ROOT_FILES if (ROOT / name).is_file()]
+        names += [name for name in ROOT_FILES | PUBLIC_DOC_FILES if (ROOT / name).is_file()]
     files = []
     for name in sorted(set(names)):
         if not publishable(name):

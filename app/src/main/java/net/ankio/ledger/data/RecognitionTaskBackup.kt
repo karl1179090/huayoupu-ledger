@@ -96,7 +96,10 @@ internal object RecognitionTaskBackup {
                 val image=requireNotNull(images(operation));require(PortableCsv.digest(image)==row.getString("imageHash"));BackupMediaValidator.validate(image)
                 tasks.restoreImage(db,id,image,row.optLong("imageCreatedAt",row.getLong("created_at")),row.optString("imageState",status))
             }
-            if(status in setOf("QUEUED","FAILED")) {
+            val resumable=status=="CANCELLED" && !row.isNull("imageHash") &&
+                RecognitionTasks.retryableBatchSource(Source.valueOf(row.getString("source")),row.getString("origin"),false) &&
+                RecognitionBatchStore.hasUnfinished(db,key)
+            if(RecognitionTasks.retainsClassificationSnapshot(status,resumable)) {
                 val held=db.rawQuery("SELECT payload FROM classification_snapshots WHERE operation_key=?",arrayOf(key)).use { if(it.moveToFirst())it.getString(0) else null }
                 require(held==null || held==payload) { "识别任务分类快照冲突" }
                 ClassificationStorage.hold(db,key,mapped,tasks.databaseName)

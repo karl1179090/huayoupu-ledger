@@ -15,6 +15,59 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class MultiCandidateAcceptanceTest {
     private val app=ApplicationProvider.getApplicationContext<LedgerApp>()
+    @Test fun partialBatchRetryFollowsTheRenamedStableCategoryWithoutReclassifyingOrDebitingTwice()=runBlocking {
+        app.taskRecovery.await()
+        val old=app.store.walletSettings().defaultAccountUid
+        val wallet=app.store.saveAccount(LedgerAccount(name="合成改名续传钱包",amountCents=10000))
+        app.store.setDefaultWallet(wallet.uid)
+        val merchant="合成改名续传${UUID.randomUUID()}"
+        val category=app.store.saveCategory(name="合成冻结旧名${UUID.randomUUID().toString().take(8)}",direction=Direction.EXPENSE)
+        val rule=app.store.saveClassificationRule(ClassificationRule("","合成改名续传规则",true,Direction.EXPENSE,category.id,0,
+            listOf(ClassificationCondition(value=merchant))))
+        val task=app.tasks.create(Source.IMAGE,"image");val key=app.tasks.operationKey(task)!!
+        val frozen=app.tasks.classificationSnapshot(task)!!
+        val candidates=listOf(TransactionCandidate(CandidateId("rename_first"),ParsedBill(700,Direction.EXPENSE,merchant,"其他",1793491200000,null,true,"",true)),
+            TransactionCandidate(CandidateId("rename_pending"),ParsedBill(900,Direction.EXPENSE,merchant,"其他",1793491200000,null,true,"",true)))
+        val failedKey=candidateOperationKey(key,candidates[1].id)
+        var calls=0
+        val processor=CaptureProcessor(app,OcrClient(app,RecognitionBackend { image,prepared,_,_,_,_ ->
+            calls++;prepared(image);RecognitionResult("合成改名多卡",candidates)
+        }))
+        try {
+            app.store.writableDatabase.execSQL("""CREATE TRIGGER reject_renamed_child BEFORE INSERT ON wallet_submissions
+                WHEN NEW.kind='CAPTURE_RESULT' AND NEW.token='$failedKey' BEGIN SELECT RAISE(ABORT,'synthetic rename retry failure'); END""")
+            val partial=(processor.processPrepared(byteArrayOf(21),Source.IMAGE,"image",task) { true } as IngestResult.Batch).result
+            assertEquals(BatchCounts(1,0,0,1),partial.counts);assertEquals("FAILED",app.tasks.status(task))
+            assertEquals(9300L,app.store.getAccount(wallet.id)!!.amountCents)
+            val renamed=app.store.saveCategory(category.id,"合成当前新名${UUID.randomUUID().toString().take(8)}",Direction.EXPENSE)
+            app.store.saveClassificationRule(rule.copy(enabled=false,categoryId="cat:expense:other"))
+            app.store.writableDatabase.execSQL("DROP TRIGGER reject_renamed_child")
+            assertTrue(app.captureQueue.retryBatch(task))
+            kotlinx.coroutines.withTimeout(10000) { while(app.tasks.status(task)!="SUCCEEDED")kotlinx.coroutines.delay(25) }
+            val result=app.store.recognitionBatch(key)!!
+            val records=app.store.all().filter { it.bill.merchant==merchant }
+            assertEquals(BatchCounts(2,0,0,0),result.counts);assertTrue(result.complete)
+            assertEquals(2,records.size);assertTrue(records.all { it.bill.category==renamed.name && it.bill.categoryDecision!!.categoryId==category.id })
+            assertFalse(app.store.categoryDirectory().any { it.name==category.name })
+            assertEquals(frozen,app.tasks.classificationSnapshot(task))
+            assertTrue(records.all { it.bill.categoryDecision!!.rule==rule && it.bill.categoryDecision!!.ruleVersion==frozen.version })
+            assertEquals(8400L,app.store.getAccount(wallet.id)!!.amountCents)
+            records.forEach { record -> assertEquals(1,app.store.walletMovements(wallet.uid).count { it.recordUid==record.uid }) }
+            assertEquals(partial.items[0].recordUID,result.items[0].recordUID)
+            assertEquals(result,(processor.processPrepared(byteArrayOf(22),Source.IMAGE,"image",task) { true } as IngestResult.Batch).result)
+            assertEquals(1,calls);assertEquals(8400L,app.store.getAccount(wallet.id)!!.amountCents)
+        } finally {
+            app.store.writableDatabase.execSQL("DROP TRIGGER IF EXISTS reject_renamed_child")
+            app.store.all().filter { it.bill.merchant==merchant }.forEach { app.store.delete(it.id) }
+            app.store.writableDatabase.delete("recognition_batches","operation_key=?",arrayOf(key))
+            candidates.forEach { app.store.writableDatabase.delete("wallet_submissions","token=?",arrayOf(candidateOperationKey(key,it.id))) }
+            app.tasks.delete(task);app.store.deleteClassificationRule(rule.id);app.store.setDefaultWallet(old)
+            app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(wallet.uid));app.store.deleteAccount(wallet.id)
+            app.store.categoryDirectory().filter { it.id==category.id || it.name==category.name }.forEach {
+                app.store.confirmCategoryDeletion(it.id,"cat:expense:other",app.store.previewCategoryDeletion(it.id).previewToken)
+            }
+        }
+    }
     @Test fun twoIndependentEqualCardsBothPostAndRetryWithoutRecognizingOrDebitingAgain()=runBlocking {
         app.taskRecovery.await()
         val old=app.store.walletSettings().defaultAccountUid
@@ -305,6 +358,7 @@ class MultiCandidateAcceptanceTest {
                 before=(store.ingest(Capture(Source.MANUAL,"manual","合成升级账单"),
                     ParsedBill(1234,Direction.EXPENSE,"合成升级商家","其他",1793491200000,null,true,"",true)) as IngestResult.Saved).record
                 snapshot=store.walletSnapshot()
+                store.writableDatabase.execSQL("DROP TABLE backup_restore_runs")
                 store.writableDatabase.execSQL("DROP TABLE recognition_batches");store.writableDatabase.version=14
             }
             LedgerStore(app,name).use { store ->
