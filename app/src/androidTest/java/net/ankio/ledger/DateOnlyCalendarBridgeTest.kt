@@ -119,7 +119,7 @@ class DateOnlyCalendarBridgeTest {
                 assertEquals(13,db.version)
             }
             repeat(2) { LedgerStore(app,name).use { store ->
-                assertEquals(15,store.readableDatabase.version)
+                assertEquals(16,store.readableDatabase.version)
                 val all=store.all().associateBy { it.bill.transactionId!!.removePrefix("SYNTHETIC-DATE-MIGRATION-") }
                 assertEquals(setOf("ONE","FIFTH","SECOND","LEGACY"),all.keys)
                 assertEquals(listOf(100L,345L,400L,500L),listOf("ONE","FIFTH","SECOND","LEGACY").map { all.getValue(it).bill.amountCents })

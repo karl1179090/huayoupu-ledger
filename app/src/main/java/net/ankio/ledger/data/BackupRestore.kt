@@ -14,11 +14,14 @@ internal object BackupRestore {
             val existingRows=store.importIdentityRecords();val existingUids=existingRows.map { it.uid }.toSet()
             fun identities(record:LedgerRecord)=(record.identities+TransactionIdentities.from(record.capture,record.bill)).toSet()
             val knownIdentities=existingRows.flatMap(::identities).toMutableSet()
+            val recordMapping=linkedMapOf<String,String?>();val knownRows=existingRows.toMutableList()
             val accepted=mutableListOf<LedgerRecord>();val skipped=mutableSetOf<String>();var identityConflicts=0
             backup.records.forEach { record->val ids=identities(record)
                 if(record.uid in existingUids || ids.any { it in knownIdentities }) {
+                    val matches=knownRows.filter { it.uid==record.uid || identities(it).any { identity -> identity in ids } }
+                    recordMapping[record.uid]=matches.firstOrNull { it.uid==record.uid }?.uid ?: matches.singleOrNull()?.uid
                     skipped.add(record.uid);if(record.uid !in existingUids)identityConflicts++
-                } else { accepted.add(record);knownIdentities.addAll(ids) }
+                } else { accepted.add(record);knownRows.add(record);knownIdentities.addAll(ids);recordMapping[record.uid]=record.uid }
             }
             val localAccounts=store.accounts().associateBy { it.uid };val newAccounts=backup.accounts.map { it.uid }.toSet()-localAccounts.keys
             val empty=existingRows.isEmpty() && localAccounts.isEmpty() && db.rawQuery("SELECT COUNT(*) FROM wallet_movements",null).use { it.moveToFirst();it.getLong(0)==0L } &&
@@ -35,6 +38,7 @@ internal object BackupRestore {
                 if(local!=null && incoming!=null && local.type!=incoming.type)throw WalletException("RESTORE_ACCOUNT_CONFLICT","已有同标识账户类型冲突，请先处理钱包")
             }
             val imported=store.merge(accepted,backup.accounts,backup.categories,backup.categoryDirectory,backup.recordCategoryIds);var excluded=0
+            AtomicBackupTransaction.checkpoint("ledger")
             backup.classification?.let { ClassificationStorage.restore(db,it,CategoryDirectory.merge(db,backup.categoryDirectory)) }
             accepted.forEach { record->
                 val original=links[record.uid]
@@ -77,9 +81,15 @@ internal object BackupRestore {
                 }
                 ImportAuditStore.restore(db,snapshot.audits)
             }
-            store.restoreRecognitionBatches(backup.recognitionBatches)
+            accepted.forEach { record -> backup.recordDuplicates[record.uid]?.let { duplicate ->
+                val uid=recordMapping[duplicate] ?: duplicate
+                val target=db.rawQuery("SELECT id FROM records WHERE uid=?",arrayOf(uid)).use { if(it.moveToFirst())it.getLong(0) else null }
+                db.update("records",ContentValues().apply { put("duplicate_id",target) },"uid=?",arrayOf(record.uid))
+            } }
+            RecognitionReceiptBackup.restore(db,backup.recognitionReceipts,backup.captureEvents,recordMapping)
+            RecognitionBatchStore.restore(store,backup.recognitionBatches,recordMapping,CategoryDirectory.merge(db,backup.categoryDirectory))
             db.setTransactionSuccessful()
-            RestoreSummary(imported,excluded,backup.accounts.count { it.uid in localAccounts },newAccounts.size,identityConflicts,aliasConflicts,skipped.size)
+            RestoreSummary(imported,excluded,backup.accounts.count { it.uid in localAccounts },newAccounts.size,identityConflicts,aliasConflicts,skipped.size).also { it.recordMapping=recordMapping }
         } finally { db.endTransaction() }
     }
 }

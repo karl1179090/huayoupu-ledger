@@ -56,7 +56,7 @@ class ReceiptEvidencePersistenceTest {
                 db.version = 11
             }
             repeat(2) { LedgerStore(context, name).use { ledger ->
-                assertEquals(15, ledger.readableDatabase.version)
+                assertEquals(16, ledger.readableDatabase.version)
                 val old = ledger.get(1)!!
                 assertNull(old.bill.receipt)
                 assertTrue(ledger.all().all { it.bill.receipt == null })

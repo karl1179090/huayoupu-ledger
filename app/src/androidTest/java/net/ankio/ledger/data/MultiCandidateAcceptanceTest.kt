@@ -308,7 +308,7 @@ class MultiCandidateAcceptanceTest {
                 store.writableDatabase.execSQL("DROP TABLE recognition_batches");store.writableDatabase.version=14
             }
             LedgerStore(app,name).use { store ->
-                assertEquals(15,store.readableDatabase.version);assertEquals(before,store.get(before.id))
+                assertEquals(16,store.readableDatabase.version);assertEquals(before,store.get(before.id))
                 assertEquals(snapshot,store.walletSnapshot());assertEquals(0,store.recognitionBatchBackup().length())
             }
         } finally { app.deleteDatabase(name) }

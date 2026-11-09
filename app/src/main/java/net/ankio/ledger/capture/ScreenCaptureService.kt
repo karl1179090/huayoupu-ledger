@@ -134,7 +134,7 @@ open class ScreenCaptureService:AccessibilityService() {
         // The OS may rebind accessibility while our Activity is closed after reclaiming
         // the process. Restore only previously enabled capture, without requiring an app visit.
         connectionRestore?.cancel()
-        connectionRestore=ledger.scope.launch(Dispatchers.Main.immediate) {
+        connectionRestore=ledger.recognitionWork.launch(Dispatchers.Main.immediate) {
             repeat(12) {
                 if(current!==this@ScreenCaptureService || !ledger.channels.captureEnabled())return@launch
                 if(ledger.channels.permitted(ChannelSettings.Channel.OCR)) {
@@ -285,7 +285,7 @@ open class ScreenCaptureService:AccessibilityService() {
             ledger.channels.shortcutGeneration() to ledger.channels.selectedShakePackages()
                 .associateWith(ledger.channels::shakeApplicationGeneration)
         }
-        shortcutCapture=ledger.scope.launch(Dispatchers.Main) {
+        shortcutCapture=ledger.recognitionWork.launch(Dispatchers.Main) {
             delay(180)
             while(trigger.freshAt(SystemClock.elapsedRealtime())) {
                 if(current!==this@ScreenCaptureService || !screenUnlocked() ||
@@ -309,6 +309,7 @@ open class ScreenCaptureService:AccessibilityService() {
     }
     internal fun captureAutomatic(page:PaymentMatch)=capture(ShakeTrigger.now(),page)
     private fun capture(trigger:ShakeTrigger,page:PaymentMatch?=null,expectedWindow:ShakeWindowObservation?=null,shortcut:Boolean=false) {
+        if(!ledger.recognitionWork.accepting)return
         // Diagnostic application acquires only explicit comparison pairs, never financial tasks.
         if(net.ankio.ledger.BuildConfig.NODE_DIAGNOSTIC)return
         val automatic=page!=null
@@ -349,7 +350,7 @@ open class ScreenCaptureService:AccessibilityService() {
             note("initial_window_bound",selected.id)
             ShakeWindowObservation(selected.id,initialSwitch,owner)
         }
-        ledger.scope.launch {
+        ledger.recognitionWork.launch {
             val observations=linkedSetOf<String>()
             val windowDetails=linkedSetOf<String>()
             if(!automatic)beforeShakeOwner()

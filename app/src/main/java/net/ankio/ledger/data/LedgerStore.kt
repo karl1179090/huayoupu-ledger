@@ -39,8 +39,13 @@ sealed class IngestResult {
 
 data class DeletedRecord(val id:Long,val expiresAt:Long)
 
-class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 15) {
+class LedgerStore(context: Context, private val name: String = "ledger.db", private val screenshots: ScreenshotStore = ScreenshotStore.get(context)) : SQLiteOpenHelper(context, name, null, 16) {
     private val backupContext=context.applicationContext
+    @Volatile private var boundBackupTasks:RecognitionTasks?=null
+    internal fun bindBackupTasks(tasks:RecognitionTasks) { boundBackupTasks=tasks }
+    internal fun backupTasks():RecognitionTasks?=boundBackupTasks ?: (backupContext as? net.ankio.ledger.LedgerApp)?.takeIf { name=="ledger.db" }?.tasks
+    internal val backupScreenshots get()=screenshots
+    internal fun recordUidForBackup(id:Long):String?=readableDatabase.rawQuery("SELECT uid FROM records WHERE id=?",arrayOf(id.toString())).use { if(it.moveToFirst())it.getString(0) else null }
     internal fun createBackupStagingDirectory():java.io.File = java.io.File(backupContext.cacheDir,"ledger-backup-stage-${UUID.randomUUID()}").apply {
         check(mkdir()) { "无法准备备份临时目录" }
     }
@@ -91,10 +96,11 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         ClassificationStorage.create(db)
         AccountingDates.create(db)
         RecognitionBatchStore.create(db)
+        AtomicBackupTransaction.create(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..14 && newVersion == 15) { "Unsupported database migration $oldVersion → $newVersion" }
+        check(oldVersion in 1..15 && newVersion == 16) { "Unsupported database migration $oldVersion → $newVersion" }
         // Preserve the complete historical upgrade chain before the wallet migration.
         if (oldVersion < 8) {
         if (oldVersion == 1) createAccountsAndCategories(db)
@@ -132,6 +138,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
         if(oldVersion<13)ClassificationStorage.create(db)
         if(oldVersion<14)AccountingDates.migrate(db)
         if(oldVersion<15)RecognitionBatchStore.create(db)
+        if(oldVersion<16)AtomicBackupTransaction.create(db)
     }
 
     private fun migrateWallets(db: SQLiteDatabase) {
@@ -1849,7 +1856,7 @@ class LedgerStore(context: Context, private val name: String = "ledger.db", priv
             val incomingCategories = categoryDirectory.associateBy { it.direction to it.name }
             records.forEach { original ->
                 val category = (categoryBindings[original.uid] ?: incomingCategories[original.bill.direction to original.bill.category]?.id)?.let { mappedCategories[it] }
-                val record = if (category == null) original else original.copy(bill = original.bill.copy(category = category.name))
+                val record = if (category == null) original else original.copy(bill = original.bill.copy(category = category.name,categoryDecision=original.bill.categoryDecision?.copy(categoryId=category.id)))
                 // UUIDs identify records in repeated backups. Do not overwrite subsequent local edits.
                 val exists = db.rawQuery("SELECT 1 FROM records WHERE uid = ?", arrayOf(record.uid)).use { it.moveToFirst() }
                 if (!exists) {

@@ -19,7 +19,7 @@ class ChannelSettings(private val context: Context) {
         }
         edit.apply()
         (context.applicationContext as? net.ankio.ledger.LedgerApp)?.let { app ->
-            if(registerPackages(app))app.scope.launch { app.channels.reconcileShakePackages() }
+            if(registerPackages(app))app.recognitionWork.launch { app.channels.reconcileShakePackages() }
         }
     }
     private val generations = java.util.concurrent.ConcurrentHashMap<Channel, Long>()
@@ -86,6 +86,13 @@ class ChannelSettings(private val context: Context) {
         val installed=InstalledAppsRepository.get(context)
         selectedShakePackages().filter { pkg -> !installed.selectable(pkg) ||
             installed.installationFingerprint(pkg)!=preferences.getString("shake_installation_v1:$pkg",null) }.forEach { setShakePackage(it,false) }
+    }
+    /** Durable local pause; a backup never imports consent or a live generation. */
+    @Synchronized fun pauseForRestore() {
+        check(preferences.edit().putBoolean("automatic_enabled",false).putBoolean(Channel.OCR.key,false)
+            .putStringSet("shake_apps_v1",emptySet()).putStringSet("auto_apps_v1",emptySet())
+            .putLong("shake_master_generation_v1",Math.addExact(shakeMasterGeneration(),1))
+            .putLong("shortcut_generation_v1",Math.addExact(shortcutGeneration(),1)).commit())
     }
     fun resetShakeSelectionForRestore() {
         set(Channel.OCR,false)

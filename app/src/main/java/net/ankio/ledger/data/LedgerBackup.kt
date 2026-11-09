@@ -12,7 +12,7 @@ data class ValidatedBackup(val records: List<LedgerRecord>, val channels: Map<Ch
     val accounts: List<LedgerAccount> = emptyList(), val categories: List<CustomCategory> = emptyList(),
     val histories:Map<String,List<RestoredCaptureHistory>> = emptyMap(),
     val wallets:WalletSnapshot? = null, val metadataVersion:Int = 3,
-    val categoryDirectory:List<LedgerCategory> = emptyList(), val recordCategoryIds:Map<String,String> = emptyMap(),val classification:ClassificationBackup?=null,val recognitionBatches:JSONArray=JSONArray())
+    val categoryDirectory:List<LedgerCategory> = emptyList(), val recordCategoryIds:Map<String,String> = emptyMap(),val classification:ClassificationBackup?=null,val recognitionBatches:JSONArray=JSONArray(),val recognitionTasks:JSONArray=JSONArray(),val taskImages:Map<String,ByteArray> = emptyMap(),val recognitionReceipts:JSONArray=JSONArray(),val captureEvents:JSONArray=JSONArray(),val recordDuplicates:Map<String,String> = emptyMap())
 
 object LedgerBackup {
     const val MAX_BYTES = 16 * 1024 * 1024
@@ -53,7 +53,7 @@ object LedgerBackup {
             require(previousRefund==(record.bill.refund?.refundedCents ?: 0L)) { "退款历史与汇总不一致" }
     }
     fun encode(store:LedgerStore,channels:ChannelSettings):String = StagedLedgerBackup.capture(store,includeIcons=false).use { snapshot->
-        val root=JSONObject(encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory,snapshot.classification,snapshot.recognitionBatches))
+        val root=JSONObject(encode(snapshot.records,channels,snapshot.accounts,snapshot.categories,snapshot.wallets,snapshot.categoryDirectory,snapshot.classification,snapshot.recognitionBatches,snapshot.recognitionTasks,snapshot.recognitionReceipts,snapshot.captureEvents))
         val histories=JSONObject();var imageBytes=0L
         snapshot.records.forEach { record->
             val entries=JSONArray()
@@ -67,39 +67,43 @@ object LedgerBackup {
             }
             if(entries.length()>0)histories.put(record.uid,entries)
         }
+        for(i in 0 until snapshot.recognitionTasks.length()) {
+            val row=snapshot.recognitionTasks.getJSONObject(i)
+            val image=snapshot.taskAssets[row.getString("operation_uid")]?.let { hash -> snapshot.files.getValue(hash).readBytes().also { require(PortableCsv.digest(it)==hash);BackupMediaValidator.validate(it) } }
+            imageBytes+=image?.size ?: 0;require(imageBytes*4/3<MAX_BYTES)
+            row.put("image",image?.let { android.util.Base64.encodeToString(it,android.util.Base64.NO_WRAP) } ?: JSONObject.NULL)
+        }
+        root.put("recognitionTasks",snapshot.recognitionTasks)
         root.put("histories",histories).toString().also { require(it.toByteArray(Charsets.UTF_8).size<=MAX_BYTES) { "备份及截图超过 16 MB，请使用完整 ZIP" } }
     }
 
     fun restore(store:LedgerStore,backup:ValidatedBackup,restoreMedia:(LedgerRecord)->Unit={ record ->
         backup.histories[record.uid]?.let { store.restoreHistory(record.id,it) }
-    }):Int=restoreDetailed(store,backup,restoreMedia).imported
+    }):Int=restoreDetailed(store,backup,restoreMedia=restoreMedia).imported
 
     /** Only newly imported UUIDs receive history; restoring must not overwrite later local edits. */
-    fun restoreDetailed(store:LedgerStore,backup:ValidatedBackup,restoreMedia:(LedgerRecord)->Unit={ record ->
+    fun restoreDetailed(store:LedgerStore,backup:ValidatedBackup,taskImageProvider:(String)->ByteArray?={backup.taskImages[it]},restoreMedia:(LedgerRecord)->Unit={ record ->
         backup.histories[record.uid]?.let { store.restoreHistory(record.id,it) }
-    }):RestoreSummary=synchronized(store) {
+    }):RestoreSummary {
         preflight(backup)
-        val old=store.activeRecordIdsByUid()
-        val db=store.writableDatabase
-        db.beginTransaction()
-        try {
+        return AtomicBackupTransaction.run(store) { db,tasks ->
+            val old=store.activeRecordIdsByUid()
             val count=store.restoreBackupDetailed(backup)
             for((uid,id) in store.activeRecordIdsByUid())if(uid !in old)restoreMedia(requireNotNull(store.get(id)))
-            db.setTransactionSuccessful();count
-        } catch(error:Throwable) {
-            // ScreenshotStore uses a separate database. Release all imported owners while
-            // uncommitted history rows still identify them. Financial rows roll back with
-            // this transaction; deleting a restored bill could overflow a calibrated balance.
-            runCatching {
-                store.releaseImportedMedia(store.activeRecordIdsByUid().filterKeys { it !in old }.values)
-            }.exceptionOrNull()?.let(error::addSuppressed)
-            throw error
-        } finally { db.endTransaction() }
+            if(backup.recognitionTasks.length()>0) {
+                requireNotNull(tasks) { "恢复缺少识别任务存储" }
+                RecognitionTaskBackup.restore(tasks,db,backup.recognitionTasks,count.recordMapping,
+                    CategoryDirectory.merge(db,backup.categoryDirectory)) { taskImageProvider(it) }
+            }
+            count
+        }
     }
 
     internal fun preflight(backup:ValidatedBackup) {
         val records=backup.records.associateBy { it.uid };require(records.size==backup.records.size)
         preflightCategories(backup)
+        RecognitionTaskBackup.validate(backup.recognitionTasks)
+        RecognitionReceiptBackup.validate(backup.recognitionReceipts,backup.captureEvents)
         RecognitionBatchCodec.validate(backup.recognitionBatches)
         backup.records.forEach(WalletBackupCodec::validateRecord)
         require(backup.histories.keys.all { it in records }) { "截图没有关联账单" }
@@ -129,8 +133,9 @@ object LedgerBackup {
 
     fun encode(records: List<LedgerRecord>, channels: ChannelSettings,
                accounts: List<LedgerAccount> = emptyList(), categories: List<CustomCategory> = emptyList(),wallets:WalletSnapshot?=null,
-               categoryDirectory:List<LedgerCategory> = emptyList(),classification:ClassificationBackup?=null,recognitionBatches:JSONArray=JSONArray()): String {
+               categoryDirectory:List<LedgerCategory> = emptyList(),classification:ClassificationBackup?=null,recognitionBatches:JSONArray=JSONArray(),recognitionTasks:JSONArray=JSONArray(),recognitionReceipts:JSONArray=JSONArray(),captureEvents:JSONArray=JSONArray()): String {
         CategoryDirectory.validateSnapshot(categoryDirectory)
+        val recordUids=records.associate { it.id to it.uid }
         val categoryIndex=categoryDirectory.associateBy { it.direction to it.name }
         val settings = JSONObject()
         ChannelSettings.Channel.entries.forEach { settings.put(it.key, channels.enabled(it)) }
@@ -145,7 +150,7 @@ object LedgerBackup {
             put("occurredAt", r.bill.occurredAt); put("transactionId", r.bill.transactionId ?: JSONObject.NULL)
             put("reliable", r.bill.reliable); put("timeExplicit", r.bill.timeExplicit)
             put("state", r.state.name); put("reason", r.reason)
-            put("note", r.note)
+            put("note", r.note);put("duplicateUid",r.duplicateId?.let(recordUids::get) ?: JSONObject.NULL)
             put("identities",JSONArray(TransactionIdentities.encode(r.identities)))
             r.bill.paymentMethod?.let { put("paymentMethod",WalletBackupCodec.evidenceJson(it)) }
             r.bill.standaloneRefund?.let { put("standaloneRefund",WalletBackupCodec.standaloneJson(it)) }
@@ -183,12 +188,12 @@ object LedgerBackup {
             toReference=d.toReference ?: d.toAccountUid?.let { WalletFileReference(it).json() },
             recognitionEvidence=d.recognitionEvidence ?: record.bill.transfer?.let(TransferEvidenceCodec::encode)) } },records.associate { it.uid to emptyMap() })
         WalletBackupCodec.validate(records,accounts,snapshot)
-        return JSONObject().put("format", "simple-ledger").put("version", 9).put("wallets",WalletBackupCodec.encode(snapshot))
+        return JSONObject().put("format", "simple-ledger").put("version", 10).put("wallets",WalletBackupCodec.encode(snapshot))
             .put("channels", settings).put("records", array).put("accounts", accountArray)
             .put("categoryDirectory",JSONArray().apply { categoryDirectory.forEach { put(JSONObject().put("id",it.id).put("name",it.name)
                 .put("direction",it.direction.name).put("icon",it.icon).put("order",it.order).put("isFallback",it.isFallback)) } })
             .put("classification",classification?.let(ClassificationCodec::backup) ?: JSONObject.NULL)
-            .put("recognitionBatches",recognitionBatches)
+            .put("recognitionBatches",recognitionBatches).put("recognitionTasks",recognitionTasks).put("recognitionReceipts",recognitionReceipts).put("captureEvents",captureEvents)
             .put("customCategories", custom).toString(2)
     }
 
@@ -202,13 +207,18 @@ object LedgerBackup {
             collected.write(buffer, 0, count)
         }
         val bytes = collected.toByteArray()
-        return decodeMetadata(JSONObject(bytes.toString(Charsets.UTF_8)))
+        return decodeMetadata(JSONObject(bytes.toString(Charsets.UTF_8))).also { backup ->
+            for(i in 0 until backup.recognitionTasks.length()) {
+                val row=backup.recognitionTasks.getJSONObject(i)
+                require(row.isNull("imageHash") || row.getString("operation_uid") in backup.taskImages) { "备份缺少关联图片" }
+            }
+        }
     }
 
     /** Reuse the legacy schema validation for ZIP metadata, whose image bytes live separately. */
     internal fun decodeMetadata(root: JSONObject): ValidatedBackup {
         val version = root.get("version")
-        require(root.get("format") == "simple-ledger" && version is Int && version in 1..9) { "备份格式或版本不支持" }
+        require(root.get("format") == "simple-ledger" && version is Int && version in 1..10) { "备份格式或版本不支持" }
         val array = root.getJSONArray("records")
         require(array.length() <= 100_000) { "备份记录过多" }
         val uids = mutableSetOf<String>()
@@ -347,6 +357,19 @@ object LedgerBackup {
             val item=array.getJSONObject(index)
             if(item.isNull("categoryId"))null else item.getString("uid") to ((item.get("categoryId") as? String) ?: error("分类标识格式错误"))
         }.toMap()
-        return ValidatedBackup(restored,channels,accounts,categories,histories,wallets,version,directory,categoryIds,if(version>=8)root.optJSONObject("classification")?.let(ClassificationCodec::readBackup) else null,if(version>=9)root.getJSONArray("recognitionBatches") else JSONArray()).also { preflightCategories(it);RecognitionBatchCodec.validate(it.recognitionBatches) }
+        val taskRows=if(version>=10)root.getJSONArray("recognitionTasks") else JSONArray()
+        RecognitionTaskBackup.validate(taskRows)
+        val taskImages=linkedMapOf<String,ByteArray>()
+        for(i in 0 until taskRows.length()) {
+            val row=taskRows.getJSONObject(i)
+            if(!row.isNull("image")) {
+                val image=android.util.Base64.decode(row.getString("image"),android.util.Base64.DEFAULT)
+                BackupMediaValidator.validate(image);require(PortableCsv.digest(image)==row.getString("imageHash"))
+                taskImages[row.getString("operation_uid")]=image
+            }
+        }
+        return ValidatedBackup(restored,channels,accounts,categories,histories,wallets,version,directory,categoryIds,if(version>=8)root.optJSONObject("classification")?.let(ClassificationCodec::readBackup) else null,if(version>=9)root.getJSONArray("recognitionBatches") else JSONArray(),taskRows,taskImages,if(version>=10)root.getJSONArray("recognitionReceipts") else JSONArray(),if(version>=10)root.getJSONArray("captureEvents") else JSONArray(),buildMap {
+            for(i in 0 until array.length()) { val row=array.getJSONObject(i);if(!row.isNull("duplicateUid")) { val duplicate=row.getString("duplicateUid");require(UUID.fromString(duplicate).toString()==duplicate);put(row.getString("uid"),duplicate) } }
+        }).also { preflightCategories(it);RecognitionBatchCodec.validate(it.recognitionBatches);RecognitionReceiptBackup.validate(it.recognitionReceipts,it.captureEvents) }
     }
 }

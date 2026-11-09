@@ -197,7 +197,7 @@ class RefundPersistenceTest {
         val original=payment()
         val db=store.writableDatabase
         store.rebuildPreWalletSchemaForTest(6);store.close();store=LedgerStore(context,database,images)
-        assertEquals(15,store.readableDatabase.version);assertEquals(original.asLegacyExcluded(),store.get(original.id))
+        assertEquals(16,store.readableDatabase.version);assertEquals(original.asLegacyExcluded(),store.get(original.id))
         assertEquals(1,store.captureHistory(original.id).size);assertArrayEquals(first,store.historyScreenshot(original.id,1))
         assertEquals(1,images.stats().getInt("count"))
     }

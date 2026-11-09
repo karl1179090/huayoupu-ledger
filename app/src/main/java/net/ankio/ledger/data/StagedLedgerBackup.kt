@@ -10,11 +10,14 @@ internal class StagedLedgerBackup private constructor(
     val records:List<LedgerRecord>,val accounts:List<LedgerAccount>,val categories:List<CustomCategory>,val wallets:WalletSnapshot,
     val histories:Map<String,List<RecordCaptureHistory>>,val files:Map<String,File>,
     val historyAssets:Map<String,Map<Int,String>>,val iconAssets:Map<String,String>,private val directory:File,
-    val categoryDirectory:List<LedgerCategory>,val classification:ClassificationBackup,val recognitionBatches:org.json.JSONArray,
+    val categoryDirectory:List<LedgerCategory>,val classification:ClassificationBackup,val recognitionBatches:org.json.JSONArray,val recognitionTasks:org.json.JSONArray,val taskAssets:Map<String,String>,val recognitionReceipts:org.json.JSONArray,val captureEvents:org.json.JSONArray,
 ):Closeable {
     override fun close() { directory.listFiles()?.forEach { it.delete() };directory.delete() }
     companion object {
-        fun capture(store:LedgerStore,includeIcons:Boolean=true):StagedLedgerBackup=synchronized(store) {
+        fun capture(store:LedgerStore,includeIcons:Boolean=true):StagedLedgerBackup {
+            // Resolve lazy construction and migrations before taking ledger's monitor.
+            val tasks=store.backupTasks();tasks?.readableDatabase;store.readableDatabase;store.backupScreenshots.readableDatabase
+            return synchronized(store) { synchronized(tasks ?: store) { synchronized(store.backupScreenshots) {
             val directory=store.createBackupStagingDirectory();val db=store.readableDatabase;db.beginTransactionNonExclusive()
             try {
                 val records=store.all();val accounts=store.accounts();val categories=store.customCategories();val wallets=store.walletSnapshot()
@@ -52,11 +55,17 @@ internal class StagedLedgerBackup private constructor(
                         icons[record.uid]=register(file)
                     }
                 }
-                val result=StagedLedgerBackup(records,accounts,categories,wallets,histories,files,historyAssets,icons,directory,store.categoryDirectory(),store.classificationBackup(),store.recognitionBatchBackup())
+                val taskRows=tasks?.fullBackup() ?: org.json.JSONArray();val taskAssets=linkedMapOf<String,String>()
+                for(i in 0 until taskRows.length()) {
+                    val row=taskRows.getJSONObject(i);val id=row.getLong("localId");row.remove("localId")
+                    tasks?.stageBackupImage(id,directory)?.let { file -> taskAssets[row.getString("operation_uid")]=register(file) }
+                }
+                val result=StagedLedgerBackup(records,accounts,categories,wallets,histories,files,historyAssets,icons,directory,store.categoryDirectory(),store.classificationBackup(),store.recognitionBatchBackup(),taskRows,taskAssets,RecognitionReceiptBackup.export(db),RecognitionReceiptBackup.events(db))
                 db.setTransactionSuccessful();result
             } catch(error:Throwable) {
                 directory.listFiles()?.forEach { it.delete() };directory.delete();throw error
             } finally { db.endTransaction() }
+        } } }
         }
     }
 }
