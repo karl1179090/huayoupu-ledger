@@ -152,6 +152,7 @@ function walletSelectionReasonLabel(reason,source,manualLocked){
 }
 function bankReviewMessage(code){
  return {
+  ACTUAL_ACCOUNT_REQUIRED:'请核对实际付款账户并选择对应钱包',
   BANK_DIRECTION_REQUIRED:'交易收支方向待确认，请选择支出或收入',
   PAYMENT_METHOD_UNMATCHED:'未匹配到对应银行账户，请核对并选择钱包',
   PAYMENT_METHOD_AMBIGUOUS:'存在多个同银行账户或凭证模糊，请确认实际钱包',
@@ -314,7 +315,12 @@ function recognitionRow(t){
   return swipeRow(`<div class="entry recognition-entry batch-entry ${running?'is-recognizing':t.status==='FAILED'?'is-failed':t.status==='REVIEW'?'ai-pending-entry':''}"><button type="button" class="batch-entry-main" data-task="${t.id}" aria-label="${escapeText(captureName(t)||'图片识别')}，${parentStatusLabel}，${summaryText}"><span class="category-icon">${running?'<span class="recognition-spinner" aria-hidden="true"></span>':'<i class="fa-solid fa-layer-group" aria-hidden="true"></i>'}</span><span class="entry-text"><span class="entry-title">${parentStatusLabel} · 多笔识别</span><span class="entry-subtitle">${localTime(t.createdAt).slice(11)} · ${summaryText}</span></span><span class="recognition-state ${t.status==='SUCCEEDED'?'state-succeeded':''}">${running?'处理中':parentStatusLabel}</span>${canRetry?'':'<span class="chevron" aria-hidden="true">›</span>'}</button>${canRetry?`<button type="button" class="row-retry-btn" data-retry-task="${t.id}" aria-label="重试未完成项"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> 重试</button>`:''}</div>`,t.id,true,'识别记录',running);
  }
  const label=taskNames[t.status]||'识别记录';
- return swipeRow(`<button class="entry recognition-entry ${running?'is-recognizing':'is-failed'}" data-task="${t.id}" aria-label="${escapeText(captureName(t)||'图片识别')}，${label}"><span class="category-icon">${running?'<span class="recognition-spinner" aria-hidden="true"></span>':'<i class="fa-regular fa-image" aria-hidden="true"></i>'}</span><span class="entry-text"><span class="entry-title">${label}</span><span class="entry-subtitle">${localTime(t.createdAt).slice(11)} · ${escapeText(captureName(t)||'图片识别')}</span></span><span class="recognition-state">${running?'处理中':'未入账'}</span><span class="chevron" aria-hidden="true">›</span></button>`,t.id,true,'识别记录',running);
+ const scState=t.recognitionEvidence?.screenshot?.state;
+ const isMissing=String(t.recognitionEvidence?.route||'').toUpperCase()==='NODE'&&(scState==='UNAVAILABLE'||scState==='TIMEOUT');
+ const subtitleText=isMissing
+   ? `${localTime(t.createdAt).slice(11)} · 无截图 · 节点识别`
+   : `${localTime(t.createdAt).slice(11)} · ${escapeText(captureName(t)||'图片识别')}`;
+ return swipeRow(`<button class="entry recognition-entry ${running?'is-recognizing':'is-failed'}" data-task="${t.id}" aria-label="${escapeText(captureName(t)||'图片识别')}，${label}"><span class="category-icon">${running?'<span class="recognition-spinner" aria-hidden="true"></span>':'<i class="fa-regular fa-image" aria-hidden="true"></i>'}</span><span class="entry-text"><span class="entry-title">${label}</span><span class="entry-subtitle">${subtitleText}</span></span><span class="recognition-state">${running?'处理中':'未入账'}</span><span class="chevron" aria-hidden="true">›</span></button>`,t.id,true,'识别记录',running);
 }
 function swipeRow(content,id,task,label,busy=false){return `<div class="swipe-row" data-swipe-key="${task?'task':'record'}:${id}"><button class="swipe-delete" type="button" tabindex="-1" aria-hidden="true" aria-label="删除${escapeText(label)}" data-delete-id="${id}" data-delete-task="${task}" ${busy?'disabled':''}><i class="fa-regular fa-trash-can" aria-hidden="true"></i><span>${busy?'识别中':'删除'}</span></button>${content}</div>`}
 function setSwipeOpen(row,open){row.classList.toggle('swipe-open',open);row.classList.remove('swipe-dragging');row.querySelector('.swipe-delete').tabIndex=open?0:-1;row.querySelector('.swipe-delete').setAttribute('aria-hidden',String(!open));row.querySelector('.entry').style.removeProperty('transform')}
@@ -725,9 +731,35 @@ function updateEditor(){
  const hero=editor.querySelector('.record-hero');hero.hidden=!draft.id;hero.innerHTML=draft.id?ledgerIcon(draft):'';
  const original=$('original-message');original.hidden=true;original.querySelector('p').textContent=draft.rawText||'';
  document.querySelector('#import .pending').textContent=draft.recognitionTaskId?(taskNames[draft.taskStatus]||'识别记录'):(posted?'已入账':'待确认');$('editor-title').textContent=captureName(draft)||'手动记账';$('delete-record').hidden=(!draft.id&&!draft.recognitionTaskId)||working;$('delete-record').textContent=draft.recognitionTaskId?'删除识别记录':'删除账单';$('raw-text-button').hidden=!draft.rawText;const canCreateRule=!!(draft?.id&&draft.direction!=='TRANSFER');if($('create-rule-from-bill'))$('create-rule-from-bill').hidden=!canCreateRule;document.querySelector('.editor-tools').style.display=(draft.rawText||canCreateRule)?'flex':'none';const reviewReasonText=draft.reason||bankReviewMessage(draft.wallet?.reviewCode)||'';$('review-reason').hidden=posted||!reviewReasonText;$('review-reason').textContent=reviewReasonText;
- const scanner=document.querySelector('.scanner');scanner.hidden=draft.source==='MANUAL'&&!!draft.id;const canPick=!working&&!draft.id&&!draft.recognitionTaskId,canView=!!previewUrl&&!working;scanner.setAttribute('aria-disabled',String(!canPick&&!canView));scanner.setAttribute('aria-label',canView?'查看原始截图':canPick?'选择支付截图':'暂无原始截图');scanner.tabIndex=canPick||canView?0:-1;scanner.classList.toggle('placeholder',!previewUrl);scanner.classList.toggle('has-preview',!!previewUrl);$('capture-preview').hidden=!previewUrl;if(previewUrl)$('capture-preview').src=previewUrl;
+ const scState=draft.recognitionEvidence?.screenshot?.state;
+ const isNode=String(draft.recognitionEvidence?.route||'').toUpperCase()==='NODE';
+ const hasAvailableScreenshot=!!previewUrl||(draft?.history||[]).some(h=>h.hasScreenshot);
+ const isMissingScreenshot=isNode&&(scState==='UNAVAILABLE'||scState==='TIMEOUT')&&!hasAvailableScreenshot;
+ const isTimeout=scState==='TIMEOUT';
+ const scanner=document.querySelector('.scanner');scanner.hidden=draft.source==='MANUAL'&&!!draft.id;
+ const canPick=!working&&!draft.id&&!draft.recognitionTaskId&&!isMissingScreenshot,canView=!!previewUrl&&!working&&!isMissingScreenshot;
+ scanner.setAttribute('aria-disabled',String(!canPick&&!canView));
+ scanner.setAttribute('aria-label',isMissingScreenshot?(isTimeout?'普通截图超时，信息来自页面节点':'普通截图不可用，信息来自页面节点'):canView?'查看原始截图':canPick?'选择支付截图':'暂无原始截图');
+ scanner.tabIndex=canPick||canView?0:-1;
+ scanner.classList.toggle('placeholder',!previewUrl&&!isMissingScreenshot&&canPick);
+ scanner.classList.toggle('has-preview',!!previewUrl);
+ scanner.classList.toggle('missing-screenshot',isMissingScreenshot);
+ $('capture-preview').hidden=!previewUrl;
+ if(previewUrl)$('capture-preview').src=previewUrl;
+ const missingIcon=$('missing-screenshot-icon'),missingBadge=$('missing-screenshot-badge'),expandIcon=scanner.querySelector('.capture-expand'),copy=scanner.querySelector('.capture-attachment-copy');
+ if(isMissingScreenshot){
+  if(missingIcon)missingIcon.hidden=false;
+  if(missingBadge){missingBadge.hidden=false;missingBadge.textContent=isTimeout?'截图超时':'未保留截图'}
+  if(expandIcon)expandIcon.hidden=true;
+  if(copy)copy.innerHTML=`<b>未保留原始截图</b><small>${isTimeout?'普通截图超时 · 信息来自页面节点':'普通截图不可用 · 信息来自页面节点'}</small>`;
+ }else{
+  if(missingIcon)missingIcon.hidden=true;
+  if(missingBadge)missingBadge.hidden=true;
+  if(expandIcon)expandIcon.hidden=!previewUrl;
+  if(copy&&previewUrl)copy.innerHTML='<b>原始截图</b><small>点击查看大图</small>';
+ }
  document.querySelector('.scanning').textContent=working?(draft.taskStatus==='CAPTURING'?'正在获取账单截图…':draft.taskStatus==='QUEUED'?'已获取截图，等待识别…':'正在识别账单…'):importError||(previewUrl?'本次识别截图 · 请核对记账信息':draft.id?(draft.source==='OCR'||draft.source==='IMAGE'?'这笔历史记录未保存原始截图，可查看识别原文并核对字段':'此记录来自'+(captureName(draft)||'手动记账')+'，没有截图'):'点击上方选择支付截图，自动识别');
- document.querySelector('.scanner').classList.toggle('no-record-image',!!(draft.id||draft.recognitionTaskId)&&!previewUrl);
+ document.querySelector('.scanner').classList.toggle('no-record-image',!!(draft.id||draft.recognitionTaskId)&&!previewUrl&&!isMissingScreenshot);
  document.querySelector('#import .page-title h1').textContent=draft.recognitionTaskId?'识别记录':draft.id?'账单详情':'截图智能导入';
  document.querySelector('#import .subtitle').textContent=draft.id?(posted?'已自动入账，可编辑或删除':'请补全提示项后保存'):'主动选择支付截图，自动识别后本地记账';
  document.querySelector('#import .subtitle').hidden=!!draft.id;
@@ -814,10 +846,21 @@ function renderReceiptDetails(){
   const isOcr=route==='OCR';
   if(isNode||isOcr){
    const routeTitle=isNode?'无障碍节点识别':'图片文字识别';
-   let badgeText='',noteText='';
+   let badgeText='',noteText='',extraBadge='',scStateAttr='';
    if(isNode){
     badgeText='已验证版式';
-    noteText='从当前页面读取交易信息';
+    const scState=evidence.screenshot?.state;
+    const isMissing=scState==='UNAVAILABLE'||scState==='TIMEOUT';
+    if(isMissing){
+     const isTimeout=scState==='TIMEOUT';
+     scStateAttr=` data-screenshot-state="${escapeText(scState)}"`;
+     extraBadge=`<span class="receipt-provenance-badge receipt-missing-screenshot-badge">${isTimeout?'截图超时':'无可用截图'}</span>`;
+     noteText=isTimeout
+       ?'普通截图获取超时，未保留截图；账单信息直接来自当前页面节点。'
+       :'普通截图未能获取，未保留截图；账单信息直接来自当前页面节点。';
+    }else{
+     noteText='从当前页面读取交易信息';
+    }
    }else{
     const r=String(evidence.reason||'').trim();
     if(r==='unknown_layout'||r==='invalid_candidate'||r==='conflicting_candidates'){
@@ -834,7 +877,7 @@ function renderReceiptDetails(){
      noteText='通过图片文字识别解析凭证';
     }
    }
-   provenanceMarkup=`<div class="receipt-provenance-card" id="receipt-provenance" data-recognition-route="${escapeText(route)}"><div class="receipt-provenance-header"><span class="receipt-route-badge route-${escapeText(route.toLowerCase())}">${escapeText(routeTitle)}</span>${badgeText?`<span class="receipt-provenance-badge">${escapeText(badgeText)}</span>`:''}</div><p class="receipt-provenance-note">${escapeText(noteText)}</p></div>`;
+   provenanceMarkup=`<div class="receipt-provenance-card" id="receipt-provenance" data-recognition-route="${escapeText(route)}"${scStateAttr}><div class="receipt-provenance-header"><span class="receipt-route-badge route-${escapeText(route.toLowerCase())}">${escapeText(routeTitle)}</span>${badgeText?`<span class="receipt-provenance-badge">${escapeText(badgeText)}</span>`:''}${extraBadge}</div><p class="receipt-provenance-note">${escapeText(noteText)}</p></div>`;
   }
  }
  let diagnosticsMarkup='';
@@ -909,27 +952,61 @@ function renderReceiptDetails(){
  if(toggle&&panel)toggle.onclick=()=>{const next=panel.hidden;panel.hidden=!next;toggle.setAttribute('aria-expanded',String(next));const state=toggle.querySelector('.receipt-toggle-state');if(state)state.textContent=next?'收起':'查看'};
 }
 function historyKind(item){return ({payment:'付款截图',payment_supplement:'补充截图',refund_pending:'退款截图',partial_refund:'退款截图',full_refund:'退款截图',refund_supplement:'退款补图'})[item.kind]||'账单截图'}
+function isInitialNodeMissingSlot(draft,item){
+ if(!item||item.sequence!==1||item.kind!=='payment'||item.hasScreenshot)return false;
+ const route=String(draft?.recognitionEvidence?.route||'').toUpperCase();
+ const scState=draft?.recognitionEvidence?.screenshot?.state;
+ return route==='NODE'&&(scState==='UNAVAILABLE'||scState==='TIMEOUT');
+}
 function renderCaptureGallery(){
  const history=draft?.history||[],section=$('capture-gallery'),scroll=section.querySelector('.capture-thumbnails')?.scrollLeft||0;
- section.hidden=!draft?.id||history.length===0||draft.source==='MANUAL';
+ const isSingleNodeMissing=history.length===1&&isInitialNodeMissingSlot(draft,history[0]);
+ section.hidden=!draft?.id||history.length===0||draft.source==='MANUAL'||isSingleNodeMissing;
  if(section.hidden){section.innerHTML='';return}
  document.querySelector('.scanner').hidden=true;
  const available=history.filter(item=>item.hasScreenshot).length;
- section.innerHTML=`<div class="capture-gallery-heading"><b>原始截图 <span>${available} 张</span></b><small>${history.length>2?'左右滑动 · 点击放大':'点击放大'}</small></div><div class="capture-thumbnails" tabindex="0" aria-label="账单截图，可左右滑动">${history.map(item=>`<button type="button" class="history-image${item.hasScreenshot?'':' missing-image'}" data-history-sequence="${item.sequence}" aria-label="查看${historyKind(item)}，第 ${item.sequence} 张">${item.hasScreenshot?`<img loading="lazy" src="https://appassets.androidplatform.net${escapeText(item.screenshotUrl)}" alt="${historyKind(item)}"/>`:'<i class="fa-regular fa-image" aria-hidden="true"></i>'}<span><b>${historyKind(item)}</b><small>${item.hasScreenshot?'点击查看':'未保存或已清理'}</small></span></button>`).join('')}</div>`;
+ section.innerHTML=`<div class="capture-gallery-heading"><b>原始截图 <span>${available} 张</span></b><small>${history.length>2?'左右滑动 · 点击放大':'点击放大'}</small></div><div class="capture-thumbnails" tabindex="0" aria-label="账单截图，可左右滑动">${history.map(item=>{
+  const missingSlot=isInitialNodeMissingSlot(draft,item);
+  return `<button type="button" class="history-image${item.hasScreenshot?'':' missing-image'}" data-history-sequence="${item.sequence}" aria-label="${item.hasScreenshot?'查看':'未保留'}${historyKind(item)}，第 ${item.sequence} 张"${missingSlot?' aria-disabled="true"':''}>${item.hasScreenshot?`<img loading="lazy" src="https://appassets.androidplatform.net${escapeText(item.screenshotUrl)}" alt="${historyKind(item)}"/>`:'<i class="fa-regular fa-image" aria-hidden="true"></i>'}<span><b>${historyKind(item)}</b><small>${item.hasScreenshot?'点击查看':missingSlot?'未保留截图':'未保存或已清理'}</small></span></button>`;
+ }).join('')}</div>`;
  section.querySelector('.capture-thumbnails').scrollLeft=scroll;
- section.querySelectorAll('[data-history-sequence]').forEach(button=>button.onclick=()=>viewHistory(Number(button.dataset.historySequence)));
+ section.querySelectorAll('[data-history-sequence]').forEach(button=>{
+  const seq=Number(button.dataset.historySequence);
+  const item=history.find(h=>h.sequence===seq);
+  if(isInitialNodeMissingSlot(draft,item)){
+   button.onclick=()=>{
+    const scState=draft?.recognitionEvidence?.screenshot?.state;
+    notify(scState==='TIMEOUT'?'普通截图获取超时，无原始截图可查看':'普通截图未能获取，无原始截图可查看');
+   };
+  }else{
+   button.onclick=()=>viewHistory(seq);
+  }
+ });
 }
 function viewHistory(sequence){
  const history=draft?.history||[],index=history.findIndex(item=>item.sequence===sequence);if(index<0)return;
- showSheet('原始截图',`<div id="capture-pages" class="capture-pages" tabindex="0" aria-label="左右滑动切换截图">${history.map(item=>`<figure class="capture-page">${item.hasScreenshot?`<img class="capture-full" loading="lazy" src="https://appassets.androidplatform.net${escapeText(item.screenshotUrl)}" alt="${historyKind(item)}，第 ${item.sequence} 张"/>`:'<p class="sheet-copy">本次截图未保存或已清理。</p>'}</figure>`).join('')}</div><div class="capture-navigation"><button type="button" id="capture-previous" aria-label="上一张截图">‹</button><span id="capture-position" role="status" aria-live="polite"></span><button type="button" id="capture-next" aria-label="下一张截图">›</button></div><div id="capture-description"></div>`);
+ const targetItem=history[index];
+ if(isInitialNodeMissingSlot(draft,targetItem)){
+  const scState=draft?.recognitionEvidence?.screenshot?.state;
+  notify(scState==='TIMEOUT'?'普通截图获取超时，无原始截图可查看':'普通截图未能获取，无原始截图可查看');
+  return;
+ }
+ const viewableHistory=history.filter(item=>!isInitialNodeMissingSlot(draft,item));
+ if(viewableHistory.length===0){
+  notify('无可用截图可查看');
+  return;
+ }
+ const viewIndex=viewableHistory.findIndex(item=>item.sequence===sequence);
+ const initialIndex=viewIndex>=0?viewIndex:0;
+ showSheet('原始截图',`<div id="capture-pages" class="capture-pages" tabindex="0" aria-label="左右滑动切换截图">${viewableHistory.map(item=>`<figure class="capture-page">${item.hasScreenshot?`<img class="capture-full" loading="lazy" src="https://appassets.androidplatform.net${escapeText(item.screenshotUrl)}" alt="${historyKind(item)}，第 ${item.sequence} 张"/>`:'<p class="sheet-copy">本次截图未保存或已清理。</p>'}</figure>`).join('')}</div><div class="capture-navigation"><button type="button" id="capture-previous" aria-label="上一张截图">‹</button><span id="capture-position" role="status" aria-live="polite"></span><button type="button" id="capture-next" aria-label="下一张截图">›</button></div><div id="capture-description"></div>`);
  $('sheet').classList.add('capture-viewer');
- const pages=$('capture-pages');let current=index;
- const describe=()=>{const item=history[current];$('sheet-title').textContent=`${historyKind(item)} · ${current+1} / ${history.length}`;$('capture-position').textContent=`${current+1} / ${history.length}`;$('capture-previous').disabled=current===0;$('capture-next').disabled=current===history.length-1;$('capture-description').innerHTML=`<p class="capture-caption">${localTime(item.at).replace('T',' ')}${item.refundedCents?` · 已退 ¥${money(item.refundedCents)} · 实付 ¥${money(item.amountCents)}`:''}</p>${item.rawText?`<details class="capture-original"><summary>查看识别原文</summary><div class="raw-text">${escapeText(item.rawText)}</div></details>`:''}`};
- const move=delta=>pages.scrollTo({left:Math.max(0,Math.min(history.length-1,current+delta))*pages.clientWidth,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
+ const pages=$('capture-pages');let current=initialIndex;
+ const describe=()=>{const item=viewableHistory[current];$('sheet-title').textContent=`${historyKind(item)} · ${current+1} / ${viewableHistory.length}`;$('capture-position').textContent=`${current+1} / ${viewableHistory.length}`;$('capture-previous').disabled=current===0;$('capture-next').disabled=current===viewableHistory.length-1;$('capture-description').innerHTML=`<p class="capture-caption">${localTime(item.at).replace('T',' ')}${item.refundedCents?` · 已退 ¥${money(item.refundedCents)} · 实付 ¥${money(item.amountCents)}`:''}</p>${item.rawText?`<details class="capture-original"><summary>查看识别原文</summary><div class="raw-text">${escapeText(item.rawText)}</div></details>`:''}`};
+ const move=delta=>pages.scrollTo({left:Math.max(0,Math.min(viewableHistory.length-1,current+delta))*pages.clientWidth,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
  $('capture-previous').onclick=()=>move(-1);$('capture-next').onclick=()=>move(1);
  pages.onkeydown=e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();move(e.key==='ArrowLeft'?-1:1)}};
- pages.onscroll=()=>{const next=Math.max(0,Math.min(history.length-1,Math.round(pages.scrollLeft/Math.max(1,pages.clientWidth))));if(next!==current){current=next;describe()}};
- pages.scrollLeft=index*pages.clientWidth;describe();
+ pages.onscroll=()=>{const next=Math.max(0,Math.min(viewableHistory.length-1,Math.round(pages.scrollLeft/Math.max(1,pages.clientWidth))));if(next!==current){current=next;describe()}};
+ pages.scrollLeft=initialIndex*pages.clientWidth;describe();
 }
 function chooseRefundTarget(){if(!native||!draft?.id)return;try{const result=JSON.parse(native.refundCandidates(draft.id));if(!result.ok){notify(result.error||'无法读取原账单');return}showSheet('选择退款对应的原账单',`<p class="sheet-copy">核对商户、原付款金额和时间，确认后将更新原账单，并保留两次识别截图。</p>${result.candidates.map(r=>`<button type="button" class="sheet-row" data-refund-target="${r.id}"><span>${escapeText(r.merchant)}<br><small>${recordDisplayTime(r)} · 原付 ¥${money(r.originalAmountCents)}</small></span><span>选择 ›</span></button>`).join('')||'<p class="sheet-copy">没有找到可关联的原账单。请先记录原付款，或核对支付平台和原付款金额后重新识别。</p>'}`);document.querySelectorAll('[data-refund-target]').forEach(button=>button.onclick=()=>confirmRefundTarget(Number(button.dataset.refundTarget)))}catch(_){notify('读取失败，请稍后重试')}}
 function confirmRefundTarget(targetId){const target=records.find(r=>r.id===targetId);if(!(draft?.refund||draft?.standaloneRefund)||!target)return;const pendingId=draft.id;const refund=draft.refund||{...draft.standaloneRefund,originalAmountCents:target.refund?.originalAmountCents||target.amountCents,mode:'single'};showSheet('确认更新原账单？',`<p class="sheet-copy">${escapeText(target.merchant)} · ${recordDisplayTime(target)}<br>原付 ¥${money(refund.originalAmountCents)}，${refund.mode==='single'?'本次':'累计'}成功退款 ¥${money(refund.refundedCents)}。将按原账单已记录的退款核算实付金额，重复退款不会再次扣减，原分类和备注继续保留。</p><div class="sheet-actions"><button type="button" id="refund-back">返回选择</button><button type="button" id="confirm-refund" class="primary">确认更新原账单</button></div>`);$('refund-back').onclick=chooseRefundTarget;$('confirm-refund').onclick=()=>{try{const result=JSON.parse(native.confirmRefund(pendingId,targetId));if(!result.ok){notify(result.error||'退款更新失败，请重新核对');return}closeSheet();refresh();const updated=records.find(r=>r.id===result.id);if(updated){applyRecord(updated);remember()}notify(result.updated?'退款已更新，原账单截图已保留':'该退款已记录，无需重复扣减')}catch(_){notify('退款更新失败，请重试')}}}
@@ -946,7 +1023,7 @@ function updateTimeChip(){
  if(basisEl){basisEl.textContent=basis;basisEl.hidden=!basis}
 }
 function updateAmountSign(){$('amount-sign').textContent='¥ '+(({INCOME:'+',EXPENSE:'-',TRANSFER:''})[$('direction').dataset.value]||'');drawRecordWallet()}
-function applyRecord(r,keepPreview=false){if($('batch-view'))$('batch-view').hidden=true;if($('import-form'))$('import-form').hidden=false;const detailed=recordWithDetails(r),resolved=resolveRecordCategory(detailed),merchant=recordMerchant(detailed);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...detailed,merchant,category:resolved.name,categoryId:resolved.id,_storedMerchant:merchant,_categoryEdited:false,expectedRevision:detailed.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false,_originalOccurredAt:detailed.occurredAt,_timeEdited:false};previewUrl=detailed.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':'';working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
+function applyRecord(r,keepPreview=false){if($('batch-view'))$('batch-view').hidden=true;if($('import-form'))$('import-form').hidden=false;const detailed=recordWithDetails(r),resolved=resolveRecordCategory(detailed),merchant=recordMerchant(detailed);if($('receipt-details'))delete $('receipt-details').dataset.recordId;draft={...detailed,merchant,category:resolved.name,categoryId:resolved.id,_storedMerchant:merchant,_categoryEdited:false,expectedRevision:detailed.wallet?.revision??r.wallet?.revision??0,submissionToken:submissionToken(),manualWalletSelected:false,_originalOccurredAt:detailed.occurredAt,_timeEdited:false};previewUrl=detailed.hasScreenshot?'https://appassets.androidplatform.net/record-capture/'+r.id+'.jpg':((detailed.history||[]).find(h=>h.hasScreenshot)?.screenshotUrl?'https://appassets.androidplatform.net'+detailed.history.find(h=>h.hasScreenshot).screenshotUrl:'');working=false;importError='';updateEditor();editorBaseline=JSON.stringify(readDraft())}
 function openRecord(id,keepPreview=false,anchor=null){
  const fromBatchNav=Boolean(anchor?.fromBatch||(lastControl&&lastControl.closest('#batch-view')));
  if(!fromBatchNav){activeBatch=null;activeBatchTaskId=null}
@@ -961,7 +1038,30 @@ function openRecord(id,keepPreview=false,anchor=null){
  recordReturnControl=control||document.activeElement;applyRecord(records.find(x=>x.id===id)||r,keepPreview);showRecordPanel(origin);remember();
 }
 function pickImage(){if(draft?.id||draft?.recognitionTaskId){notify('原始截图仅供核对，不能替换；请从新增入口导入新截图');return}if(working){notify('正在识别，请稍候');return}if(native)native.importImage();else notify('请在 Android 应用中导入截图')}
-function viewOrPickImage(){if(previewUrl&&!working){showSheet('原始截图',`<img class="capture-full" src="${escapeText(previewUrl)}" alt="本笔账单的原始截图"/><p class="sheet-copy">仅供查看，原始截图不可替换。</p>`);$('sheet').classList.add('capture-viewer');return}pickImage()}
+function viewOrPickImage(){
+ if(previewUrl&&!working){
+  showSheet('原始截图',`<img class="capture-full" src="${escapeText(previewUrl)}" alt="本笔账单的原始截图"/><p class="sheet-copy">仅供查看，原始截图不可替换。</p>`);
+  $('sheet').classList.add('capture-viewer');
+  return;
+ }
+ const viewableHistory=(draft?.history||[]).filter(h=>!isInitialNodeMissingSlot(draft,h));
+ const availableScreenshots=viewableHistory.filter(h=>h.hasScreenshot);
+ if(availableScreenshots.length>0){
+  viewHistory(availableScreenshots[0].sequence);
+  return;
+ }
+ const scState=draft?.recognitionEvidence?.screenshot?.state;
+ const isNode=String(draft?.recognitionEvidence?.route||'').toUpperCase()==='NODE';
+ if(isNode&&(scState==='UNAVAILABLE'||scState==='TIMEOUT')){
+  notify(scState==='TIMEOUT'?'普通截图获取超时，无原始截图可查看':'普通截图未能获取，无原始截图可查看');
+  return;
+ }
+ if(viewableHistory.length>0){
+  viewHistory(viewableHistory[0].sequence);
+  return;
+ }
+ pickImage();
+}
 function editorDirty(){return !!draft?.id&&editorBaseline!==null&&JSON.stringify(readDraft())!==editorBaseline}
 function cancelEditor(force=false){
  if(!force&&editorDirty()){
@@ -2091,7 +2191,7 @@ function drawRecordWallet(){
   uid=draft.walletAccountUid||null;
  }
  const account=accounts.find(a=>a.uid===uid);
- const historical=!!draft.id&&wallet&&wallet.eligibility!=='ACTIVE';
+ const historical=!!draft.id&&draft.state!=='REVIEW'&&wallet&&wallet.eligibility!=='ACTIVE';
  $('record-wallet').disabled=working;
  $('record-wallet').querySelector('span').textContent=account?walletLabel(account):wallet?.accountName||'选择钱包';
  const source=walletSelectionReasonLabel(wallet?.selectionReason,wallet?.selectionSource,draft.manualWalletSelected||wallet?.manualLocked);

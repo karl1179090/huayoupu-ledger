@@ -152,7 +152,10 @@
     <section id="capture-gallery" class="capture-gallery" aria-label="原始截图" hidden=""></section>
     <div aria-label="选择支付截图" class="scanner" onclick="viewOrPickImage()" role="button" tabindex="0">
      <img alt="本笔账单的识别截图" hidden="" id="capture-preview"/>
-     <span class="capture-attachment-copy"><b>原始截图</b><small>点击查看大图</small></span><i class="fa-solid fa-expand capture-expand" aria-hidden="true"></i>
+     <span class="missing-screenshot-icon" id="missing-screenshot-icon" hidden=""><i aria-hidden="true" class="fa-regular fa-image"></i></span>
+     <span class="capture-attachment-copy"><b>原始截图</b><small>点击查看大图</small></span>
+     <span class="missing-screenshot-badge" id="missing-screenshot-badge" hidden="">未保留截图</span>
+     <i class="fa-solid fa-expand capture-expand" aria-hidden="true"></i>
      <span class="corner tl">
      </span>
      <span class="corner tr">

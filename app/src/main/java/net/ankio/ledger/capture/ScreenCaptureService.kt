@@ -420,9 +420,12 @@ open class ScreenCaptureService:AccessibilityService() {
                 ledger.changed()
                 ledger.tasks.diagnose(task,"stage","screenshot")
                 ledger.tasks.diagnose(task,"window","$pkg; id=${target.id}; automatic=$automatic")
+                val processor=processorFactory()
+                val fallback=processor.prepareNodeFallback(task,snapshot,pkg)
+                var missingReason:ScreenshotFailureReason?=null
                 val screenshotAt=SystemClock.elapsedRealtime()
                 bitmap=try { withTimeoutOrNull(4_000) { screenshotProvider(if(Build.VERSION.SDK_INT>=34)target.id else null) {
-                    allowed() && trigger.freshAt(SystemClock.elapsedRealtime()) && captureContentGeneration(target.id)==snapshot.generation &&
+                    allowed() && (fallback!=null || trigger.freshAt(SystemClock.elapsedRealtime())) && captureContentGeneration(target.id)==snapshot.generation &&
                         (automatic || screenUnlocked() && foregroundSwitch.get()==observed?.switchGeneration)
                 } }
                     ?:throw ScreenshotAcquisitionException(ScreenshotFailureReason.TIMEOUT,"系统截图响应超时，请检查无障碍状态后重试")
@@ -430,7 +433,17 @@ open class ScreenCaptureService:AccessibilityService() {
                     // Keep the existing protected-page privacy refusal: no financial attempt,
                     // silent automatic probes, and an explanation for an explicit request.
                     if(error.reason==ScreenshotFailureReason.PROTECTED)throw PrivacyBlocked(error.userMessage)
-                    throw error
+                    if(!error.ordinary || fallback==null)throw error
+                    // A failed pixel request grants no evidence delivery: all current gates still apply.
+                    if(!allowed() || !screenUnlocked())throw CancellationException()
+                    if(currentTarget(pkg,target.id,observed?.switchGeneration)==null || captureContentGeneration(target.id)!=snapshot.generation)
+                        throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"采集窗口已经改变")
+                    val afterFailure=if(automatic)paymentMonitor.confirmedPage(page!!) else paymentMonitor.manualCheck(pkg,target.id,shortcut).value
+                    if(afterFailure?.snapshot?.sameTransaction(snapshot)!=true || !allowed() || !screenUnlocked() ||
+                        captureContentGeneration(target.id)!=snapshot.generation || currentTarget(pkg,target.id,observed?.switchGeneration)==null)
+                        throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"采集窗口已经改变")
+                    missingReason=error.reason
+                    null
                 }
                 ledger.tasks.phaseTiming(task,"screenshot",SystemClock.elapsedRealtime()-screenshotAt)
                 if(!allowed())throw CancellationException()
@@ -441,12 +454,14 @@ open class ScreenCaptureService:AccessibilityService() {
                 ledger.tasks.recordOriginalCaptureDay(task,System.currentTimeMillis(),java.time.ZoneId.systemDefault().id)
                 if(automatic)ledger.tasks.diagnose(task,"capture_context","payment_success_result:${System.currentTimeMillis()}")
                 ledger.tasks.diagnose(task,"timing","captured_age_ms=${SystemClock.elapsedRealtime()-trigger.eventAtMs}")
-                val image=withContext(Dispatchers.Default) { ledger.recognizer.prepareScreenshot(bitmap!!) }
+                val image=bitmap?.let { pixels -> withContext(Dispatchers.Default) { ledger.recognizer.prepareScreenshot(pixels) } }
                 if(!allowed())throw CancellationException()
-                if(!ledger.tasks.queued(task,image,snapshot))throw CancellationException("识别记录已删除")
+                val queued=if(image!=null)ledger.tasks.queued(task,image,snapshot)
+                    else ledger.tasks.queuedWithoutScreenshot(task,snapshot,requireNotNull(fallback),requireNotNull(missingReason))
+                if(!queued)throw CancellationException("识别记录已删除")
                 ledger.tasks.diagnose(task,"window_details",windowDetails.toList().takeLast(2).joinToString(" | "))
                 val feedbackTask=task
-                enqueued=ledger.captureQueue.enqueue(task,pkg,automatic,processorFactory) { message,loading ->
+                enqueued=ledger.captureQueue.enqueue(task,pkg,automatic,{processor}) { message,loading ->
                     feedback(message,loading,if(!loading && (message.startsWith("已记账") || message=="退款已更新"))ledger.tasks.recordId(feedbackTask) else null)
                 }
                 if(!enqueued)throw RecognitionException("识别任务较多，请稍后重新摇一摇补录")
