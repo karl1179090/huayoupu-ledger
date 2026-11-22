@@ -25,7 +25,6 @@ class ChannelSettings(private val context: Context) {
     private val generations = java.util.concurrent.ConcurrentHashMap<Channel, Long>()
     // Retired keys remain only for decoding old backups; none can request permissions or run.
     enum class Channel(val key: String) { OCR("ocr"), PAGE("page"), SMS("sms"), NOTIFICATION("notification"); val capture get()=this==OCR }
-    private val automaticGenerations=java.util.concurrent.ConcurrentHashMap<String,Long>()
     fun selectedShakePackages():Set<String> = preferences.getStringSet("shake_apps_v1",emptySet()).orEmpty().toSet()
     fun shakeMasterGeneration()=preferences.getLong("shake_master_generation_v1",0)
     fun shakeApplicationGeneration(packageName:String)=preferences.getLong("shake_package_generation_v1:$packageName",0)
@@ -44,12 +43,28 @@ class ChannelSettings(private val context: Context) {
         (if(authorization.shortcut)shortcutAllowed(authorization.packageName) && shortcutGeneration()==authorization.masterGeneration
             else shakeAllowed(authorization.packageName) && shakeMasterGeneration()==authorization.masterGeneration) &&
             shakeApplicationGeneration(authorization.packageName)==authorization.applicationGeneration
-    /** One consistent preferences snapshot, without taking channels while a caller owns the store. */
-    internal fun shakeGenerationMatches(authorization:ShakeAuthorization):Boolean {
-        val snapshot=preferences.all
-        val masterKey=if(authorization.shortcut)"shortcut_generation_v1" else "shake_master_generation_v1"
-        return (snapshot[masterKey] ?: 0L)==authorization.masterGeneration &&
-            (snapshot["shake_package_generation_v1:${authorization.packageName}"] ?: 0L)==authorization.applicationGeneration
+    /** Snapshot persisted grants without acquiring the channels monitor inside a ledger transaction. */
+    internal fun captureGrants() = CaptureGrants(preferences.all) { packageName ->
+        InstalledAppsRepository.get(context).installationFingerprint(packageName)
+    }
+    internal class CaptureGrants(private val values: Map<String, *>, private val fingerprint: (String) -> String?) {
+        private val installationMatches = mutableMapOf<String, Boolean>()
+
+        fun allows(authorization:ShakeAuthorization):Boolean {
+            val masterKey=if(authorization.shortcut)"shortcut_generation_v1" else "shake_master_generation_v1"
+            val packageName = authorization.packageName
+            return packageName in (values["shake_apps_v1"] as? Set<*>).orEmpty() &&
+                (authorization.shortcut || values[Channel.OCR.key]==true) &&
+                (values[masterKey] ?: 0L)==authorization.masterGeneration &&
+                (values["shake_package_generation_v1:$packageName"] ?: 0L)==authorization.applicationGeneration &&
+                installationMatches.getOrPut(packageName) {
+                    val original = values["shake_installation_v1:$packageName"] as? String
+                    original != null && fingerprint(packageName) == original
+                }
+        }
+        fun allowsAutomatic(packageName:String,generation:Long):Boolean = values["automatic_enabled"]==true &&
+            packageName in (values["auto_apps_v1"] as? Set<*>).orEmpty() &&
+            (values[automaticGenerationKey(packageName)] ?: 0L)==generation
     }
     fun shortcutGeneration()=preferences.getLong("shortcut_generation_v1",0)
     @Synchronized fun shortcutAuthorization(packageName:String):ShakeAuthorization?=if(shortcutAllowed(packageName))
@@ -95,11 +110,13 @@ class ChannelSettings(private val context: Context) {
             installed.installationFingerprint(pkg)!=preferences.getString("shake_installation_v1:$pkg",null) }.forEach { setShakePackage(it,false) }
     }
     /** Durable local pause; a backup never imports consent or a live generation. */
-    @Synchronized fun pauseForRestore() {
-        check(preferences.edit().putBoolean("automatic_enabled",false).putBoolean(Channel.OCR.key,false)
-            .putStringSet("shake_apps_v1",emptySet()).putStringSet("auto_apps_v1",emptySet())
+    @Synchronized fun pauseForRestore(clearSelections:Boolean=true) {
+        val edit=preferences.edit().putBoolean("automatic_enabled",false).putBoolean(Channel.OCR.key,false)
             .putLong("shake_master_generation_v1",Math.addExact(shakeMasterGeneration(),1))
-            .putLong("shortcut_generation_v1",Math.addExact(shortcutGeneration(),1)).commit())
+            .putLong("shortcut_generation_v1",Math.addExact(shortcutGeneration(),1))
+        if(clearSelections)edit.putStringSet("shake_apps_v1",emptySet()).putStringSet("auto_apps_v1",emptySet())
+        net.ankio.ledger.core.PaymentApps.entries.forEach { bumpAutomaticGeneration(edit,it.packageName) }
+        check(edit.commit())
     }
     fun resetShakeSelectionForRestore() {
         set(Channel.OCR,false)
@@ -113,9 +130,9 @@ class ChannelSettings(private val context: Context) {
     /** A new individual enable must not reactivate stale selections from an old master switch. */
     @Synchronized fun enablePaymentApplication(packageName:String) {
         require(net.ankio.ledger.core.PaymentApps.entries.any { it.packageName==packageName })
-        if(!automaticEnabled())selectedAutoPackages().filter { it!=packageName }.forEach { setAutoPackage(it,false) }
-        setAutoPackage(packageName,true)
-        setAutomaticEnabled(true)
+        if(!automaticEnabled())selectedAutoPackages().filter { it!=packageName }.forEach { changeAutoPackage(it,false) }
+        changeAutoPackage(packageName,true)
+        changeAutomaticEnabled(true)
     }
     fun pauseForMissingPermission() {
         invalidateShortcuts()
@@ -123,25 +140,46 @@ class ChannelSettings(private val context: Context) {
         setAutomaticEnabled(false)
         selectedAutoPackages().forEach { setAutoPackage(it,false) }
     }
-    fun automaticGeneration(packageName:String)=automaticGenerations[packageName]?:0L
-    @Synchronized fun setAutomaticEnabled(enabled:Boolean) {
-        if(enabled==automaticEnabled())return
-        net.ankio.ledger.core.PaymentApps.entries.forEach { automaticGenerations[it.packageName]=automaticGeneration(it.packageName)+1 }
-        preferences.edit().putBoolean("automatic_enabled",enabled).apply()
+    fun automaticGeneration(packageName:String)=preferences.getLong(automaticGenerationKey(packageName),0)
+    private fun bumpAutomaticGeneration(edit:android.content.SharedPreferences.Editor,packageName:String) {
+        edit.putLong(automaticGenerationKey(packageName),Math.addExact(automaticGeneration(packageName),1))
     }
-    @Synchronized fun setAutoPackage(packageName:String,enabled:Boolean) {
+    fun setAutomaticEnabled(enabled:Boolean) {
+        val changed=synchronized(this) { changeAutomaticEnabled(enabled) }
+        if(changed && !enabled)reconcileAutomaticReservations()
+    }
+    private fun changeAutomaticEnabled(enabled:Boolean):Boolean {
+        if(enabled==automaticEnabled())return false
+        val edit=preferences.edit().putBoolean("automatic_enabled",enabled)
+        net.ankio.ledger.core.PaymentApps.entries.forEach { bumpAutomaticGeneration(edit,it.packageName) }
+        check(edit.commit()) { "自动识别设置未保存，请重试" }
+        return true
+    }
+    fun setAutoPackage(packageName:String,enabled:Boolean) {
+        val changed=synchronized(this) { changeAutoPackage(packageName,enabled) }
+        if(changed && !enabled)reconcileAutomaticReservations(packageName)
+    }
+    private fun changeAutoPackage(packageName:String,enabled:Boolean):Boolean {
         require(net.ankio.ledger.core.PaymentApps.entries.any { it.packageName==packageName })
         val selected=selectedAutoPackages().toMutableSet()
-        if((packageName in selected)==enabled)return
+        if((packageName in selected)==enabled)return false
         if(enabled)selected.add(packageName) else selected.remove(packageName)
-        automaticGenerations[packageName]=automaticGeneration(packageName)+1
-        preferences.edit().putStringSet("auto_apps_v1",selected).apply()
+        val edit=preferences.edit().putStringSet("auto_apps_v1",selected)
+        bumpAutomaticGeneration(edit,packageName)
+        check(edit.commit()) { "自动识别应用授权未保存，请重试" }
+        return true
+    }
+    private fun reconcileAutomaticReservations(packageName:String?=null) {
+        (context.applicationContext as? net.ankio.ledger.LedgerApp)?.tasks?.reconcileRevokedBatchReservations("payment_auto:",packageName)
     }
     fun wechatAutoConsented()="com.tencent.mm" in selectedAutoPackages() && automaticEnabled()
     fun wechatAutoEnabled()=autoAllowed("com.tencent.mm")
-    @Synchronized fun setWechatAuto(enabled:Boolean) {
-        setAutoPackage("com.tencent.mm",enabled)
-        setAutomaticEnabled(enabled)
+    fun setWechatAuto(enabled:Boolean) {
+        synchronized(this) {
+            changeAutoPackage("com.tencent.mm",enabled)
+            changeAutomaticEnabled(enabled)
+        }
+        if(!enabled)reconcileAutomaticReservations()
     }
     fun enabled(channel: Channel): Boolean = channel == Channel.OCR && preferences.getBoolean(channel.key, false)
     fun set(channel: Channel, enabled: Boolean) {
@@ -168,6 +206,7 @@ class ChannelSettings(private val context: Context) {
                 captureServiceComponent(context) }
     }
     companion object {
+        private fun automaticGenerationKey(packageName:String)="automatic_generation_v1:$packageName"
         private val registeredApplications=java.util.WeakHashMap<Context,Boolean>()
         @Synchronized private fun registerPackages(context:Context):Boolean {
             if(registeredApplications[context]==true)return false

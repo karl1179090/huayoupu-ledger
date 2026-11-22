@@ -196,14 +196,29 @@ object LedgerArchive {
         }
     }
 
+    internal fun checkClassificationMerge(store: LedgerStore, prepared: PreparedBackup): Unit = synchronized(store) {
+        prepared.ensureOpen()
+        val incoming = prepared.backup.classification ?: return@synchronized
+        val db = store.writableDatabase
+        db.beginTransaction()
+        try {
+            // Use the real directory merge, then roll back its temporary rows before touching recognition.
+            val mapping = CategoryDirectory.merge(db, prepared.backup.categoryDirectory)
+            ClassificationStorage.prepareRestore(db, incoming, mapping)
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Repeated imports are idempotent. Existing edits, evidence and capture permissions survive. */
     fun restore(store: LedgerStore, prepared: PreparedBackup): Int = restoreDetailed(store,prepared).imported
-    fun restoreDetailed(store:LedgerStore,prepared:PreparedBackup):RestoreSummary {
+    fun restoreDetailed(store:LedgerStore,prepared:PreparedBackup,pauseCaptureOnCommit:Boolean=false):RestoreSummary {
         prepared.ensureOpen()
-        if(prepared.legacy)return LedgerBackup.restoreDetailed(store,prepared.backup)
+        if(prepared.legacy)return LedgerBackup.restoreDetailed(store,prepared.backup,pauseCaptureOnCommit=pauseCaptureOnCommit)
         // Recheck all staged media before any ledger mutation, including changes since ZIP preflight.
         prepared.files.forEach { (hash,file)->attachmentBytes(prepared,hash);validateImage(file) }
-        return LedgerBackup.restoreDetailed(store,prepared.backup,taskImageProvider={operation->prepared.taskAssets[operation]?.let { attachmentBytes(prepared,it) }}) { record->
+        return LedgerBackup.restoreDetailed(store,prepared.backup,taskImageProvider={operation->prepared.taskAssets[operation]?.let { attachmentBytes(prepared,it) }},
+            pauseCaptureOnCommit=pauseCaptureOnCommit) { record->
             prepared.backup.histories[record.uid]?.let { entries->store.restoreHistory(record.id,entries) { restored->
                 prepared.historyAssets[record.uid]?.get(restored.entry.sequence)?.let { attachmentBytes(prepared,it) }
             } }

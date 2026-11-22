@@ -6,6 +6,9 @@ import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.os.Bundle
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -456,6 +459,56 @@ class ShakeWhitelistCaptureTest {
         assertTrue(app.store.all().any { it.bill.merchant.startsWith(merchant) })
     }
 
+    @Test fun shortcutShowsProgressAndEditsNewBillAboveTheSourceApplication() {
+        automation.serviceInfo=automation.serviceInfo.apply {
+            flags=flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        }
+        val entered=CompletableDeferred<Unit>()
+        val release=CompletableDeferred<Unit>().also { releases+=it }
+        service.processorFactory=factory(entered,release)
+        startFixture("safe")
+        startShortcut()
+        await {
+            entered.isCompleted && app.channels.lastStatus()=="正在识别…" &&
+                service.paymentDiagnostics().getJSONObject("feedback").getBoolean("attached")
+        }
+        release.complete(Unit)
+
+        val record=run {
+            await { app.captureQueue.size()==0 && app.store.all().any { it.bill.merchant.startsWith(merchant) } }
+            app.store.all().single { it.bill.merchant.startsWith(merchant) }
+        }
+        val category=app.store.categoryFor(record)!!.name
+        val capsule=findNode { it.contentDescription?.toString()?.contains("· $category，点击编辑账单")==true }
+        assertEquals(fixturePackage,foregroundPackage())
+        assertTrue(capsule.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        findNode { it.text?.toString()=="编辑账单" }
+        findNode { it.text?.toString()=="分类" }
+        findNode { it.text?.toString()=="钱包" }
+        findNode { it.text?.toString()=="备注" }
+        assertTrue(automation.windows.any { it.root?.packageName==fixturePackage })
+        val newCategory=app.store.categoryDirectory(record.bill.direction).first { it.name!=category }
+        val categoryField=findNode {
+            it.className?.toString()=="android.widget.Button" && it.text?.toString()==category
+        }
+        assertTrue(categoryField.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        assertTrue(findNode { it.text?.toString()==newCategory.name }.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        assertTrue(findNode { it.text?.toString()=="更多账单信息" }.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        findNode { it.text?.toString()=="商家" }
+        findNode { it.text?.toString()=="时间" }
+        findNode { it.text?.toString()=="收支方向" }
+        val amount=findNode { it.className?.toString()=="android.widget.EditText" && it.text?.toString()=="12.34" }
+        assertTrue(amount.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,"23.45")
+        }))
+        assertTrue(findNode { it.text?.toString()=="保存修改" }.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        await { app.store.get(record.id)?.bill?.amountCents==2345L }
+        await { foregroundPackage()==fixturePackage }
+        val edited=app.store.get(record.id)!!
+        assertEquals(newCategory.id,edited.bill.categoryDecision?.categoryId)
+        assertEquals(-2345L,edited.walletEffects.values.single())
+    }
+
     @Test fun shortcutRetainsPrivacyChecksAndRejectsAnUnselectedApplication() {
         val count=service.screenshotRequests;val before=taskIds()
         for(mode in listOf("password","editable","verification","blank")) {
@@ -504,8 +557,22 @@ class ShakeWhitelistCaptureTest {
         startFixture("safe")
         val count=service.screenshotRequests;val before=taskIds()
         startShortcut();await { entered.isCompleted }
-        startLedger();release.complete(Unit);SystemClock.sleep(500)
+        startLedger();release.complete(Unit)
+        await { app.channels.lastStatus().contains("窗口已经改变") || app.channels.lastStatus().contains("页面已切换") }
         assertEquals(count,service.screenshotRequests);assertEquals(before,taskIds());assertEquals(0,calls.get())
+    }
+
+    private fun findNode(matches:(AccessibilityNodeInfo)->Boolean):AccessibilityNodeInfo {
+        fun walk(node:AccessibilityNodeInfo):AccessibilityNodeInfo? {
+            if(matches(node))return node
+            return (0 until node.childCount).firstNotNullOfOrNull { node.getChild(it)?.let(::walk) }
+        }
+        var found:AccessibilityNodeInfo?=null
+        await {
+            found=automation.windows.firstNotNullOfOrNull { it.root?.let(::walk) }
+            found!=null
+        }
+        return requireNotNull(found)
     }
 
     private fun startShortcut() {

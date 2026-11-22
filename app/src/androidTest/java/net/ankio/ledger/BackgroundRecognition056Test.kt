@@ -38,23 +38,32 @@ class BackgroundRecognition056Test {
     }
     @Test fun savedFeedbackUsesCurrentStoredAmountInsteadOfStaleResponse()=withRecord { record,task,queue ->
         app.store.saveEdited(record.copy(bill=record.bill.copy(amountCents=4567)))
-        assertEquals("已记账 ¥45.67",queue.completedMessage(task,IngestResult.Saved(record)))
+        assertEquals("已记账 ¥45.67",queue.completedFeedback(task, IngestResult.Saved(record))?.message)
     }
     @Test fun removedSavedBillAndDuplicateNeverReportSuccess()=withRecord { record,task,queue ->
         app.store.delete(record.id)
-        assertFalse(queue.completedMessage(task,IngestResult.Saved(record)).startsWith("已记账"))
-        assertFalse(queue.completedMessage(task,IngestResult.DuplicateSkipped).startsWith("已记账"))
+        assertEquals(RecognitionFeedback(RecognitionCommitRecovery.REMOVED), queue.completedFeedback(task, IngestResult.Saved(record)))
+        assertNull(queue.completedFeedback(task, IngestResult.DuplicateSkipped))
         assertFalse(app.captureHealth.successful(record.id,"com.tencent.mm"))
     }
     @Test fun duplicateRequiresTaskLinkRatherThanStoredSuccessText() {
         val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm")
         try {
             app.tasks.update(task,"DUPLICATE","已记账 ¥99.99")
-            assertFalse(PaymentRecognitionQueue(app){true}.completedMessage(task,IngestResult.DuplicateSkipped).startsWith("已记账"))
+            assertNull(PaymentRecognitionQueue(app){true}.completedFeedback(task, IngestResult.DuplicateSkipped))
         } finally { app.tasks.delete(task) }
     }
+    @Test fun explicitShortcutReceivesDuplicateFeedback() {
+        val task=app.tasks.create(Source.OCR,"shortcut:com.tencent.mm")
+        try {
+            app.tasks.update(task,"DUPLICATE","已处理")
+            val queue=PaymentRecognitionQueue(app){true}
+            assertEquals("这笔已记过",queue.completedFeedback(task, IngestResult.DuplicateSkipped)?.message)
+        } finally { app.tasks.delete(task) }
+    }
+
     @Test fun reviewRecordDoesNotReportPostedSuccess()=withRecord(RecordState.REVIEW) { record,task,queue ->
-        assertEquals("金额待核对，请打开账单",queue.completedMessage(task,IngestResult.Saved(record)))
+        assertEquals(RecognitionFeedback("金额待核对，请打开账单", record.id), queue.completedFeedback(task, IngestResult.Saved(record)))
         assertFalse(app.captureHealth.successful(record.id,"com.tencent.mm"))
     }
     @Test fun completedRefundReportsAnAdjustmentInsteadOfAZeroAmountPayment() {
@@ -64,7 +73,10 @@ class BackgroundRecognition056Test {
         val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm")
         try {
             app.tasks.update(task,"SUCCEEDED","退款已更新",record.id)
-            assertEquals("退款已更新",PaymentRecognitionQueue(app){true}.completedMessage(task,IngestResult.Saved(record,updated=true)))
+            val queue = PaymentRecognitionQueue(app) { true }
+            val updated = IngestResult.Saved(record, updated = true, effect = RecognitionCommitEffect.REFUND_UPDATED)
+            assertEquals(RecognitionFeedback("退款已更新", record.id, posted = true), queue.completedFeedback(task, updated))
+            assertNull(queue.completedFeedback(task, IngestResult.Saved(record, effect = RecognitionCommitEffect.ALREADY_PROCESSED)))
         } finally { app.tasks.delete(task);app.store.delete(record.id) }
     }
     @Test fun walletRequiredFeedbackAsksForSelectionWithoutClaimingAnAmountError() {
@@ -78,7 +90,7 @@ class BackgroundRecognition056Test {
                 ParsedBill(1234,Direction.EXPENSE,merchant,"其他",System.currentTimeMillis(),UUID.randomUUID().toString(),true,"",true)) as IngestResult.Saved).record
             app.tasks.update(task,"REVIEW","请选择钱包",record.id)
             assertEquals("WALLET_REQUIRED",record.wallet!!.reviewCode)
-            assertEquals("请选择钱包后入账",PaymentRecognitionQueue(app){true}.completedMessage(task,IngestResult.Saved(record)))
+            assertEquals("请选择钱包后入账",PaymentRecognitionQueue(app){true}.completedFeedback(task, IngestResult.Saved(record))?.message)
         } finally { record?.let { app.store.delete(it.id) };app.tasks.delete(task);app.store.setDefaultWallet(previous) }
     }
     @Test fun publicBatteryRequestTargetsOnlyThisApplication() {
@@ -117,7 +129,8 @@ class BackgroundRecognition056Test {
             assertEquals(original.record.id,app.tasks.recordId(repeatTask))
             assertEquals(taobao,app.store.get(original.record.id)!!.bill.transactionId)
             assertEquals(1,app.store.all().count { it.bill.merchant==merchant })
-            assertEquals("已记账 ¥12.34",PaymentRecognitionQueue(app){true}.completedMessage(repeatTask,IngestResult.DuplicateSkipped))
+            assertEquals("已处理", app.tasks.message(repeatTask))
+            assertNull(PaymentRecognitionQueue(app){true}.completedFeedback(repeatTask, IngestResult.DuplicateSkipped))
         } finally {
             bitmap.recycle();app.tasks.delete(task);app.tasks.delete(repeatTask)
             app.store.all().filter { it.bill.merchant==merchant }.forEach { app.store.delete(it.id) }

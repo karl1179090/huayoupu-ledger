@@ -82,11 +82,12 @@ object LedgerBackup {
     }):Int=restoreDetailed(store,backup,restoreMedia=restoreMedia).imported
 
     /** Only newly imported UUIDs receive history; restoring must not overwrite later local edits. */
-    fun restoreDetailed(store:LedgerStore,backup:ValidatedBackup,taskImageProvider:(String)->ByteArray?={backup.taskImages[it]},restoreMedia:(LedgerRecord)->Unit={ record ->
+    fun restoreDetailed(store:LedgerStore,backup:ValidatedBackup,taskImageProvider:(String)->ByteArray?={backup.taskImages[it]},
+        pauseCaptureOnCommit:Boolean=false,restoreMedia:(LedgerRecord)->Unit={ record ->
         backup.histories[record.uid]?.let { store.restoreHistory(record.id,it) }
     }):RestoreSummary {
         preflight(backup)
-        return AtomicBackupTransaction.run(store) { db,tasks ->
+        return AtomicBackupTransaction.run(store,pauseCaptureOnCommit) { db,tasks ->
             val old=store.activeRecordIdsByUid()
             val count=store.restoreBackupDetailed(backup)
             for((uid,id) in store.activeRecordIdsByUid())if(uid !in old)restoreMedia(requireNotNull(store.get(id)))
@@ -95,6 +96,7 @@ object LedgerBackup {
                 RecognitionTaskBackup.restore(tasks,db,backup.recognitionTasks,count.recordMapping,
                     CategoryDirectory.merge(db,backup.categoryDirectory)) { taskImageProvider(it) }
             }
+            tasks?.reconcileClassificationSnapshots(db,restored=true,pauseCapture=pauseCaptureOnCommit)
             count
         }
     }

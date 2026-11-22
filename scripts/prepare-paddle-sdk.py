@@ -51,8 +51,8 @@ for item in LOCK['sources']:
     if valid(path, item['sha256']):
         continue
     upstream = 'LICENSE' if item['path'] == 'LICENSE' else 'deploy/ppocr-android/ppocr-sdk/' + item['path']
-    api = f"https://api.github.com/repos/PaddlePaddle/PaddleOCR/contents/{upstream}?ref={LOCK['commit']}"
-    data = base64.b64decode(json.loads(get(api))['content'])
+    raw = f"https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/{LOCK['commit']}/{upstream}"
+    data = get(raw)
     if sha(data) != item['sha256']:
         raise RuntimeError(f'Source checksum mismatch: {upstream}')
     path.parent.mkdir(parents=True, exist_ok=True)

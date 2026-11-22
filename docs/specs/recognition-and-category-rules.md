@@ -2,7 +2,7 @@
 
 日期：2026-11-08。调研基线：f0a52a5，应用版本 0.5.91-v6。
 
-状态：业务范围及测试边界已确认，已发布为 [Issue #5](https://github.com/karl1179090/huayoupu-ledger/issues/5)，标签为 `ready-for-agent`；尚未开始实现。
+本文记录 [Issue #5](https://github.com/karl1179090/huayoupu-ledger/issues/5) 的初始范围与测试边界。2026-11-23 的确认状态、快捷方式、分类规则与钱包匹配更新见 [后续变更归档](../../openspec/changes/archive/2026-11-23-refine-recognition-and-rule-workflows/proposal.md)。
 
 ## Problem Statement
 

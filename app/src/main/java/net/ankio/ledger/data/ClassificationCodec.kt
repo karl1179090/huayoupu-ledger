@@ -4,10 +4,12 @@ import net.ankio.ledger.core.*
 import org.json.JSONArray
 import org.json.JSONObject
 
-class ClassificationException(val code: String, message: String): IllegalArgumentException(message)
+open class ClassificationException(val code: String, message: String): IllegalArgumentException(message)
+internal class ClassificationCapacityException(message: String): ClassificationException("RULE_INVALID", message)
 
 data class StoredClassificationSnapshot(val operationKey: String, val snapshot: ClassificationSnapshot, val active: Boolean,val taskDatabase:String?=null)
 data class ClassificationBackup(val configuration: ClassificationSnapshot, val snapshots: List<StoredClassificationSnapshot>, val replacements:List<CategoryReplacement> = emptyList())
+internal data class ClassificationConfiguration(val snapshot: ClassificationSnapshot, val replacements: List<CategoryReplacement>)
 
 /** One bounded wire format for durable task snapshots, bridge data and backups. */
 object ClassificationCodec {
@@ -15,9 +17,12 @@ object ClassificationCodec {
     // the other selected columns and row metadata; never grow the window to fit data.
     private const val MAX_PAYLOAD_BYTES = 2_000_000
     private const val MAX_RULES = 2_000
-    internal fun requirePayloadFits(json:String) {
+    private fun requirePayloadFits(json:String) {
         if(json.toByteArray(Charsets.UTF_8).size>MAX_PAYLOAD_BYTES)
-            throw ClassificationException("RULE_INVALID","分类规则配置过大，请减少规则或条件后重试")
+            throw ClassificationCapacityException("分类规则配置过大，请减少规则或条件后重试")
+    }
+    private fun requireRuleCountFits(size: Int) {
+        if (size > MAX_RULES) throw ClassificationCapacityException("分类规则数量过多，每组最多 2,000 条")
     }
     fun rule(rule: ClassificationRule): JSONObject = JSONObject().put("id", rule.id).put("name", rule.name)
         .put("enabled", rule.enabled).put("direction", rule.direction.name).put("categoryId", rule.categoryId)
@@ -30,7 +35,7 @@ object ClassificationCodec {
     internal fun validateSnapshot(value: ClassificationSnapshot) {
         require(value.version.isNotBlank() && value.version.length<=160) { "分类快照版本无效" }
         listOf(value.customRules,value.builtinRules).forEach { rules ->
-            require(rules.size<=MAX_RULES) { "分类规则过多" }
+            requireRuleCountFits(rules.size)
             val ids=mutableSetOf<String>()
             rules.forEach { rule ->
                 validateRule(rule,true)
@@ -39,18 +44,31 @@ object ClassificationCodec {
         }
     }
 
-    fun snapshot(value: ClassificationSnapshot): JSONObject {
+    private fun snapshotJson(value: ClassificationSnapshot): JSONObject {
         validateSnapshot(value)
         return JSONObject().put("formatVersion", 1).put("version", value.version)
             .put("customRules", JSONArray().apply { value.customRules.forEach { put(rule(it)) } })
-            .put("builtinRules", JSONArray().apply { value.builtinRules.forEach { put(rule(it)) } }).also {
-                requirePayloadFits(it.toString())
-            }
+            .put("builtinRules", JSONArray().apply { value.builtinRules.forEach { put(rule(it)) } })
     }
+    fun snapshot(value: ClassificationSnapshot): JSONObject = snapshotJson(value).also { requirePayloadFits(it.toString()) }
 
-    /** Replacement history shares the configuration row and must fit together with rules. */
-    internal fun configuration(value:ClassificationSnapshot,replacements:List<CategoryReplacement>):JSONObject =
-        snapshot(value).put("categoryReplacements",CategoryReplacementStorage.encode(replacements)).also { requirePayloadFits(it.toString()) }
+    private fun configurationJson(value: ClassificationConfiguration): JSONObject {
+        CategoryReplacementStorage.validateEntries(value.replacements)
+        return snapshotJson(value.snapshot).put("categoryReplacements", CategoryReplacementStorage.encode(value.replacements))
+    }
+    internal fun encodeConfiguration(value: ClassificationConfiguration): String =
+        configurationJson(value).toString().also(::requirePayloadFits)
+
+    private fun readPayload(json: String): JSONObject {
+        requirePayloadFits(json)
+        return JSONObject(json)
+    }
+    internal fun readConfiguration(json: String): ClassificationConfiguration {
+        val input = readPayload(json)
+        return ClassificationConfiguration(readSnapshotFields(input), CategoryReplacementStorage.decode(input.optJSONArray("categoryReplacements")))
+    }
+    internal fun readReplacements(json: String): List<CategoryReplacement> =
+        CategoryReplacementStorage.decode(readPayload(json).optJSONArray("categoryReplacements"))
 
     fun readRule(input: JSONObject): ClassificationRule {
         fun text(key: String, max: Int): String = (input.get(key) as? String)?.takeIf { it.length <= max }
@@ -90,16 +108,17 @@ object ClassificationCodec {
             throw ClassificationException("RULE_INVALID", "请填写规则名称、有效关键词、收支方向及目标分类")
     }
 
-    fun readSnapshot(json: String): ClassificationSnapshot {
-        requirePayloadFits(json)
-        return readSnapshot(JSONObject(json))
-    }
+    fun readSnapshot(json: String): ClassificationSnapshot = readSnapshot(readPayload(json))
     fun readSnapshot(input: JSONObject): ClassificationSnapshot {
         requirePayloadFits(input.toString())
+        return readSnapshotFields(input)
+    }
+    private fun readSnapshotFields(input: JSONObject): ClassificationSnapshot {
         require(input.getInt("formatVersion")==1) { "分类快照版本不支持" }
         val version=input.getString("version")
         fun rules(key:String):List<ClassificationRule> {
-            val entries=input.getJSONArray(key);require(entries.length()<=MAX_RULES) { "分类规则过多" }
+            val entries=input.getJSONArray(key)
+            requireRuleCountFits(entries.length())
             return (0 until entries.length()).map { readRule(entries.getJSONObject(it)) }
         }
         return ClassificationSnapshot(version,rules("customRules"),rules("builtinRules")).also(::validateSnapshot)
@@ -120,9 +139,11 @@ object ClassificationCodec {
     }
 
     fun backup(value: ClassificationBackup): JSONObject {
-        configuration(value.configuration,value.replacements)
-        return JSONObject().put("configuration",snapshot(value.configuration))
-            .put("categoryReplacements",CategoryReplacementStorage.encode(value.replacements))
+        val configuration = configurationJson(ClassificationConfiguration(value.configuration, value.replacements))
+        requirePayloadFits(configuration.toString())
+        val replacements = configuration.remove("categoryReplacements")
+        return JSONObject().put("configuration", configuration)
+            .put("categoryReplacements", replacements)
             .put("snapshots",JSONArray().apply { value.snapshots.forEach { put(JSONObject().put("operationKey",it.operationKey)
                 .put("active",it.active).put("taskDatabase",it.taskDatabase ?: JSONObject.NULL).put("snapshot",snapshot(it.snapshot))) } })
     }
@@ -135,7 +156,7 @@ object ClassificationCodec {
             require(key.length in 1..200 && keys.add(key)) { "分类快照任务标识无效" }
             StoredClassificationSnapshot(key,readSnapshot(entry.getJSONObject("snapshot")),entry.get("active") as? Boolean ?: error("快照状态无效"),if(entry.isNull("taskDatabase"))null else entry.getString("taskDatabase").also { require(it.length in 1..200) })
         },CategoryReplacementStorage.decode(input.optJSONArray("categoryReplacements"))).also {
-            configuration(it.configuration,it.replacements)
+            encodeConfiguration(ClassificationConfiguration(it.configuration, it.replacements))
         }
     }
 }

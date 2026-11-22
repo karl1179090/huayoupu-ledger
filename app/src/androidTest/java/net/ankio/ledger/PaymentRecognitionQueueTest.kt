@@ -12,7 +12,12 @@ import net.ankio.ledger.ocr.SyntheticRecognitionBackend
 import net.ankio.ledger.capture.ChannelSettings
 import net.ankio.ledger.capture.PaymentRecognitionQueue
 import net.ankio.ledger.capture.CaptureProcessor
+import net.ankio.ledger.core.Capture
+import net.ankio.ledger.core.Direction
+import net.ankio.ledger.core.ParsedBill
 import net.ankio.ledger.core.PaymentApps
+import net.ankio.ledger.core.RefundInfo
+import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.core.RecordState
 import net.ankio.ledger.core.Source
 import org.json.JSONArray
@@ -251,7 +256,7 @@ class PaymentRecognitionQueueTest {
         await { queue.size()==0 }
         assertEquals("A frame already posted by the old app must not be uploaded again",0,fake.calls.get())
         assertEquals("DUPLICATE",app.tasks.status(same));assertEquals(1,ownRecords().size)
-        assertEquals("已记账 ¥12.34",app.tasks.message(same))
+        assertEquals("已处理",app.tasks.message(same))
         assertEquals(saved.record.id,task(same).getLong("recordId"))
         // A worker removes itself before its finally.resume() has returned. Let that
         // recovery pass finish before publishing the next synthetic queued task.
@@ -260,6 +265,34 @@ class PaymentRecognitionQueueTest {
         await { queue.size()==0 }
         assertEquals("New window task=${task(next)}",1,fake.calls.get());assertEquals("SUCCEEDED",app.tasks.status(next))
         assertEquals(2,ownRecords().size)
+    }
+
+    @Test fun eventReceiptFromAnotherTaskLinksTheRefundedBillWithoutFeedbackOrRecognition() = runBlocking {
+        val id = newTask()
+        val event = "payment_page:${UUID.randomUUID()}:${"f".repeat(64)}"
+        val firstOperation = "recognition:${UUID.randomUUID()}"
+        app.tasks.diagnose(id, "payment_identity", event)
+        val at = System.currentTimeMillis()
+        val order = UUID.randomUUID().toString()
+        val payment = ParsedBill(1200, Direction.EXPENSE, "$merchantPrefix-旧回执", "其他", at, order, true, "", true)
+        val capture = Capture(Source.OCR, WECHAT, "合成付款", at)
+        val saved = app.store.ingestRecognition(capture, payment, firstOperation, event) as IngestResult.Saved
+        val refund = payment.copy(amountCents = 800, refund = RefundInfo("wechat", 1200, 400))
+        try {
+            assertTrue((app.store.ingest(capture.copy(text = "合成退款"), refund) as IngestResult.Saved).updated)
+            val notices = java.util.concurrent.CopyOnWriteArrayList<String>()
+            val fake = FakeModel().also { it.release.complete(Unit) }
+            assertTrue(queue.enqueue(id, WECHAT, true, fake.factory) { message, loading -> if (!loading) notices += message })
+            await { queue.size() == 0 }
+            assertEquals(0, fake.calls.get())
+            assertEquals("DUPLICATE", app.tasks.status(id))
+            assertEquals("已处理", app.tasks.message(id))
+            assertEquals(saved.record.id, app.tasks.recordId(id))
+            assertTrue(notices.isEmpty())
+            assertEquals(800L, app.store.get(saved.record.id)?.bill?.amountCents)
+        } finally {
+            app.store.writableDatabase.delete("wallet_submissions", "token IN (?,?)", arrayOf(firstOperation, "capture-event:$event"))
+        }
     }
 
     private fun newTask(automatic:Boolean=true):Long {

@@ -24,6 +24,7 @@ import net.ankio.ledger.data.AccountBanks
 import net.ankio.ledger.data.CustomCategory
 import net.ankio.ledger.data.CategoryDeletionPreview
 import net.ankio.ledger.data.CategoryPreviewStale
+import net.ankio.ledger.data.ClassificationCapacityException
 import net.ankio.ledger.data.ClassificationCodec
 import net.ankio.ledger.data.ClassificationPreviewCodec
 import net.ankio.ledger.data.ClassificationException
@@ -34,6 +35,7 @@ import net.ankio.ledger.data.LedgerReadView
 import net.ankio.ledger.data.CalendarRecordPages
 import net.ankio.ledger.data.WalletReadModel
 import net.ankio.ledger.data.ReceiptEvidenceCodec
+import net.ankio.ledger.data.RecognitionCommitRecovery
 import net.ankio.ledger.data.WalletException
 import net.ankio.ledger.data.paymentProvider
 import net.ankio.ledger.ledger
@@ -393,10 +395,12 @@ class LedgerWebBridge(private val activity: MainActivity) {
                     submissionToken=string(input,"submissionToken",160).also { checkInput(it.isNotBlank(),"提交标识无效") })
                 if(taskId>0) {
                     app.tasks.image(taskId)?.let { app.store.attachScreenshot(saved.id,it) }
-                    app.tasks.update(taskId,"SUCCEEDED","已手动补录账单",saved.id)
+                    if (saved.state == RecordState.REVIEW) app.tasks.update(taskId,"REVIEW",saved.reason,saved.id)
+                    else app.tasks.update(taskId,"SUCCEEDED","已手动补录账单",saved.id)
                 }
                 app.changed(true)
                 JSONObject().put("ok", true).put("id", saved.id).put("state",saved.state.name)
+                    .put("reason",saved.reason).put("revision",saved.wallet?.revision ?: 0L)
             }
         }
         result.toString()
@@ -433,7 +437,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
     fun confirmRefund(pendingId: Long, targetId: Long): String = try {
         checkInput(pendingId in 1..MAX_SAFE_INTEGER && targetId in 1..MAX_SAFE_INTEGER, "账单编号无效")
         val saved = app.store.confirmRefund(pendingId, targetId)
-        app.tasks.reassignRecord(pendingId, saved.record.id)
+        RecognitionCommitRecovery.reassignRefund(app.tasks, app.store, pendingId, saved.record.id)
         app.changed(true)
         JSONObject().put("ok", true).put("id", saved.record.id).put("updated", saved.updated).toString()
     } catch (error: Exception) {
@@ -711,7 +715,7 @@ class LedgerWebBridge(private val activity: MainActivity) {
         .put("replacements",JSONArray().apply { value.replacements.forEach { put(categoryJson(it)) } })
 
     @JavascriptInterface fun previewCategoryDeletion(id:String):String=try {
-        synchronized(app.store) { JSONObject().put("ok",true).put("deletionPreview",deletionPreviewJson(app.store.previewCategoryDeletion(id))).toString() }
+        JSONObject().put("ok",true).put("deletionPreview",deletionPreviewJson(app.store.previewCategoryDeletion(id))).toString()
     } catch(error:Exception) { categoryFailure(error) }
 
     @JavascriptInterface fun confirmCategoryDeletion(json:String):String=try {
@@ -721,19 +725,21 @@ class LedgerWebBridge(private val activity: MainActivity) {
             ?: throw CategoryException("CATEGORY_INVALID","分类删除数据无效")
         val id=text("id");val token=text("previewToken")
         val replacement=if(input.isNull("replacementId"))null else text("replacementId")
+        app.store.confirmCategoryDeletion(id,replacement,token);app.changed()
         synchronized(app.store) {
-            app.store.confirmCategoryDeletion(id,replacement,token);app.changed()
             directoryResponse().put("classificationRules",ClassificationCodec.snapshot(app.store.classificationRules())).toString()
         }
     } catch(error:CategoryPreviewStale) {
         failure(error.message ?: "分类引用已变化，请核对最新影响后再确认删除","CATEGORY_PREVIEW_STALE")
             .put("deletionPreview",deletionPreviewJson(error.preview)).toString()
     } catch(error:CategoryException) { categoryFailure(error) }
+    catch(error:ClassificationCapacityException) { failure(error.message ?: "分类规则配置过大",error.code).toString() }
     catch(_:org.json.JSONException) { failure("分类删除数据无效","CATEGORY_INVALID").toString() }
     catch(_:Exception) { failure("分类删除失败，所有更改均已回滚","CATEGORY_DELETE_FAILED").toString() }
 
     @JavascriptInterface fun removeCategory(id: String): String = try {
-        synchronized(app.store) { app.store.removeCategory(id); app.changed(); directoryResponse().toString() }
+        app.store.removeCategory(id); app.changed()
+        synchronized(app.store) { directoryResponse().toString() }
     } catch (error: Exception) { categoryFailure(error) }
 
     @JavascriptInterface

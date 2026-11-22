@@ -9,6 +9,7 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayOutputStream
 import java.util.UUID
 
 /** Storage capacity is observed through public saves, backups and durable task snapshots. */
@@ -68,10 +69,11 @@ class ClassificationCapacityTest {
         return baseline.copy(customRules=rules).also { assertEquals(limit,bytes(ClassificationCodec.snapshot(it).toString())) }
     }
 
-    private fun assertCapacityFailure(action:()->Unit) {
+    private fun assertCapacityFailure(action:()->Unit): String {
         val failure=runCatching(action).exceptionOrNull()
         assertTrue("Oversized UTF-8 payload must report a normal rule validation error",failure is ClassificationException)
         assertEquals("RULE_INVALID",(failure as ClassificationException).code)
+        return requireNotNull(failure.message)
     }
 
     @Test fun saveCannotOutgrowReadableFullConfigurationAndLeavesEveryPublicStateUnchanged() {
@@ -133,6 +135,8 @@ class ClassificationCapacityTest {
     @Test fun maximumConfigurationSurvivesActualQueuedTaskAndReopenWhileOversizedHoldIsAtomic() {
         val name="classification-capacity-queue-${UUID.randomUUID()}.db"
         val taskName="classification-capacity-tasks-${UUID.randomUUID()}.db"
+        val restoredName = "classification-capacity-restored-${UUID.randomUUID()}.db"
+        val restoredTasksName = "classification-capacity-restored-tasks-${UUID.randomUUID()}.db"
         val nodeEvidence=NodeSnapshot("com.tencent.mm",7,"com.tencent.mm.SyntheticDetail",1,100,110,1_799_400_000_000,
             NodeEnvironment("synthetic",1,"synthetic-api34","synthetic-device"),List(200) { index ->
                 CaptureNode(index,if(index==0)null else if(index<=3)0 else index%3+1,if(index==0)0 else if(index<=3)1 else 2,
@@ -141,6 +145,7 @@ class ClassificationCapacityTest {
         assertTrue(bytes(NodeSnapshotCodec.json(nodeEvidence).toString())>100_000)
         try {
             lateinit var expected:ClassificationSnapshot
+            lateinit var backup: String
             var taskId=0L
             LedgerStore(app,name).use { store ->
                 val seed=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
@@ -153,13 +158,13 @@ class ClassificationCapacityTest {
                 RecognitionTasks(app,taskName,classificationStore=store).use { tasks ->
                     taskId=tasks.create(Source.OCR,"shake:com.tencent.mm")
                     assertEquals(expected,tasks.classificationSnapshot(taskId))
-                    assertTrue(tasks.queued(taskId,"synthetic-capacity-image".toByteArray(),nodeEvidence))
+                    assertTrue(tasks.queued(taskId, syntheticBackupImage(184), nodeEvidence))
                     assertEquals(nodeEvidence.fingerprint,tasks.nodeSnapshot(taskId)!!.fingerprint)
                 }
-                val before=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
+                backup = LedgerBackup.encode(store, app.channels)
                 val oversized=expected.copy(version=expected.version+"x".repeat(overhead+1))
                 assertCapacityFailure { store.holdClassificationSnapshot("synthetic-capacity-rejected",oversized) }
-                assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream()))
+                assertEquals(backup, LedgerBackup.encode(store, app.channels))
             }
             LedgerStore(app,name).use { reopened -> RecognitionTasks(app,taskName,classificationStore=reopened).use { tasks ->
                 assertEquals(expected,reopened.classificationRules())
@@ -170,7 +175,17 @@ class ClassificationCapacityTest {
                 assertEquals(expected,reopened.classificationBackup().snapshots.single().snapshot)
                 tasks.delete(taskId)
             } }
-        } finally { app.deleteDatabase(taskName);app.deleteDatabase(name) }
+            LedgerStore(app, restoredName).use { restored -> RecognitionTasks(app, restoredTasksName, classificationStore = restored).use { tasks ->
+                val decoded = LedgerBackup.decode(backup.byteInputStream())
+                repeat(2) { LedgerBackup.restore(restored, decoded) }
+                val id = tasks.pendingQueued().single().first
+                assertEquals(expected, tasks.classificationSnapshot(id))
+                assertEquals(nodeEvidence.fingerprint, tasks.nodeSnapshot(id)!!.fingerprint)
+                tasks.delete(id)
+            } }
+        } finally {
+            listOf(taskName, name, restoredTasksName, restoredName).forEach(app::deleteDatabase)
+        }
     }
 
     @Test fun replacementOverheadCannotPartiallyDeleteCategoryOrMoveExistingBillAndFunds() {
@@ -203,6 +218,7 @@ class ClassificationCapacityTest {
     @Test fun individuallySafeBackupsCannotMergeIntoUnreadableRulesOrPartiallyImportFunds() {
         val sourceName="classification-capacity-merge-source-${UUID.randomUUID()}.db"
         val targetName="classification-capacity-merge-target-${UUID.randomUUID()}.db"
+        val tasksName = "classification-capacity-merge-tasks-${UUID.randomUUID()}.db"
         try { LedgerStore(app,sourceName).use { source -> LedgerStore(app,targetName).use { target ->
             for((store,prefix) in listOf(source to "incoming",target to "local")) {
                 val seed=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
@@ -214,14 +230,57 @@ class ClassificationCapacityTest {
             source.saveEdited(LedgerRecord(capture=Capture(Source.MANUAL,"manual",""),
                 bill=ParsedBill(200,Direction.EXPENSE,"合成容量合并商家","其他",1_798_776_000_000,null,true,"",true),
                 state=RecordState.POSTED),walletAccountUid=wallet.uid,manualWalletSelected=true)
-            val incoming=LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream())
-            val before=LedgerBackup.decode(LedgerBackup.encode(target,app.channels).byteInputStream())
-            assertCapacityFailure { LedgerBackup.restore(target,incoming) }
-            assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(target,app.channels).byteInputStream()))
-            assertTrue(target.accounts().isEmpty());assertTrue(target.all().isEmpty())
-            LedgerStore(app,targetName).use { reopened ->
-                assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(reopened,app.channels).byteInputStream()))
+
+            RecognitionTasks(app, tasksName, classificationStore = target).use { tasks ->
+                val task = tasks.create(Source.IMAGE, "image")
+                try {
+                    assertTrue(tasks.queued(task, syntheticBackupImage(183)))
+                    val before = LedgerBackup.encode(target, app.channels)
+                    val incoming = ByteArrayOutputStream().also { LedgerArchive.write(source, app.channels, it) }.toByteArray()
+                    LedgerArchive.read(incoming.inputStream(), app.cacheDir).use { prepared ->
+                        val previewFailure = assertCapacityFailure { LedgerArchive.checkClassificationMerge(target, prepared) }
+                        assertTrue(previewFailure.contains("配置过大"))
+                        assertEquals("QUEUED", tasks.status(task))
+                        assertEquals(before, LedgerBackup.encode(target, app.channels))
+
+                        val restoreFailure = assertCapacityFailure { LedgerArchive.restoreDetailed(target, prepared) }
+                        assertEquals(previewFailure, restoreFailure)
+                        assertEquals("QUEUED", tasks.status(task))
+                        assertEquals(before, LedgerBackup.encode(target, app.channels))
+                        assertTrue(target.accounts().isEmpty())
+                        assertTrue(target.all().isEmpty())
+                    }
+                    LedgerStore(app, targetName).use { reopened ->
+                        reopened.bindBackupTasks(tasks)
+                        assertEquals(before, LedgerBackup.encode(reopened, app.channels))
+                    }
+                } finally {
+                    tasks.delete(task)
+                }
             }
-        } } } finally { app.deleteDatabase(sourceName);app.deleteDatabase(targetName) }
+        } } } finally { app.deleteDatabase(sourceName);app.deleteDatabase(targetName);app.deleteDatabase(tasksName) }
+    }
+
+    @Test fun validMergedConfigurationFitsWhenOnlyTheIntermediateRuleSetWouldBeTooLarge() {
+        val name = "classification-capacity-merge-final-${UUID.randomUUID()}.db"
+        try {
+            LedgerStore(app, name).use { store ->
+                val seed = LedgerBackup.decode(LedgerBackup.encode(store, app.channels).byteInputStream())
+                val baseline = seed.classification!!.configuration
+                val local = replacements(baseline, 2_000_000)
+                LedgerBackup.restore(store, seed.copy(classification = ClassificationBackup(baseline, emptyList(), local)))
+
+                val incoming = baseline.copy(version = "synthetic-reduced", builtinRules = emptyList())
+                val extra = CategoryReplacement("synthetic:incoming-final", "合成归档替代", Direction.EXPENSE, "cat:expense:other")
+                val merged = local + extra
+                assertTrue(bytes(payload(baseline, merged)) > 2_000_000)
+                assertTrue(bytes(payload(incoming, merged)) <= 2_000_000)
+                LedgerBackup.restore(store, seed.copy(classification = ClassificationBackup(incoming, emptyList(), listOf(extra))))
+
+                assertEquals(ClassificationBackup(incoming, emptyList(), merged), store.classificationBackup())
+            }
+        } finally {
+            app.deleteDatabase(name)
+        }
     }
 }

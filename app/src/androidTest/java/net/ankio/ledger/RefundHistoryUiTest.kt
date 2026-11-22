@@ -135,8 +135,13 @@ class RefundHistoryUiTest {
                 val changedDirection=JSONObject(web.text("LedgerNative.save(JSON.stringify({...readDraft(),id:${original.id},direction:'INCOME'}))"))
                 assertFalse(changedDirection.getBoolean("ok"))
                 web.run("document.querySelector('#category').click()")
-                web.await("!document.querySelector('[data-direction]') && document.querySelector('[data-category=\"购物\"]')")
-                web.run("document.querySelector('[data-category=\"购物\"]').click();document.querySelector('#note').value='全退后保留备注';document.querySelector('#import-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
+                val shopping = "#sheet #record-category-choices [data-category=\"购物\"]"
+                web.await("document.querySelector('#sheet').open && !document.querySelector('#sheet [data-direction]') && document.querySelector('$shopping')")
+                web.run("document.querySelector('$shopping').click()")
+                web.await("!document.querySelector('#sheet').open")
+                assertEquals("购物", web.text("readDraft().category"))
+                assertEquals("true", web.value("readDraft().categoryEdited"))
+                web.run("document.querySelector('#note').value='全退后保留备注';document.querySelector('#import-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
                 web.await("!document.querySelector('#record-panel').open")
                 val saved=app.store.get(original.id)!!
                 assertEquals(0L,saved.bill.amountCents);assertEquals("购物",saved.bill.category)

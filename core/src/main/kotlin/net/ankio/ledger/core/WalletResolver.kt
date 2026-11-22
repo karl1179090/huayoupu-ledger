@@ -49,13 +49,7 @@ object WalletResolver {
             val bound = targetPackage?.let(appBindings::get)
             return matching.singleOrNull { it.uid == bound } ?: matching.singleOrNull()
         }
-        val bankMatches = if(evidence?.medium=="BANK_CARD") usable.filter { candidate ->
-                val bank = BankCodes.normalize(candidate.bankCode) ?: BankCodes.normalize(candidate.kind)
-                val card = candidate.kind == "bank" || candidate.kind.startsWith("bank_") || bank != null
-                card && (evidence.bankCode == null || BankCodes.normalize(evidence.bankCode)?.let { it == bank } == true) &&
-                    (evidence.cardLast4 == null || candidate.cardLast4 == evidence.cardLast4) &&
-                    (evidence.bankCode != null || evidence.cardLast4 != null)
-            } else emptyList()
+        val bankMatches = if (evidence?.medium == "BANK_CARD") matchBankCards(usable, evidence) else emptyList()
         val strong = if (evidence == null || evidence.ambiguous) null else when (evidence.medium) {
             "BANK_CARD" -> bankMatches.singleOrNull()
             "WECHAT_BALANCE" -> platformWallet("wechat")
@@ -96,6 +90,27 @@ object WalletResolver {
         if (appWallet != null) return WalletResolution(appWallet.uid, "APP", fallbackReason, fingerprint)
         if (usable.any { it.uid == defaultAccountUid }) return WalletResolution(defaultAccountUid, "DEFAULT", fallbackReason, fingerprint)
         return WalletResolution(null, null, "WALLET_REQUIRED", fingerprint)
+    }
+
+    private fun matchBankCards(wallets: List<WalletCandidate>, evidence: PaymentMethodEvidence): List<WalletCandidate> {
+        val bank = evidence.bankCode?.let { BankCodes.normalize(it) ?: return emptyList() }
+        val tail = evidence.cardLast4
+        if (bank == null && tail == null) return emptyList()
+        val cards = wallets.mapNotNull { wallet ->
+            val walletBank = BankCodes.normalize(wallet.bankCode) ?: BankCodes.normalize(wallet.kind)
+            if (wallet.kind == "bank" || wallet.kind.startsWith("bank_") || walletBank != null) wallet to walletBank else null
+        }
+        val matching = cards.filter { (wallet, walletBank) ->
+            (bank == null || bank == walletBank) && (tail == null || tail == wallet.cardLast4)
+        }.map { it.first }
+        if (matching.isNotEmpty() || bank == null || tail == null) return matching
+
+        val byBank = cards.filter { it.second == bank }
+        val byTail = cards.filter { it.first.cardLast4 == tail }
+        // A missing field on a saved card can be supplied by the other identifier.
+        val bankOnly = byBank.singleOrNull()?.first?.takeIf { it.cardLast4 == null && byTail.isEmpty() }
+        val tailOnly = byTail.singleOrNull()?.takeIf { it.second == null && it.first.bankCode.isNullOrBlank() && byBank.isEmpty() }?.first
+        return listOfNotNull(bankOnly, tailOnly)
     }
 
     /** Historical source prefixes are allowed; arbitrary OCR text never becomes a source package. */

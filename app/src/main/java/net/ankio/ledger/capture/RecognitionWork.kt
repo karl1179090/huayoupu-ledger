@@ -28,8 +28,12 @@ class RecognitionWork(private val scope:CoroutineScope) {
     }
     /** No application/store/task/media/queue monitor is held while waiting. */
     suspend fun closeAndDrain() {
-        val pending=synchronized(this) { check(accepting);accepting=false;jobs.toMap() }
+        val pending=pauseAdmission()
         pending.keys.forEach { it.cancel() };pending.values.awaitAll()
     }
-    fun reopen()=synchronized(this) { check(jobs.isEmpty());accepting=true }
+    internal fun pauseAdmission()=synchronized(this) { check(accepting);accepting=false;jobs.toMap() }
+    fun reopen(requireDrained:Boolean=true)=synchronized(this) {
+        if(requireDrained)check(jobs.isEmpty())
+        accepting=true
+    }
 }

@@ -31,6 +31,20 @@ class WalletResolverTest {
         assertNull(resolve(listOf(wechat, bank.copy(archived = true))).accountUid)
     }
 
+    @Test fun uniqueBankOrTailCanSupplyMissingWalletMetadataButCannotOverrideConflict() {
+        val unlabelled = bank.copy(bankCode = null)
+        val bankWithoutTail = bank.copy(cardLast4 = null)
+        assertEquals("card", resolve(listOf(bankWithoutTail, cash)).accountUid)
+        assertEquals("card", resolve(listOf(unlabelled, cash)).accountUid)
+
+        val otherBank = bank.copy(uid = "other", bankCode = "icbc")
+        assertNull(resolve(listOf(bankWithoutTail, otherBank)).accountUid)
+        assertNull(resolve(listOf(bank.copy(cardLast4 = "1234"), otherBank)).accountUid)
+        assertNull(resolve(listOf(bank.copy(cardLast4 = "1234"))).accountUid)
+        assertNull(resolve(listOf(bankWithoutTail, bankWithoutTail.copy(uid = "second"))).accountUid)
+        assertNull(resolve(listOf(unlabelled, unlabelled.copy(uid = "second"))).accountUid)
+    }
+
     @Test fun incomingUnmatchedBankEvidenceCannotPreserveAnUnconfirmedAppFallback() {
         val fallback = resolve(listOf(wechat, cash), e = null)
         val unresolved = WalletResolver.resolve(listOf(wechat, cash, bank.copy(cardLast4="1234")), PaymentApps.WECHAT, evidence, "cash",

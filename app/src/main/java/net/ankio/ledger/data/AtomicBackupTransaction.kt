@@ -6,13 +6,22 @@ import android.database.sqlite.SQLiteDatabase
  * Callers drain asynchronous writers before entering; no coroutine suspension is permitted here.
  */
 class RestoreOutcomeUncertainException(cause:Throwable):Exception(cause)
+internal class RestorePreparationException(cause:Throwable):Exception(cause)
 
 internal object AtomicBackupTransaction {
+    private const val CAPTURE_PAUSE_PENDING="capture-pause-pending"
     internal var processProbe:((String)->Unit)?=null
     internal fun checkpoint(phase:String) { if(net.ankio.ledger.BuildConfig.DEBUG)processProbe?.invoke(phase) }
     fun create(db:SQLiteDatabase) { db.execSQL("CREATE TABLE backup_restore_runs(run_uid TEXT PRIMARY KEY NOT NULL,created_at INTEGER NOT NULL)") }
 
-    fun <T> run(store:LedgerStore,action:(SQLiteDatabase,RecognitionTasks?)->T):T {
+    fun capturePausePending(store:LedgerStore):Boolean = synchronized(store) {
+        store.readableDatabase.rawQuery("SELECT 1 FROM backup_restore_runs WHERE run_uid=?",arrayOf(CAPTURE_PAUSE_PENDING)).use { it.moveToFirst() }
+    }
+    fun clearCapturePause(store:LedgerStore) = synchronized(store) {
+        store.writableDatabase.delete("backup_restore_runs","run_uid=?",arrayOf(CAPTURE_PAUSE_PENDING))
+    }
+
+    fun <T> run(store:LedgerStore,pauseCaptureOnCommit:Boolean=false,action:(SQLiteDatabase,RecognitionTasks?)->T):T {
         val tasks=store.backupTasks();val media=store.backupScreenshots
         // Complete helper upgrades/onOpen before any attachment or outer transaction.
         store.writableDatabase;tasks?.writableDatabase;media.writableDatabase
@@ -40,6 +49,8 @@ internal object AtomicBackupTransaction {
                 try {
                     result=media.withRestoreDatabase(db) { action(db,tasks) }
                     db.execSQL("INSERT INTO backup_restore_runs(run_uid,created_at) VALUES(?,?)",arrayOf(run,System.currentTimeMillis()))
+                    if(pauseCaptureOnCommit)db.execSQL("INSERT OR REPLACE INTO backup_restore_runs(run_uid,created_at) VALUES(?,?)",
+                        arrayOf(CAPTURE_PAUSE_PENDING,System.currentTimeMillis()))
                     checkpoint("beforeCommit")
                     db.setTransactionSuccessful()
                 } catch(error:Throwable) {

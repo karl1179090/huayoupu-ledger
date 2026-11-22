@@ -41,7 +41,11 @@ class RecognitionCommitRecoveryTest {
             val result = CaptureProcessor(app, OcrClient(app, backend))
                 .processPrepared(image, Source.IMAGE, "image", task) { true } as IngestResult.Saved
             val record = result.record
-            assertEquals(bill.copy(category="其他"), record.bill.copy(categoryDecision=null))
+            val receiptEvidence = requireNotNull(record.bill.receipt)
+            assertEquals("OCR", receiptEvidence.recognition?.route)
+            assertEquals("image_import", receiptEvidence.recognition?.reason)
+            assertEquals(bill.copy(category="其他", receipt=ReceiptEvidence()),
+                record.bill.copy(categoryDecision=null, receipt=receiptEvidence.copy(recognition=null)))
             assertEquals(CategorySource.FALLBACK,record.bill.categoryDecision!!.source)
             assertEquals(app.tasks.classificationSnapshot(task)!!.version,record.bill.categoryDecision!!.ruleVersion)
             assertEquals(Source.IMAGE, record.capture.source); assertEquals("image", record.capture.origin)
@@ -53,6 +57,7 @@ class RecognitionCommitRecoveryTest {
             val receipt = app.store.committedCandidate(app.tasks.operationKey(task)!!, CandidateId.SINGLE)!!
             assertEquals(CandidateId.SINGLE, receipt.candidateId); assertEquals(record.uid, receipt.recordUid)
             assertEquals(record.id, receipt.record!!.id)
+            assertEquals(RecognitionCommitEffect.RECORDED, receipt.effect)
         } finally {
             app.store.all().filter { it.bill.merchant == bill.merchant }.forEach { app.store.delete(it.id) }
             app.tasks.operationKey(task)?.let { app.store.writableDatabase.delete("wallet_submissions", "token=?", arrayOf(it)) }
@@ -99,6 +104,7 @@ class RecognitionCommitRecoveryTest {
             app.tasks.diagnose(repeat, "payment_identity", event)
             assertEquals(IngestResult.DuplicateSkipped, CaptureProcessor(app, client).processPrepared(image, Source.OCR, "com.tencent.mm", repeat) { true })
             assertEquals(saved.id, app.tasks.recordId(repeat)); assertEquals(1, calls.get())
+            assertEquals("已处理", app.tasks.message(repeat))
 
             RecognitionTasks(app).use { reopenedTasks -> LedgerStore(app).use { reopenedLedger ->
                 assertEquals(operation, reopenedTasks.operationKey(task))
@@ -236,7 +242,7 @@ class RecognitionCommitRecoveryTest {
                 db.version = 4
             }
             val operation = RecognitionTasks(app, name).use { tasks ->
-                assertEquals(8, tasks.readableDatabase.version)
+                assertEquals(9, tasks.readableDatabase.version)
                 val existing = tasks.operationKey(1)!!
                 val newer = tasks.create(Source.IMAGE, "image")
                 assertNotEquals(existing, tasks.operationKey(newer)); existing
@@ -332,6 +338,148 @@ class RecognitionCommitRecoveryTest {
         }
     }
 
+    @Test fun actualAndRepeatedRefundRecoverTheirOwnEffectsAcrossTaskWriteFailures() = runBlocking {
+        app.taskRecovery.await()
+        val previous = app.store.walletSettings().defaultAccountUid
+        val wallet = app.store.saveAccount(LedgerAccount(name = "合成退款中断钱包", amountCents = 20_000, kind = "cash"))
+        app.store.setDefaultWallet(wallet.uid)
+        val suffix = UUID.randomUUID().toString()
+        val tasks = listOf(app.tasks.create(Source.IMAGE, "image"), app.tasks.create(Source.IMAGE, "image"))
+        val at = System.currentTimeMillis()
+        val merchant = "合成退款中断$suffix"
+        val payment = ParsedBill(10_000, Direction.EXPENSE, merchant, "其他", at, "SYNTHETIC-$suffix", true, "", true)
+        val origin = PaymentApps.WECHAT
+        val image = "合成退款-$suffix".toByteArray()
+        val refund = payment.copy(amountCents = 7000, refund = RefundInfo("wechat", 10_000, 3000))
+        val calls = AtomicInteger()
+        val client = OcrClient(app, RecognitionBackend { bytes, prepared, _, _, _, _ ->
+            calls.incrementAndGet()
+            prepared(bytes)
+            RecognitionResult("微信支付 合成退款 30.00", refund, screenshot = bytes)
+        })
+        val processor = CaptureProcessor(app, client)
+        try {
+            val original = (app.store.ingest(Capture(Source.IMAGE, origin, "合成付款", at), payment) as IngestResult.Saved).record
+            val first = tasks.first()
+            val repeated = tasks.last()
+            app.tasks.writableDatabase.execSQL("""CREATE TRIGGER stop_synthetic_refund_projection BEFORE UPDATE ON tasks
+                WHEN (NEW.id=$first AND NEW.status='SUCCEEDED') OR (NEW.id=$repeated AND NEW.status='DUPLICATE')
+                BEGIN SELECT RAISE(ABORT,'synthetic interruption before task projection'); END""")
+            for (task in tasks) {
+                assertNotNull(runCatching { processor.processPrepared(image, Source.IMAGE, origin, task) { true } }.exceptionOrNull())
+                assertEquals("FAILED", app.tasks.status(task))
+                assertNull(app.tasks.recordId(task))
+            }
+            app.tasks.writableDatabase.execSQL("DROP TRIGGER stop_synthetic_refund_projection")
+            val (actualReceipt, repeatedReceipt) = tasks.map { app.store.committedCapture(app.tasks.operationKey(it)!!)!! }
+            assertEquals(RecognitionCommitEffect.REFUND_UPDATED, actualReceipt.effect)
+            assertEquals(RecognitionCommitEffect.ALREADY_PROCESSED, repeatedReceipt.effect)
+            assertEquals(original.uid, actualReceipt.recordUid)
+            assertEquals(original.uid, repeatedReceipt.recordUid)
+
+            RecognitionTasks(app).use { reopenedTasks -> LedgerStore(app).use { reopenedLedger ->
+                RecognitionCommitRecovery.recoverAll(reopenedTasks, reopenedLedger)
+                assertEquals("SUCCEEDED", reopenedTasks.status(first))
+                assertEquals("退款已更新", reopenedTasks.message(first))
+                assertEquals("DUPLICATE", reopenedTasks.status(repeated))
+                assertEquals("已处理", reopenedTasks.message(repeated))
+                for (task in tasks) assertEquals(original.id, reopenedTasks.recordId(task))
+                assertEquals(7000L, reopenedLedger.get(original.id)?.bill?.amountCents)
+                assertEquals(3000L, reopenedLedger.get(original.id)?.bill?.refund?.refundedCents)
+                assertEquals(13_000L, reopenedLedger.getAccount(wallet.id)?.amountCents)
+                assertEquals(1, reopenedLedger.walletMovements(wallet.uid).count { it.recordUid == original.uid && it.kind == "REFUND" })
+            } }
+            for (task in tasks) assertEquals(IngestResult.DuplicateSkipped, processor.processPrepared(image, Source.IMAGE, origin, task) { true })
+            assertEquals(2, calls.get())
+        } finally {
+            app.tasks.writableDatabase.execSQL("DROP TRIGGER IF EXISTS stop_synthetic_refund_projection")
+            tasks.forEach { task ->
+                app.tasks.operationKey(task)?.let { app.store.writableDatabase.delete("wallet_submissions", "token=?", arrayOf(it)) }
+                app.tasks.delete(task)
+            }
+            app.store.all().filter { it.bill.merchant == merchant }.forEach { app.store.delete(it.id) }
+            app.store.setDefaultWallet(previous)
+            app.store.writableDatabase.delete("wallet_movements", "account_uid=?", arrayOf(wallet.uid))
+            app.store.deleteAccount(wallet.id)
+        }
+    }
+
+    @Test fun legacyLedgerReceiptKeepsItsLinkWithoutClaimingAHistoricalRefundChanged() {
+        val suffix = UUID.randomUUID().toString()
+        val ledgerName = "legacy-recognition-receipt-$suffix.db"
+        val taskName = "legacy-recognition-task-$suffix.db"
+        try {
+            LedgerStore(app, ledgerName).use { store -> RecognitionTasks(app, taskName, classificationStore = store).use { tasks ->
+                val task = tasks.create(Source.IMAGE, "image")
+                val key = tasks.operationKey(task)!!
+                val wallet = store.saveAccount(LedgerAccount(name = "旧回执恢复钱包", amountCents = 20_000))
+                store.setDefaultWallet(wallet.uid)
+                val capture = Capture(Source.IMAGE, PaymentApps.WECHAT, "合成付款")
+                val bill = ParsedBill(10_000, Direction.EXPENSE, "合成旧回执商家", "其他", capture.receivedAt, "ORDER-$suffix", true, "", true)
+                val posted = store.ingestRecognition(capture, bill, key) as IngestResult.Saved
+                val refund = bill.copy(amountCents = 6000, refund = RefundInfo("wechat", 10_000, 4000))
+                store.ingest(capture.copy(text = "合成退款"), refund)
+                store.writableDatabase.apply {
+                    execSQL("ALTER TABLE wallet_submissions RENAME TO wallet_submissions_current")
+                    execSQL("CREATE TABLE wallet_submissions(token TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL, result_uid TEXT NOT NULL, created_at INTEGER NOT NULL)")
+                    execSQL("INSERT INTO wallet_submissions SELECT token,kind,result_uid,created_at FROM wallet_submissions_current")
+                    execSQL("DROP TABLE wallet_submissions_current")
+                    version = 16
+                }
+                LedgerStore(app, ledgerName).use { reopened ->
+                    assertEquals(17, reopened.readableDatabase.version)
+                    assertNull(reopened.committedCapture(key)?.effect)
+                    assertTrue(RecognitionCommitRecovery.recover(tasks, reopened, task))
+                    assertEquals("DUPLICATE", tasks.status(task))
+                    assertEquals("已处理", tasks.message(task))
+                    assertEquals(posted.record.id, tasks.recordId(task))
+                    assertNull(RecognitionCommitRecovery.immediate(tasks, reopened, task, IngestResult.DuplicateSkipped))
+                    assertEquals(14_000L, reopened.getAccount(wallet.id)?.amountCents)
+                }
+            } }
+        } finally {
+            app.deleteDatabase(taskName)
+            app.deleteDatabase(ledgerName)
+        }
+    }
+
+    @Test fun evidenceOnlyRecognitionKeepsScreenshotsAndTextWithoutPostingFeedback() {
+        val suffix = UUID.randomUUID().toString()
+        val ledgerName = "recognition-supplement-$suffix.db"
+        val taskName = "recognition-supplement-task-$suffix.db"
+        try {
+            LedgerStore(app, ledgerName).use { store -> RecognitionTasks(app, taskName, classificationStore = store).use { tasks ->
+                val wallet = store.saveAccount(LedgerAccount(name = "补充凭证钱包", amountCents = 10_000))
+                store.setDefaultWallet(wallet.uid)
+                val capture = Capture(Source.IMAGE, PaymentApps.WECHAT, "合成付款")
+                val bill = ParsedBill(1200, Direction.EXPENSE, "合成凭证商家", "其他", capture.receivedAt, "ORDER-$suffix", true, "", true)
+                val first = syntheticBackupImage(201)
+                val second = syntheticBackupImage(202)
+                val original = (store.ingest(capture, bill, screenshot = first) as IngestResult.Saved).record
+                val inputs = listOf(capture to second, capture.copy(text = "合成付款的补充原文") to null)
+                for ((evidence, image) in inputs) {
+                    val task = tasks.create(Source.IMAGE, "image")
+                    val operation = tasks.operationKey(task)!!
+                    val result = store.ingestRecognition(evidence, bill, operation, screenshot = image)
+                    assertEquals(RecognitionCommitEffect.EVIDENCE_SUPPLEMENTED, store.committedCapture(operation)?.effect)
+                    assertTrue(RecognitionCommitRecovery.recover(tasks, store, task))
+                    assertEquals("已处理", tasks.message(task))
+                    assertEquals(original.id, tasks.recordId(task))
+                    assertNull(RecognitionCommitRecovery.immediate(tasks, store, task, result))
+                }
+                assertArrayEquals(second, store.historyScreenshot(original.id, 2))
+                val raw = store.captureHistory(original.id).last()
+                assertEquals("合成付款的补充原文", raw.rawText)
+                assertFalse(raw.hasScreenshot)
+                assertEquals(8800L, store.getAccount(wallet.id)?.amountCents)
+                assertEquals(1, store.walletMovements(wallet.uid).count { it.recordUid == original.uid })
+            } }
+        } finally {
+            app.deleteDatabase(taskName)
+            app.deleteDatabase(ledgerName)
+        }
+    }
+
     @Test fun confirmedRefundRedirectsBothTaskAndEventReceiptsToTheRetainedOriginal() {
         val suffix = UUID.randomUUID().toString()
         val ledgerName = "refund-receipt-$suffix.db"; val taskName = "refund-receipt-task-$suffix.db"
@@ -353,10 +501,13 @@ class RecognitionCommitRecoveryTest {
                         operation, eventKey = event) as IngestResult.Saved
                     assertEquals(RecordState.REVIEW, pending.record.state)
                     assertEquals(pending.record.uid, store.committedCapture(operation)!!.recordUid)
+                    tasks.update(task, "REVIEW", pending.record.reason, pending.record.id)
                     store.confirmRefund(pending.record.id, original.id)
                     assertNull(store.get(pending.record.id))
                     assertEquals(original.uid, store.committedCapture(operation)!!.recordUid)
+                    assertEquals(RecognitionCommitEffect.REFUND_UPDATED, store.committedCapture(operation)!!.effect)
                     assertEquals(original.uid, store.committedPaymentEvent(event)!!.recordUid)
+                    assertNull(store.committedPaymentEvent(event)!!.effect)
                     RecognitionCommitRecovery.recoverAll(tasks, store)
                     assertEquals(original.id, tasks.recordId(task)); assertEquals("退款已更新", tasks.message(task))
                     assertEquals(3000L, store.getAccount(wallet.id)!!.amountCents)

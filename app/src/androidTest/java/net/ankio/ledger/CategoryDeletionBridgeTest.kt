@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import net.ankio.ledger.core.*
+import net.ankio.ledger.data.syntheticBackupImage
 import net.ankio.ledger.ui.LedgerWebBridge
 import net.ankio.ledger.ui.MainActivity
 import org.json.JSONObject
@@ -78,6 +79,53 @@ class CategoryDeletionBridgeTest {
             assertTrue(response.toString(),response.getBoolean("ok"));assertFalse(app.store.categoryDirectory().any { it.id==unused.id })
             assertEquals("CATEGORY_INVALID",JSONObject(bridge.confirmCategoryDeletion("{broken")).getString("code"))
         } }
+    }
+
+    @Test fun frozenRuleOnlyReferenceAppearsAndDisappearsBetweenPreviewAndConfirmation():Unit=runBlocking {
+        app.taskRecovery.await()
+        val suffix=UUID.randomUUID().toString().take(8)
+        val category=app.store.saveCategory(name="合成冻结规则用途$suffix",direction=Direction.EXPENSE)
+        var task:Long?=null
+        var rule:ClassificationRule?=null
+        try { ActivityScenario.launch(MainActivity::class.java).use { scenario -> scenario.onActivity { activity ->
+            val bridge=LedgerWebBridge(activity)
+            fun confirm(preview:JSONObject)=JSONObject(bridge.confirmCategoryDeletion(JSONObject().put("id",category.id)
+                .put("replacementId",JSONObject.NULL).put("previewToken",preview.getString("previewToken")).toString()))
+            val initial=JSONObject(bridge.previewCategoryDeletion(category.id)).getJSONObject("deletionPreview")
+            assertFalse(initial.getBoolean("requiresReplacement"))
+            val frozenRule=app.store.saveClassificationRule(ClassificationRule("","合成冻结引用$suffix",true,Direction.EXPENSE,category.id,0,
+                listOf(ClassificationCondition(value="不匹配待处理候选$suffix"))))
+            rule=frozenRule
+            val id=app.tasks.create(Source.IMAGE,"image");task=id
+            assertTrue(app.tasks.queued(id,syntheticBackupImage(152)))
+            val key=app.tasks.operationKey(id)!!
+            val bill=ParsedBill(3287,Direction.EXPENSE,"待处理候选$suffix","其他",1793491200000,null,true,"",true)
+            val batch=app.store.freezeRecognitionBatch(Capture(Source.IMAGE,"image","合成待处理凭证"),listOf(TransactionCandidate(CandidateId("pending"),bill)),
+                key,"Asia/Shanghai",app.tasks.classificationSnapshot(id)!!,RecognitionPolicy.USER_INITIATED)
+            assertFalse(batch.complete)
+            assertTrue(app.tasks.update(id,"FAILED","合成待重试"))
+            app.store.deleteClassificationRule(frozenRule.id);rule=null
+            val added=confirm(initial)
+            assertEquals("CATEGORY_PREVIEW_STALE",added.getString("code"))
+            val withBatch=added.getJSONObject("deletionPreview")
+            assertEquals(0,withBatch.getInt("billCount"));assertEquals(0,withBatch.getInt("ruleCount"))
+            assertEquals(1,withBatch.getInt("queuedConfigurationCount"));assertTrue(withBatch.getBoolean("requiresReplacement"))
+            assertEquals("CATEGORY_REPLACEMENT_REQUIRED",confirm(withBatch).getString("code"))
+            app.screenshots.release("task:${app.tasks.databaseName}:$id")
+            val removed=confirm(withBatch)
+            assertEquals("CATEGORY_PREVIEW_STALE",removed.getString("code"))
+            val withoutBatch=removed.getJSONObject("deletionPreview")
+            assertEquals(0,withoutBatch.getInt("queuedConfigurationCount"));assertFalse(withoutBatch.getBoolean("requiresReplacement"))
+            assertTrue(confirm(withoutBatch).getBoolean("ok"))
+            assertEquals("FAILED",app.tasks.status(id));assertNotNull(app.store.recognitionBatch(key))
+        } } } finally {
+            rule?.let { app.store.deleteClassificationRule(it.id) }
+            task?.let { id ->
+                app.tasks.operationKey(id)?.let { app.store.writableDatabase.delete("recognition_batches","operation_key=?",arrayOf(it)) }
+                app.tasks.delete(id)
+            }
+            if(app.store.categoryDirectory().any { it.id==category.id })app.store.removeCategory(category.id)
+        }
     }
 
 }

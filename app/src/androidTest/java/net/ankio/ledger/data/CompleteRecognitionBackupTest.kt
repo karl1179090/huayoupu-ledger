@@ -27,9 +27,51 @@ class CompleteRecognitionBackupTest {
             LedgerBackup.restore(target,LedgerBackup.decode(LedgerBackup.encode(source,ChannelSettings(context)).byteInputStream()))
             val row=restored.snapshot().getJSONObject(0)
             assertEquals(target.all().single().id,row.getLong("recordId"));assertEquals(original.uid,target.committedCapture(key)!!.recordUid)
+            assertEquals(RecognitionCommitEffect.REFUND_UPDATED,target.committedCapture(key)!!.effect)
+            assertEquals("退款已更新",row.getString("message"))
             assertEquals(16346L,target.accounts().single().amountCents);assertEquals(3654L,target.all().single().bill.amountCents)
         } finally { tasks.close();restored.close();source.close();target.close();media.close() }
     }
+    @Test fun oldBackupReceiptWithAnExistingRefundRestoresOnlyItsProcessingAndBillLink() {
+        val prefix = "legacy-result-${UUID.randomUUID()}"
+        val media = ScreenshotStore(context, prefix)
+        val source = LedgerStore(context, "$prefix-source.db", media)
+        val tasks = RecognitionTasks(context, "$prefix-source-tasks.db", media, source)
+        val target = LedgerStore(context, "$prefix-target.db", media)
+        val restored = RecognitionTasks(context, "$prefix-target-tasks.db", media, target)
+        try {
+            val wallet = source.saveAccount(LedgerAccount(name = "旧备份回执钱包", amountCents = 20_000))
+            source.setDefaultWallet(wallet.uid)
+            val at = 1730611800000L
+            val capture = Capture(Source.IMAGE, PaymentApps.WECHAT, "合成付款", at)
+            val bill = ParsedBill(10000, Direction.EXPENSE, "合成旧备份商家", "其他", at, prefix, true, "", true)
+            val task = tasks.create(Source.IMAGE, "image")
+            tasks.queued(task, syntheticBackupImage(203))
+            val key = tasks.operationKey(task)!!
+            val original = (source.ingestRecognition(capture, bill, key) as IngestResult.Saved).record
+            source.ingest(capture.copy(text = "合成退款"), bill.copy(amountCents = 7000, refund = RefundInfo("wechat", 10000, 3000)))
+            val current = LedgerBackup.encode(source, ChannelSettings(context))
+            val legacy = org.json.JSONObject(current)
+            legacy.getJSONArray("recognitionReceipts").getJSONObject(0).remove("effect")
+            LedgerBackup.restore(target, LedgerBackup.decode(legacy.toString().byteInputStream()))
+            assertNull(target.committedCapture(key)!!.effect)
+            RecognitionCommitRecovery.recoverAll(restored, target)
+            val recovered = restored.snapshot().getJSONObject(0)
+            assertEquals("DUPLICATE", recovered.getString("status"))
+            assertEquals("已处理", recovered.getString("message"))
+            assertEquals(target.all().single().id, recovered.getLong("recordId"))
+            assertEquals(original.uid, target.committedCapture(key)!!.recordUid)
+            assertEquals(13000L, target.accounts().single().amountCents)
+            LedgerBackup.restore(target, LedgerBackup.decode(current.byteInputStream()))
+            assertEquals(RecognitionCommitEffect.RECORDED, target.committedCapture(key)!!.effect)
+            LedgerBackup.restore(target, LedgerBackup.decode(legacy.toString().byteInputStream()))
+            assertEquals(RecognitionCommitEffect.RECORDED, target.committedCapture(key)!!.effect)
+            assertEquals(13000L, target.accounts().single().amountCents)
+        } finally {
+            tasks.close(); restored.close(); source.close(); target.close(); media.close()
+        }
+    }
+
     @Test fun repeatedOldBackupAfterLocalCategoryDeletionKeepsTheFrozenTaskAndReplacement() {
         val prefix="deleted-${UUID.randomUUID()}";val media=ScreenshotStore(context,prefix)
         val source=LedgerStore(context,"$prefix-source.db",media);val sourceTasks=RecognitionTasks(context,"$prefix-source-tasks.db",media,source)

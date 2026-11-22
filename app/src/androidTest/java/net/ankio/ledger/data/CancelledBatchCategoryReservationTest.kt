@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import net.ankio.ledger.LedgerApp
 import net.ankio.ledger.capture.CaptureProcessor
+import net.ankio.ledger.capture.ChannelSettings
 import net.ankio.ledger.core.*
 import net.ankio.ledger.ocr.*
 import org.junit.Assert.*
@@ -113,6 +114,55 @@ class CancelledBatchCategoryReservationTest:CancelledBatchCategoryScenario() {
             assertTrue(preview.requiresReplacement)
             assertEquals(9400L,target.getAccountByUid(state.getString("wallet",null)!!)!!.amountCents)
         } finally { tasks.close();target.close();media.close();cleanup() }
+    }
+    @Test fun restoredFailedAndCancelledBatchesRetainHistoryAndRecheckOriginalGrantsAtomically()=runBlocking {
+        app.taskRecovery.await()
+        val pkg=InstrumentationRegistry.getInstrumentation().context.packageName
+        val oldEnabled=app.channels.enabled(ChannelSettings.Channel.OCR)
+        val oldSelected=pkg in app.channels.selectedShakePackages()
+        val prefix="synthetic-batch-grant-restore-${UUID.randomUUID()}"
+        val media=ScreenshotStore(app,prefix)
+        val source=LedgerStore(app,"$prefix-source.db",media);val sourceTasks=RecognitionTasks(app,"$prefix-source-tasks.db",media,source)
+        val target=LedgerStore(app,"$prefix-target.db",media);val targetTasks=RecognitionTasks(app,"$prefix-target-tasks.db",media,target)
+        try {
+            app.channels.setShakePackage(pkg,true);app.channels.set(ChannelSettings.Channel.OCR,true)
+            val authorization=requireNotNull(app.channels.shakeAuthorization(pkg))
+            val expected=linkedMapOf<String,Triple<String,Boolean,ByteArray>>()
+            for(status in listOf("FAILED","CANCELLED")) for(imageImport in listOf(true,false)) {
+                val label="$status-$imageImport"
+                val category=source.saveCategory(name="合成恢复用途$label",direction=Direction.EXPENSE)
+                val rule=source.saveClassificationRule(ClassificationRule("","合成恢复规则$label",true,Direction.EXPENSE,category.id,0,
+                    listOf(ClassificationCondition(value="合成待处理$label"))))
+                val origin=if(imageImport)"image" else authorization.origin
+                val type=if(imageImport)Source.IMAGE else Source.OCR
+                val task=sourceTasks.create(type,origin,authorization.takeUnless { imageImport })
+                val image=syntheticBackupImage(163+expected.size);sourceTasks.queued(task,image)
+                val key=sourceTasks.operationKey(task)!!
+                val bill=ParsedBill(632,Direction.EXPENSE,"合成待处理$label","其他",1793491200000,null,true,"",true)
+                val batch=source.freezeRecognitionBatch(Capture(type,origin,"合成恢复凭证$label"),listOf(TransactionCandidate(CandidateId("pending"),bill)),
+                    key,"Asia/Shanghai",sourceTasks.classificationSnapshot(task)!!,RecognitionPolicy.USER_INITIATED)
+                assertFalse(batch.complete);assertTrue(sourceTasks.update(task,status,"合成识别历史$label"))
+                source.deleteClassificationRule(rule.id)
+                expected[key]=Triple(status,imageImport,image)
+            }
+            assertTrue(source.classificationBackup().snapshots.all { it.active })
+            LedgerBackup.restore(target,LedgerBackup.decode(LedgerBackup.encode(source,app.channels).byteInputStream()))
+            val reservations=target.classificationBackup().snapshots.associate { it.operationKey to it.active }
+            assertEquals(expected.mapValues { it.value.second },reservations)
+            val rows=targetTasks.snapshot()
+            assertEquals(expected.size,rows.length())
+            for(i in 0 until rows.length()) {
+                val row=rows.getJSONObject(i)
+                val (status,imageImport,image)=expected.getValue("recognition:${row.getString("operationUID")}")
+                val id=row.getLong("id")
+                assertEquals(status,row.getString("status"));assertTrue(row.getString("message").startsWith("合成识别历史"))
+                assertArrayEquals(image,targetTasks.image(id));assertNull(targetTasks.shakeAuthorization(id))
+                assertEquals(imageImport,row.getJSONObject("batch").getBoolean("canRetry"))
+            }
+        } finally {
+            sourceTasks.close();targetTasks.close();source.close();target.close();media.close()
+            app.channels.setShakePackage(pkg,oldSelected);app.channels.set(ChannelSettings.Channel.OCR,oldEnabled)
+        }
     }
     @Test fun quiescentRestoreReturnsWithCancelledBatchReservedAndStillNeedsExplicitRetry()=runBlocking {
         val task=cancelledBatch()

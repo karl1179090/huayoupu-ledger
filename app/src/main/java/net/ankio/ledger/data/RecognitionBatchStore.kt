@@ -25,12 +25,28 @@ internal object RecognitionBatchStore {
     }
     fun result(store:LedgerStore,key:String):RecognitionBatchResult?=read(store,key)?.let { batch ->
         RecognitionBatchResult(key.removePrefix("recognition:"),batch.items.map { item ->
-            val record=item.recordUID?.let { uid -> store.readableDatabase.rawQuery("SELECT id FROM records WHERE uid=?",arrayOf(uid)).use {
-                if(it.moveToFirst())store.get(it.getLong(0)) else null
+            val receipt = if (item.status == "REVIEW") store.committedCapture(item.operationKey) else null
+            val uid = receipt?.recordUid ?: item.recordUID
+            val record = uid?.let { activeUid -> store.readableDatabase.rawQuery("SELECT id FROM records WHERE uid=?", arrayOf(activeUid)).use {
+                if (it.moveToFirst()) store.get(it.getLong(0)) else null
             } }
-            val bill=item.candidate.bill
-            BatchItemResult(item.candidate.id,item.operationKey,item.status,item.reason,bill.amountCents,bill.direction,bill.merchant,
-                DayAmountKey.from(bill,batch.zoneId)?.localDate,item.recordUID,record?.id)
+            val refunded = item.status == "UPDATED" || receipt?.effect == RecognitionCommitEffect.REFUND_UPDATED
+            val confirmed = item.status == "REVIEW" && record?.state == RecordState.POSTED
+            val status = when {
+                refunded -> "UPDATED"
+                confirmed -> "ADDED"
+                else -> item.status
+            }
+            val reason = when {
+                refunded -> "退款已更新"
+                confirmed -> "已记账"
+                item.status == "REVIEW" -> record?.reason ?: item.reason
+                else -> item.reason
+            }
+            val bill = if (item.status == "REVIEW") record?.bill ?: item.candidate.bill else item.candidate.bill
+            BatchItemResult(item.candidate.id, item.operationKey, status, reason,
+                if (refunded) record?.bill?.amountCents ?: bill.amountCents else bill.amountCents,
+                bill.direction, bill.merchant, DayAmountKey.from(bill, batch.zoneId)?.localDate, uid, record?.id)
         })
     }
     fun freeze(store:LedgerStore,capture:Capture,candidates:List<TransactionCandidate>,key:String,zoneId:String,
@@ -41,8 +57,10 @@ internal object RecognitionBatchStore {
         require(key.isNotBlank() && key.length<=160)
         val db=store.writableDatabase;db.beginTransaction()
         try {
+            fun historyKey(bill: ParsedBill): DayAmountKey? = if (candidates.size > 1 && bill.refund == null &&
+                bill.standaloneRefund == null && bill.direction != Direction.TRANSFER && bill.transfer == null) DayAmountKey.from(bill, zoneId) else null
             // Read the baseline once before writing any child; new siblings cannot enter it.
-            val history=candidates.mapNotNull { DayAmountKey.from(it.bill,zoneId) }.distinct().mapNotNull { key ->
+            val history=candidates.mapNotNull { historyKey(it.bill) }.distinct().mapNotNull { key ->
                 val day=java.time.LocalDate.parse(key.localDate)
                 val range=AccountingDates.calendar(day,day.plusDays(1),java.time.ZoneId.of(zoneId))
                 db.rawQuery("SELECT r.uid FROM records r WHERE r.state='POSTED' AND r.amount=? AND (${range.sql}) AND "+
@@ -54,11 +72,9 @@ internal object RecognitionBatchStore {
             val items=candidates.map { candidate ->
                 val local=capture.copy(text=(candidate.rawText ?: capture.text).take(32768))
                 val bill=store.classify(candidate.bill,snapshot,local)
-                val historical=if(candidates.size>1 && bill.refund==null && bill.standaloneRefund==null && bill.direction!=Direction.TRANSFER && bill.transfer==null)
-                    DayAmountKey.from(bill,zoneId)?.let(history::get) else null
-                val rejection=TransactionRejection.reason(local.text)
+                val historical=historyKey(bill)?.let(history::get)
                 val denied= !policy.allows(bill,capture.origin)
-                val reason=when { historical!=null->"已有同日同金额账单";rejection!=null->rejection;denied->"该交易需通过摇一摇或截图导入核对";else->"" }
+                val reason=when { historical!=null->"已有同日同金额账单";denied->"该交易需通过摇一摇或截图导入核对";else->"" }
                 FrozenBatchItem(candidate.copy(bill=bill,rawText=local.text),candidateOperationKey(key,candidate.id),historical,
                     if(reason.isNotBlank())"SKIPPED" else "PENDING",reason,historical)
             }
@@ -73,26 +89,27 @@ internal object RecognitionBatchStore {
             val batch=requireNotNull(read(store,key));val item=batch.items.single { it.candidate.id==id }
             if(item.status !in setOf("PENDING","FAILED")) { db.setTransactionSuccessful();return requireNotNull(result(store,key)) }
             val capture=batch.capture.copy(text=item.candidate.rawText ?: batch.capture.text)
-            val previous=store.matchingIdentity(capture,item.candidate.bill)
             val outcome=store.ingestRecognition(capture,item.candidate.bill,item.operationKey,screenshot=screenshot,independentCandidate=batch.items.size>1)
-            val record=when(outcome) {
-                is IngestResult.Saved->outcome.record
-                IngestResult.DuplicateSkipped->store.committedCapture(item.operationKey)?.record ?: store.matchingIdentity(capture,item.candidate.bill)
-                else->null
+            val receipt = store.committedCapture(item.operationKey)
+            val effect = receipt?.effect
+            val record = receipt?.record
+            val status = when {
+                record?.state == RecordState.REVIEW -> "REVIEW"
+                effect == RecognitionCommitEffect.REFUND_UPDATED -> "UPDATED"
+                effect == RecognitionCommitEffect.RECORDED -> "ADDED"
+                outcome == IngestResult.Ignored -> "FAILED"
+                else -> "SKIPPED"
             }
-            val status=when {
-                outcome is IngestResult.Saved && record?.state==RecordState.REVIEW->"REVIEW"
-                outcome is IngestResult.Saved && previous?.state==RecordState.POSTED->"SKIPPED"
-                outcome is IngestResult.Saved && outcome.updated->"ADDED"
-                outcome is IngestResult.Saved && outcome.supplemented->"SKIPPED"
-                outcome is IngestResult.Saved->"ADDED"
-                outcome==IngestResult.Ignored->"FAILED"
-                else->"SKIPPED"
+            val reason = when {
+                status == "REVIEW" -> record?.reason.orEmpty()
+                status == "UPDATED" -> "退款已更新"
+                status == "ADDED" -> "已记账"
+                outcome is IngestResult.Skipped -> outcome.message
+                effect == RecognitionCommitEffect.EVIDENCE_SUPPLEMENTED -> "已补充已有账单"
+                status == "SKIPPED" -> "交易已处理"
+                else -> "未识别到账单"
             }
-            val reason=when { status=="REVIEW"->record?.reason.orEmpty();outcome is IngestResult.Skipped->outcome.message
-                status=="ADDED"->"已记账";status=="SKIPPED" && outcome is IngestResult.Saved && outcome.supplemented->"已补充已有账单"
-                status=="SKIPPED"->"交易已处理";else->"未识别到账单" }
-            write(db,batch.copy(items=batch.items.map { if(it.candidate.id==id)it.copy(status=status,reason=reason,recordUID=record?.uid) else it }))
+            write(db,batch.copy(items=batch.items.map { if(it.candidate.id==id)it.copy(status=status,reason=reason,recordUID=receipt?.recordUid) else it }))
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
         return requireNotNull(result(store,key))

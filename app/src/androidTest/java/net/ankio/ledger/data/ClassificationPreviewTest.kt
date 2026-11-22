@@ -53,7 +53,8 @@ class ClassificationPreviewTest {
     private fun previewAndSaveCapacity(excess:Int) {
         val suffix=UUID.randomUUID().toString();val name="classification-preview-capacity-$suffix.db";val taskName="classification-preview-capacity-tasks-$suffix.db"
         try {
-            lateinit var expected:ValidatedBackup
+            lateinit var expected: String
+            lateinit var expectedConfiguration: ClassificationSnapshot
             lateinit var expectedTask:String
             LedgerStore(app,name).use { store ->
                 val wallet=store.saveAccount(LedgerAccount(name="合成预览容量资金",amountCents=10_000))
@@ -75,7 +76,8 @@ class ClassificationPreviewTest {
                 RecognitionTasks(app,taskName,classificationStore=store).use { tasks ->
                     val queued=tasks.create(Source.IMAGE,"image")
                     val frozen=tasks.classificationSnapshot(queued)
-                    val before=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
+                    val before = LedgerBackup.encode(store, app.channels)
+                    val beforeClassification = store.classificationBackup()
                     val beforeTask=tasks.snapshot().toString()
                     val input=ClassificationInput.hypothetical(Direction.EXPENSE,"合".repeat(200),emptyList(),"IMAGE")
                     if(excess>0) {
@@ -83,24 +85,27 @@ class ClassificationPreviewTest {
                             val failure=runCatching(action).exceptionOrNull()
                             assertTrue("Preview and Save must reject a final2000001-byte configuration",failure is ClassificationException)
                             assertEquals("RULE_INVALID",(failure as ClassificationException).code)
-                            assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream()))
+                            assertEquals(before, LedgerBackup.encode(store, app.channels))
                             assertEquals(beforeTask,tasks.snapshot().toString())
                             assertEquals(frozen,tasks.classificationSnapshot(queued))
                         }
                         expected=before
+                        expectedConfiguration = beforeClassification.configuration
                     } else {
                         val preview=store.previewClassification(input,draft)
                         assertEquals(CategorySource.CUSTOM_RULE,preview.preview.decision.source)
                         assertTrue(preview.preview.rules.single { it.selected }.conditions.all { it.matched })
-                        assertEquals(before,LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream()))
+                        assertEquals(before, LedgerBackup.encode(store, app.channels))
                         assertEquals(beforeTask,tasks.snapshot().toString())
                         val saved=store.saveClassificationRule(draft)
-                        expected=LedgerBackup.decode(LedgerBackup.encode(store,app.channels).byteInputStream())
-                        val afterClassification=requireNotNull(expected.classification)
+                        expected = LedgerBackup.encode(store, app.channels)
+                        val afterClassification = store.classificationBackup()
+                        expectedConfiguration = afterClassification.configuration
                         assertEquals(2_000_000,utf8(capacityWire(afterClassification.configuration,replacements)))
                         assertEquals(saved,afterClassification.configuration.customRules.single())
-                        assertEquals(before,expected.copy(classification=before.classification))
-                        assertEquals(before.classification!!.snapshots,afterClassification.snapshots)
+                        fun withoutClassification(json: String) = JSONObject(json).apply { remove("classification") }.toString()
+                        assertEquals(withoutClassification(before), withoutClassification(expected))
+                        assertEquals(beforeClassification.snapshots, afterClassification.snapshots)
                         assertEquals(beforeTask,tasks.snapshot().toString())
                         assertEquals(frozen,tasks.classificationSnapshot(queued))
                     }
@@ -108,11 +113,59 @@ class ClassificationPreviewTest {
                 }
             }
             LedgerStore(app,name).use { reopened -> RecognitionTasks(app,taskName,classificationStore=reopened).use { tasks ->
-                assertEquals(expected,LedgerBackup.decode(LedgerBackup.encode(reopened,app.channels).byteInputStream()))
-                assertEquals(expected.classification!!.configuration,reopened.classificationRules())
+                assertEquals(expected, LedgerBackup.encode(reopened, app.channels))
+                assertEquals(expectedConfiguration, reopened.classificationRules())
                 assertEquals(expectedTask,tasks.snapshot().toString())
             } }
         } finally { app.deleteDatabase(taskName);app.deleteDatabase(name) }
+    }
+
+    @Test fun saveRechecksTheTargetWhenThePreviewedCategoryHasSinceBeenDeleted() {
+        val name = "classification-preview-deleted-target-${UUID.randomUUID()}.db"
+        try {
+            LedgerStore(app, name).use { store ->
+                val target = store.saveCategory(name = "合成待删除分类", direction = Direction.EXPENSE)
+                val draft = ClassificationRule("", "合成失效目标草稿", true, Direction.EXPENSE, target.id, 0,
+                    listOf(ClassificationCondition(value = "合成商家")))
+                val input = ClassificationInput.hypothetical(Direction.EXPENSE, "合成商家", emptyList(), "IMAGE")
+                assertEquals(target.id, store.previewClassification(input, draft).category.id)
+                val deletion = store.previewCategoryDeletion(target.id)
+                store.confirmCategoryDeletion(target.id, "cat:expense:other", deletion.previewToken)
+
+                val before = store.classificationBackup()
+                val failure = runCatching { store.saveClassificationRule(draft) }.exceptionOrNull()
+                assertEquals("RULE_TARGET", (failure as ClassificationException).code)
+                assertEquals(before, store.classificationBackup())
+            }
+        } finally {
+            app.deleteDatabase(name)
+        }
+    }
+
+    @Test fun draftBeyondTheRuleCountLimitFailsPreviewAndSaveWithTheSameReason() {
+        val name = "classification-preview-rule-count-${UUID.randomUUID()}.db"
+        try {
+            LedgerStore(app, name).use { store ->
+                val seed = LedgerBackup.decode(LedgerBackup.encode(store, app.channels).byteInputStream())
+                val draft = ClassificationRule("", "合成草稿", true, Direction.EXPENSE, "cat:expense:other", 0,
+                    listOf(ClassificationCondition(value = "合成商家")))
+                val rules = List(2000) { index -> draft.copy(id = "synthetic-$index", name = "容量规则$index", order = index) }
+                val snapshot = seed.classification!!.configuration.copy(customRules = rules)
+                LedgerBackup.restore(store, seed.copy(classification = ClassificationBackup(snapshot, emptyList())))
+                val before = LedgerBackup.encode(store, app.channels)
+                val input = ClassificationInput.hypothetical(Direction.EXPENSE, "合成商家", emptyList(), "IMAGE")
+
+                val previewError = runCatching { store.previewClassification(input, draft) }.exceptionOrNull() as ClassificationException
+                val saveError = runCatching { store.saveClassificationRule(draft) }.exceptionOrNull() as ClassificationException
+                assertEquals("RULE_INVALID", previewError.code)
+                assertEquals(previewError.code, saveError.code)
+                assertTrue(previewError.message.orEmpty().contains("规则数量过多"))
+                assertEquals(previewError.message, saveError.message)
+                assertEquals(before, LedgerBackup.encode(store, app.channels))
+            }
+        } finally {
+            app.deleteDatabase(name)
+        }
     }
 
     @Test fun draftsUseSaveOrderingAndValidationWhileLongOrMissingBusinessFieldsStayEditableAndUnsaved() {

@@ -127,6 +127,22 @@ class BankReceiptParserTest {
         assertTrue(missing.paymentMethod!!.ambiguous)
     }
 
+    @Test fun aBankReceiptWithOnlyATailCanResolveOneSavedCard() {
+        val lines = listOf("交易成功提醒", "交易类型：网上快捷支付", "交易金额：12.00元", "交易卡号：尾号0007")
+        val bill = LocalOcrBillParser.parse(lines.map(::LocalOcrLine), 0, 0, now, origin = "image")!!
+        val method = bill.paymentMethod!!
+        assertNull(method.bankCode)
+        assertEquals("0007", method.cardLast4)
+        assertFalse(method.ambiguous)
+        val card = WalletCandidate("only", kind = "bank", bankCode = "cmb", cardLast4 = "0007")
+        assertEquals("only", WalletResolver.resolve(listOf(card), evidence = method).accountUid)
+
+        val namedIssuer = LocalOcrBillParser.parse((lines + "凭证来源：合成银行").map(::LocalOcrLine),
+            0, 0, now, origin = "image")!!
+        assertTrue(namedIssuer.paymentMethod!!.ambiguous)
+        assertNull(WalletResolver.resolve(listOf(card), evidence = namedIssuer.paymentMethod).accountUid)
+    }
+
     @Test fun balanceMarketingPendingAndZeroAmountsAreNotCompletedTransactions() {
         val cases = listOf(arrayOf("账户余额：1234.56元"), arrayOf("优惠金额：12.00元", "积分：20"),
             arrayOf("交易类型：网上快捷支付", "交易金额：0.00元"),

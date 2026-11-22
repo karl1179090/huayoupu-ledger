@@ -415,6 +415,38 @@ async function runTests() {
   await page.goto(currentUrl, { waitUntil: 'load' });
   await page.waitForTimeout(150);
 
+  const confirmationPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await confirmationPage.addInitScript(createSyntheticBridgeScript());
+  await confirmationPage.goto(currentUrl);
+  await confirmationPage.evaluate(() => {
+    const task = fixtureTasks.find(t => t.id === 901);
+    const item = task.batch.items[0];
+    Object.assign(item, { status: 'REVIEW', recordId: 103, recordUID: 'rec-103-review' });
+    Object.assign(task, { status: 'REVIEW', message: '待确认 1' });
+    Object.assign(task.batch.counts, { added: 1, review: 1 });
+    let attempt = 0;
+    LedgerNative.save = () => {
+      if (++attempt === 1) return JSON.stringify({ ok: true, id: 103, state: 'REVIEW',
+        reason: '请选择实际账户后入账', revision: 2 });
+      fixtureRecords.find(r => r.id === 103).state = 'POSTED';
+      Object.assign(item, { status: 'ADDED', reason: '已记账' });
+      Object.assign(task, { status: 'SUCCEEDED', message: '待确认 0' });
+      Object.assign(task.batch.counts, { added: 2, review: 0 });
+      return JSON.stringify({ ok: true, id: 103, state: 'POSTED' });
+    };
+    refresh();
+    openTask(901);
+  });
+  await confirmationPage.locator('#batch-view [data-nav-record="103"]').click();
+  await confirmationPage.locator('#import-form .primary').click();
+  assert.equal(await confirmationPage.locator('#import-form').isVisible(), true, 'Missing wallet must keep the editor open');
+  assert.match(await confirmationPage.locator('#review-reason').innerText(), /请选择实际账户/);
+  await confirmationPage.locator('#import-form .primary').click();
+  assert.match(await confirmationPage.locator('#batch-view').innerText(), /待确认 0/);
+  assert.equal(await confirmationPage.locator('[data-pending="103"]').count(), 0);
+  assert.equal(await confirmationPage.locator('[data-record="103"]').count(), 1);
+  await confirmationPage.close();
+
   console.log('\n--- Test 1: Timeline Multi-Card Task Row Presentation ---');
   // Verify that multi-task 901 and 902 appear on the timeline with summary
   const taskRow901 = page.locator('[data-task="901"]');

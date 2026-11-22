@@ -52,8 +52,9 @@ internal object RecognitionTaskBackup {
         }
     }
     fun restore(tasks:RecognitionTasks,db:SQLiteDatabase,rows:JSONArray,records:Map<String,String?>,categories:Map<String,LedgerCategory>,images:(String)->ByteArray?) {
+        val replacements = CategoryReplacementStorage.entries(db).associateBy { it.categoryId }
         fun canonical(snapshot:net.ankio.ledger.core.ClassificationSnapshot):net.ankio.ledger.core.ClassificationSnapshot {
-            fun resolved(rule:net.ankio.ledger.core.ClassificationRule)=rule.copy(categoryId=CategoryReplacementStorage.resolve(db,rule.categoryId))
+            fun resolved(rule:net.ankio.ledger.core.ClassificationRule)=rule.copy(categoryId=CategoryReplacementStorage.resolve(rule.categoryId,replacements))
             return snapshot.copy(customRules=snapshot.customRules.map(::resolved),builtinRules=snapshot.builtinRules.map(::resolved))
         }
         for(i in 0 until rows.length()) {
@@ -68,15 +69,18 @@ internal object RecognitionTaskBackup {
                 require(canonical(held)==canonical(mapped)) { "识别任务分类快照冲突" }
                 mapped=held;payload=reservation
             }
-            val existing=db.rawQuery("SELECT id,source,origin,created_at,classification_snapshot,node_snapshot,node_image_hash,recognition_at,recognition_zone FROM recognition.tasks WHERE operation_uid=?",arrayOf(operation)).use { c ->
+            val existing=db.rawQuery("SELECT id,source,origin,created_at,node_snapshot,node_image_hash,recognition_at,recognition_zone FROM recognition.tasks WHERE operation_uid=?",arrayOf(operation)).use { c ->
                 if(!c.moveToFirst())false else {
+                    val frozen = db.rawQuery("SELECT classification_snapshot FROM recognition.tasks WHERE id=?",arrayOf(c.getLong(0).toString())).use {
+                        check(it.moveToFirst());ClassificationCodec.readSnapshot(it.getString(0))
+                    }
                     require(c.getString(1)==row.getString("source") && c.getString(2)==row.getString("origin") && c.getLong(3)==row.getLong("created_at") &&
-                        canonical(ClassificationCodec.readSnapshot(c.getString(4)))==canonical(mapped) && c.getString(5)==row.optString("node_snapshot").takeUnless { row.isNull("node_snapshot") } &&
-                        c.getString(6)==row.optString("node_image_hash").takeUnless { row.isNull("node_image_hash") }) { "识别任务标识与本地证据冲突" }
+                        canonical(frozen)==canonical(mapped) && c.getString(4)==row.optString("node_snapshot").takeUnless { row.isNull("node_snapshot") } &&
+                        c.getString(5)==row.optString("node_image_hash").takeUnless { row.isNull("node_image_hash") }) { "识别任务标识与本地证据冲突" }
                     val image=tasks.backupImageHash(c.getLong(0))
                     require(image==null || row.isNull("imageHash") || image==row.getString("imageHash")) { "识别任务标识与本地原图冲突" }
-                    if(!c.isNull(7) && !row.isNull("recognition_at"))require(c.getLong(7)==row.getLong("recognition_at") && c.getString(8)==row.getString("recognition_zone")) { "识别任务时钟冲突" }
-                    if(c.isNull(7) && !row.isNull("recognition_at"))db.execSQL("UPDATE recognition.tasks SET recognition_at=?,recognition_zone=? WHERE id=?",arrayOf(row.getLong("recognition_at"),row.getString("recognition_zone"),c.getLong(0)))
+                    if(!c.isNull(6) && !row.isNull("recognition_at"))require(c.getLong(6)==row.getLong("recognition_at") && c.getString(7)==row.getString("recognition_zone")) { "识别任务时钟冲突" }
+                    if(c.isNull(6) && !row.isNull("recognition_at"))db.execSQL("UPDATE recognition.tasks SET recognition_at=?,recognition_zone=? WHERE id=?",arrayOf(row.getLong("recognition_at"),row.getString("recognition_zone"),c.getLong(0)))
                     true
                 }
             }
@@ -84,6 +88,9 @@ internal object RecognitionTaskBackup {
             var status=row.getString("status")
             if(status=="RECOGNIZING")status="QUEUED"
             if(status=="CAPTURING")status="FAILED"
+            val origin=row.getString("origin")
+            if(status=="QUEUED" && (origin.startsWith("shake:") || origin.startsWith("shortcut:") || origin.startsWith("payment_auto:")) &&
+                RecognitionBatchStore.hasUnfinished(db,key))status="CANCELLED"
             val uid=row.optString("recordUid").takeUnless { row.isNull("recordUid") }?.let { records[it] ?: it }
             val recordId=uid?.let { db.rawQuery("SELECT id FROM records WHERE uid=? AND NOT EXISTS(SELECT 1 FROM record_deletions WHERE record_id=records.id)",arrayOf(it)).use { c -> if(c.moveToFirst())c.getLong(0) else null } }
             val values=ContentValues()
@@ -95,15 +102,6 @@ internal object RecognitionTaskBackup {
             if(!row.isNull("imageHash")) {
                 val image=requireNotNull(images(operation));require(PortableCsv.digest(image)==row.getString("imageHash"));BackupMediaValidator.validate(image)
                 tasks.restoreImage(db,id,image,row.optLong("imageCreatedAt",row.getLong("created_at")),row.optString("imageState",status))
-            }
-            val resumable=status=="CANCELLED" && !row.isNull("imageHash") &&
-                RecognitionTasks.retryableBatchSource(Source.valueOf(row.getString("source")),row.getString("origin"),false) &&
-                RecognitionBatchStore.hasUnfinished(db,key)
-            if(RecognitionTasks.retainsClassificationSnapshot(status,resumable)) {
-                val held=db.rawQuery("SELECT payload FROM classification_snapshots WHERE operation_key=?",arrayOf(key)).use { if(it.moveToFirst())it.getString(0) else null }
-                require(held==null || held==payload) { "识别任务分类快照冲突" }
-                ClassificationStorage.hold(db,key,mapped,tasks.databaseName)
-                db.execSQL("UPDATE classification_snapshots SET active=1,task_database=? WHERE operation_key=?",arrayOf(tasks.databaseName,key))
             }
         }
     }

@@ -8,8 +8,9 @@ import java.util.UUID
 
 /** Durable completed identities are facts even when their bill has since been removed. */
 internal object RecognitionReceiptBackup {
-    fun export(db:SQLiteDatabase):JSONArray=db.rawQuery("SELECT token,kind,result_uid,created_at FROM wallet_submissions WHERE kind IN ('CAPTURE_RESULT','CAPTURE_EVENT_RESULT') ORDER BY token",null).use { c ->
-        JSONArray().apply { while(c.moveToNext())put(JSONObject().put("token",c.getString(0)).put("kind",c.getString(1)).put("recordUid",c.getString(2)).put("createdAt",c.getLong(3))) }
+    fun export(db:SQLiteDatabase):JSONArray=db.rawQuery("SELECT token,kind,result_uid,created_at,recognition_effect FROM wallet_submissions WHERE kind IN ('CAPTURE_RESULT','CAPTURE_EVENT_RESULT') ORDER BY token",null).use { c ->
+        JSONArray().apply { while(c.moveToNext())put(JSONObject().put("token",c.getString(0)).put("kind",c.getString(1))
+            .put("recordUid",c.getString(2)).put("createdAt",c.getLong(3)).put("effect",c.getString(4))) }
     }
     fun events(db:SQLiteDatabase):JSONArray=db.rawQuery("SELECT event_key,received_at FROM capture_events ORDER BY event_key",null).use { c ->
         JSONArray().apply { while(c.moveToNext())put(JSONObject().put("key",c.getString(0)).put("at",c.getLong(1))) }
@@ -21,6 +22,10 @@ internal object RecognitionReceiptBackup {
             require(token.length in 1..160 && tokens.add(token))
             require(r.getString("kind") in setOf("CAPTURE_RESULT","CAPTURE_EVENT_RESULT"))
             if(r.getString("kind")=="CAPTURE_EVENT_RESULT")require(token.startsWith("capture-event:"))
+            if(!r.isNull("effect")) {
+                require(r.getString("kind")=="CAPTURE_RESULT")
+                RecognitionCommitEffect.valueOf(r.get("effect") as String)
+            }
             UUID.fromString(r.getString("recordUid"));require(r.getLong("createdAt")>0)
         }
         for(i in 0 until events.length()) { val e=events.getJSONObject(i);require(e.getString("key").length in 1..160 && keys.add(e.getString("key")) && e.getLong("at")>0) }
@@ -31,9 +36,13 @@ internal object RecognitionReceiptBackup {
             val token=r.getString("token");val kind=r.getString("kind")
             val prior=WalletAccounting.submission(db,token,kind)
             require(prior==null || prior==uid) { "识别提交标识与本地回执冲突" }
+            val effect=r.optString("effect").takeUnless { r.isNull("effect") }
             if(prior==null)db.insertOrThrow("wallet_submissions",null,ContentValues().apply {
-                put("token",token);put("kind",kind);put("result_uid",uid);put("created_at",r.getLong("createdAt"))
+                put("token",token);put("kind",kind);put("result_uid",uid);put("created_at",r.getLong("createdAt"));put("recognition_effect",effect)
             })
+            else if(effect!=null)db.update("wallet_submissions",ContentValues().apply {
+                put("recognition_effect",effect)
+            },"token=? AND recognition_effect IS NULL",arrayOf(token))
         }
         for(i in 0 until events.length()) { val e=events.getJSONObject(i)
             db.insertWithOnConflict("capture_events",null,ContentValues().apply { put("event_key",e.getString("key"));put("received_at",e.getLong("at")) },SQLiteDatabase.CONFLICT_IGNORE)

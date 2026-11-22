@@ -71,7 +71,7 @@ class MixedReceiptAcceptanceTest {
                 livePaymentAt:Long?,policy:RecognitionPolicy,origin:String,recognitionTime:()->RecognitionTimeContext):RecognitionResult {
                 onPrepared(image)
                 return RecognitionResult(page.joinToString("\n") { it.text },
-                    TransactionPageParser.parse(page,1080,1800,recognitionTime(),livePaymentAt,policy,origin),screenshot=image)
+                    TransactionPageParser.parsePage(page,1080,1800,recognitionTime(),livePaymentAt,policy,origin),screenshot=image)
             }
         }
         return task to CaptureProcessor(app,OcrClient(app,backend),recognitionClock={time})
@@ -81,6 +81,58 @@ class MixedReceiptAcceptanceTest {
         val batch=(result as IngestResult.Batch).result
         assertEquals(1,batch.items.size)
         return app.store.get(requireNotNull(batch.items.single().recordId))!!
+    }
+
+    @Test fun onlySuccessfulBankCardUsesItsOwnTextAndSingleReceiptDeduplication() = runBlocking {
+        val bank = wallet("bank", "1507")
+        val historicalTime = java.time.ZonedDateTime.of(2026, 11, 1, 12, 0, 0, 0, java.time.ZoneId.of(time.zoneId)).toInstant().toEpochMilli()
+        val history = app.store.saveEdited(LedgerRecord(capture = Capture(Source.MANUAL, "manual", "合成历史凭证"),
+            bill = ParsedBill(1234L, Direction.EXPENSE, "合成历史商家", "其他", historicalTime, null, true, "", true),
+            state = RecordState.POSTED), walletAccountUid = cash.uid, manualWalletSelected = true)
+        val failed = lines("招商银行", "交易失败提醒", "交易类型：网上快捷支付", "交易金额：888.00元",
+            "交易卡号：尾号9921", "交易日期：2026-11-02")
+        val succeeded = lines("招商银行", "交易成功提醒", "交易类型：网上快捷支付", "交易金额：12.34元",
+            "交易卡号：尾号1507", "交易日期：2026-11-01", "商户名称：合成新商家", top = 600)
+
+        val (task, result) = recognize(failed + succeeded, origin = "image")
+        val saved = record(result)
+        assertNotEquals(history.uid, saved.uid)
+        assertEquals(RecordState.POSTED, saved.state)
+        assertEquals("2026-11-01", saved.bill.receipt!!.time!!.localDate)
+        assertEquals("合成新商家", saved.bill.merchant)
+        assertEquals("bank_1", saved.bill.receipt!!.blockId)
+        assertEquals(succeeded.joinToString("\n") { it.text }, saved.capture.text)
+        assertEquals(mapOf(bank.uid to -1234L), saved.walletEffects)
+        assertEquals(48766L, app.store.getAccount(bank.id)!!.amountCents)
+        assertEquals(48766L, app.store.getAccount(cash.id)!!.amountCents)
+        assertTrue(app.store.captureHistory(saved.id).single().hasScreenshot)
+        assertNotNull(app.tasks.image(task))
+    }
+
+    @Test fun ambiguousCardFieldsCannotCreateABillOrDeductFromTheMatchingAccount() = runBlocking {
+        val bank = wallet("bank", "1507")
+        val left = lines("招商银行", "交易成功提醒", "交易类型：网上快捷支付", "交易金额：12.34元")
+            .map { it.copy(left = 50, right = 480) }
+        val right = lines("招商银行", "交易成功提醒", "交易类型：网上快捷支付", "交易卡号：尾号1507")
+            .map { it.copy(left = 550, right = 1000) }
+        val service = lines("服务开通通知", top = 20)
+        val serviceLeft = lines("付款成功", "交易金额：12.34元", top = 200).map { it.copy(left = 50, right = 480) }
+        val serviceRight = lines("付款成功", "付款方式：招商银行储蓄卡(1507)", top = 255).map { it.copy(left = 550, right = 1000) }
+        for (page in listOf(left + right, service + serviceLeft + serviceRight)) {
+            val (_, result) = recognize(page, origin = "image")
+            assertEquals(IngestResult.Ignored, result)
+            assertEquals(baseline, app.store.all().map { it.id }.toSet())
+        }
+
+        val nested = lines("图片查看器", top = 20) + lines("招商银行", "交易提醒", "交易金额：12.34元", top = 200) +
+            lines("招商银行", "交易提醒", "交易卡号：尾号1507", top = 350)
+        val (_, nestedResult) = recognize(nested, origin = "image")
+        val draft = record(nestedResult)
+        assertEquals(RecordState.REVIEW, draft.state)
+        assertNull(draft.bill.paymentMethod!!.cardLast4)
+        assertTrue(draft.walletEffects.isEmpty())
+        assertEquals(50000L, app.store.getAccount(bank.id)!!.amountCents)
+        assertEquals(50000L, app.store.getAccount(cash.id)!!.amountCents)
     }
 
     @Test fun mixedActualDebitKeepsItsOwnEvidenceAndOriginalPositionAfterSqliteReopen()=runBlocking {
@@ -121,8 +173,7 @@ class MixedReceiptAcceptanceTest {
             { it.put("top",-1) },{ it.put("right",100) },{ it.put("bottom",1801) },{ it.remove("top") },
             { it.put("extra",1) },{ it.put("pageWidth",Long.MAX_VALUE) },
             { it.put("pageWidth",Int.MAX_VALUE).put("left",Int.MAX_VALUE).put("right",-1) })
-        val name="synthetic-mixed-invalid-${UUID.randomUUID()}.db"
-        try { LedgerStore(app,name).use { target ->
+        withCompleteRestoreTarget(app, "synthetic-mixed-invalid") { target ->
             for((index,mutation) in mutations.withIndex()) {
                 val json=JSONObject(encoded)
                 mutation(json.getJSONArray("records").getJSONObject(0).getJSONObject("receipt").getJSONObject("blockOrigin"))
@@ -131,7 +182,7 @@ class MixedReceiptAcceptanceTest {
                 }.exceptionOrNull())
                 assertTrue(target.all().isEmpty());assertTrue(target.accounts().isEmpty())
             }
-        } } finally { app.deleteDatabase(name) }
+        }
     }
 
     @Test fun legacyReceiptWithoutBlockOriginKeepsItsJsonShapeAndBusinessEvidence() {
@@ -192,8 +243,7 @@ class MixedReceiptAcceptanceTest {
         val json=LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).toByteArray()
         val zip=java.io.ByteArrayOutputStream().use { LedgerArchive.write(app.store,net.ankio.ledger.capture.ChannelSettings(app),it);it.toByteArray() }
         for(bytes in listOf(json,zip)) {
-            val name="synthetic-mixed-roundtrip-${UUID.randomUUID()}.db"
-            try { LedgerStore(app,name).use { target -> LedgerArchive.read(bytes.inputStream(),app.cacheDir).use { prepared ->
+            withCompleteRestoreTarget(app, "synthetic-mixed-roundtrip") { target -> LedgerArchive.read(bytes.inputStream(),app.cacheDir).use { prepared ->
                 assertEquals(1,LedgerArchive.restore(target,prepared))
                 val restored=target.all().single { it.uid==saved.uid }
                 assertEquals(receipt,restored.bill.receipt);assertEquals(saved.bill.occurredAt,restored.bill.occurredAt)
@@ -207,7 +257,7 @@ class MixedReceiptAcceptanceTest {
                 val movements=target.walletSnapshot().movements
                 assertEquals(0,LedgerArchive.restore(target,prepared));assertEquals(movements,target.walletSnapshot().movements)
                 assertEquals(before,target.accounts().associate { it.uid to it.amountCents })
-            } } } finally { app.deleteDatabase(name) }
+            } }
         }
     }
 
@@ -216,8 +266,7 @@ class MixedReceiptAcceptanceTest {
         val saved=record(result)
         val encoded=LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app))
         val zipped=java.io.ByteArrayOutputStream().use { LedgerArchive.write(app.store,net.ankio.ledger.capture.ChannelSettings(app),it);it.toByteArray() }
-        val name="synthetic-preference-backup-${UUID.randomUUID()}.db"
-        try { LedgerStore(app,name).use { target ->
+        withCompleteRestoreTarget(app, "synthetic-preference-backup") { target ->
             val mutations=listOf<(JSONObject)->Unit>(
                 { it.getJSONArray("records").getJSONObject(0).put("state","POSTED") },
                 { it.getJSONObject("wallets").getJSONArray("links").getJSONObject(0)
@@ -242,7 +291,7 @@ class MixedReceiptAcceptanceTest {
                     assertEquals(50000L,target.getAccountByUid(cash.uid)!!.amountCents)
                 }
             }
-        } } finally { app.deleteDatabase(name) }
+        }
     }
 
     @Test fun unmatchedBankAccountRoundtripsAsReviewWithNoFallbackOrWalletEffect()=runBlocking {
@@ -255,14 +304,13 @@ class MixedReceiptAcceptanceTest {
         assertTrue(saved.walletEffects.isEmpty())
         val before=app.store.accounts().associate { it.uid to it.amountCents }
         val bytes=LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).toByteArray()
-        val name="synthetic-unmatched-bank-${UUID.randomUUID()}.db"
-        try { LedgerStore(app,name).use { target ->
+        withCompleteRestoreTarget(app, "synthetic-unmatched-bank") { target ->
             LedgerBackup.restore(target,LedgerBackup.decode(bytes.inputStream()))
             val restored=target.all().single { it.uid==saved.uid }
             assertEquals(RecordState.REVIEW,restored.state);assertNull(restored.wallet!!.accountUid)
             assertTrue(restored.walletEffects.isEmpty());assertEquals(saved.bill.receipt,restored.bill.receipt)
             assertEquals(before,target.accounts().associate { it.uid to it.amountCents })
-        } } finally { app.deleteDatabase(name) }
+        }
     }
 
     @Test fun serviceOnlyPagesSaveNothingAndExplicitShortcutCanReadTheNestedSummary()=runBlocking {
@@ -463,13 +511,12 @@ class MixedReceiptAcceptanceTest {
                 val receipt=ReceiptEvidenceCodec.decode(detail.getJSONObject("receipt"))
                 assertEquals(saved.bill.receipt,receipt);assertEquals("MIXED_DEBIT",receipt.blockOrigin!!.kind)
             }
-            val name="synthetic-image3-roundtrip-${UUID.randomUUID()}.db"
-            try { LedgerStore(app,name).use { target ->
+            withCompleteRestoreTarget(app, "synthetic-image3-roundtrip") { target ->
                 LedgerBackup.restore(target,LedgerBackup.decode(LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).byteInputStream()))
                 val restored=target.all().single { it.uid==saved.uid }
                 assertEquals(saved.bill.receipt,restored.bill.receipt);assertTrue(restored.bill.paymentMethod!!.executed)
                 assertEquals(saved.walletEffects,restored.walletEffects);assertEquals(48766L,target.getAccountByUid(wechat.uid)!!.amountCents)
-            } } finally { app.deleteDatabase(name) }
+            }
             pixelEvidence("user-image3",task,saved,bytes)
         } finally { app.store.deleteClassificationRule(rule.id) }
     }
@@ -514,8 +561,7 @@ class MixedReceiptAcceptanceTest {
         val json=LedgerBackup.encode(app.store,net.ankio.ledger.capture.ChannelSettings(app)).toByteArray()
         val zip=java.io.ByteArrayOutputStream().use { LedgerArchive.write(app.store,net.ankio.ledger.capture.ChannelSettings(app),it);it.toByteArray() }
         for(data in listOf(json,zip)) {
-            val name="synthetic-image3-unmatched-${UUID.randomUUID()}.db"
-            try { LedgerStore(app,name).use { target -> LedgerArchive.read(data.inputStream(),app.cacheDir).use { prepared ->
+            withCompleteRestoreTarget(app, "synthetic-image3-unmatched") { target -> LedgerArchive.read(data.inputStream(),app.cacheDir).use { prepared ->
                 LedgerArchive.restore(target,prepared)
                 val restored=target.all().single { it.uid==saved.uid }
                 assertEquals(RecordState.REVIEW,restored.state);assertNull(restored.wallet!!.accountUid)
@@ -523,7 +569,7 @@ class MixedReceiptAcceptanceTest {
                 assertTrue(restored.walletEffects.isEmpty());assertEquals(before,target.accounts().associate { it.uid to it.amountCents })
                 val movements=target.walletSnapshot().movements
                 assertEquals(0,LedgerArchive.restore(target,prepared));assertEquals(movements,target.walletSnapshot().movements)
-            } } } finally { app.deleteDatabase(name) }
+            } }
         }
         pixelEvidence("user-image3-no-wallet",task,saved,bytes)
     }

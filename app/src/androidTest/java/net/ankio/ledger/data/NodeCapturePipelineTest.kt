@@ -163,7 +163,6 @@ class NodeCapturePipelineTest {
         val cash=app.store.saveAccount(LedgerAccount(name="合成缺微信零钱现金",amountCents=20000,kind="cash"))
         app.store.setDefaultWallet(cash.uid);app.store.setAppWallet(PaymentApps.WECHAT,null)
         val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm");var saved:Long?=null
-        val copies=listOf("t13-pending-json-${UUID.randomUUID()}.db","t13-pending-zip-${UUID.randomUUID()}.db")
         val archive=java.io.File(app.cacheDir,"t13-pending-${UUID.randomUUID()}.zip")
         try {
             val snapshot=QualifiedWechatNodeFixture.page(merchant="合成缺图账户-${UUID.randomUUID()}")
@@ -190,13 +189,13 @@ class NodeCapturePipelineTest {
                 assertTrue(copy.walletMovements(cash.uid).none { it.recordUid==restored.uid })
             }
             val backup=LedgerBackup.decode(LedgerBackup.encode(app.store,app.channels).byteInputStream())
-            LedgerStore(app,copies[0]).use { copy ->
+            withCompleteRestoreTarget(app, "t13-pending-json") { copy ->
                 assertTrue(LedgerBackup.restore(copy,backup)>0);assertPendingRestored(copy)
                 val accounts=copy.accounts();val movements=copy.walletMovements(cash.uid)
                 assertEquals(0,LedgerBackup.restore(copy,backup));assertEquals(accounts,copy.accounts());assertEquals(movements,copy.walletMovements(cash.uid))
             }
             archive.outputStream().use { LedgerArchive.write(app.store,app.channels,it) }
-            LedgerStore(app,copies[1]).use { copy ->
+            withCompleteRestoreTarget(app, "t13-pending-zip") { copy ->
                 LedgerArchive.read(archive.inputStream(),app.cacheDir).use { prepared ->
                     assertTrue(LedgerArchive.restore(copy,prepared)>0);assertPendingRestored(copy)
                     val accounts=copy.accounts();val movements=copy.walletMovements(cash.uid)
@@ -207,7 +206,7 @@ class NodeCapturePipelineTest {
             saved?.let(app.store::delete);app.tasks.operationKey(task)?.let { app.store.writableDatabase.delete("wallet_submissions","token=?",arrayOf(it)) };app.tasks.delete(task)
             app.store.setDefaultWallet(settings.defaultAccountUid);app.store.setAppWallet(PaymentApps.WECHAT,settings.appBindings[PaymentApps.WECHAT])
             app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(cash.uid));app.store.deleteAccount(cash.id)
-            copies.forEach(app::deleteDatabase);archive.delete()
+            archive.delete()
         }
     }
 
@@ -222,7 +221,6 @@ class NodeCapturePipelineTest {
         val noOcr=RecognitionBackend { _,_,_,_,_,_->calls++;error("node capture must not invoke OCR") }
         val bitmap=android.graphics.Bitmap.createBitmap(12,12,android.graphics.Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLUE) }
         val image=try { java.io.ByteArrayOutputStream().also { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }.toByteArray() } finally { bitmap.recycle() }
-        val copyName="t13-restored-${UUID.randomUUID()}.db"
         val archive=java.io.File(app.cacheDir,"t13-${UUID.randomUUID()}.zip")
         try {
             val task=app.tasks.create(Source.OCR,"shake:com.tencent.mm").also(tasks::add);operations+=app.tasks.operationKey(task)!!
@@ -249,7 +247,7 @@ class NodeCapturePipelineTest {
             assertEquals(1,calls);assertArrayEquals(image,app.store.merchantIcon(original.id));assertArrayEquals(image,app.store.merchantIcon(ocr.id))
             app.tasks.delete(task)
             archive.outputStream().use { LedgerArchive.write(app.store,app.channels,it) }
-            LedgerStore(app,copyName).use { copy ->
+            withCompleteRestoreTarget(app, "t13-restored") { copy ->
                 LedgerArchive.read(archive.inputStream(),app.cacheDir).use { prepared ->
                     assertTrue(LedgerArchive.restore(copy,prepared)>0)
                     val restored=copy.all().single { it.uid==original.uid }
@@ -259,14 +257,13 @@ class NodeCapturePipelineTest {
                     val accounts=copy.accounts();val movements=copy.walletMovements(wallet.uid)
                     assertEquals(0,LedgerArchive.restore(copy,prepared));assertEquals(accounts,copy.accounts());assertEquals(movements,copy.walletMovements(wallet.uid))
                 }
-                copy.all().forEach { copy.delete(it.id) }
             }
             assertEquals(1,calls)
         } finally {
             records.forEach(app.store::delete);operations.forEach { app.store.writableDatabase.delete("wallet_submissions","token=?",arrayOf(it)) };tasks.forEach(app.tasks::delete)
             app.store.setDefaultWallet(settings.defaultAccountUid);app.store.setAppWallet(PaymentApps.WECHAT,settings.appBindings[PaymentApps.WECHAT])
             app.store.writableDatabase.delete("wallet_movements","account_uid=?",arrayOf(wallet.uid));app.store.deleteAccount(wallet.id)
-            app.deleteDatabase(copyName);archive.delete()
+            archive.delete()
         }
     }
 

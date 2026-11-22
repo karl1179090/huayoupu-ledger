@@ -17,7 +17,7 @@ import net.ankio.ledger.ocr.RecognitionException
 sealed class ImageImportState {
     data object Idle : ImageImportState()
     data object Working : ImageImportState()
-    data class Finished(val result: IngestResult) : ImageImportState()
+    data class Finished(val result: IngestResult, val taskId: Long? = null) : ImageImportState()
     data class Failed(val message: String) : ImageImportState()
 }
 
@@ -57,7 +57,7 @@ class ImageImporter(private val app: LedgerApp, private val client: net.ankio.le
                     }
                     app.changed()
                     val result = CaptureProcessor(app, client).process(preview, Source.IMAGE, "image",taskId) { generation == token && app.recognitionSession.generation == recognitionGeneration }
-                    if (generation == token) state.value = ImageImportState.Finished(result)
+                    if (generation == token) state.value = ImageImportState.Finished(result, taskId)
                 } finally { preview.recycle() }
             } catch (cancelled: CancellationException) { app.tasks.update(taskId,"CANCELLED","识别已停止，可以重新导入截图");app.changed();throw cancelled }
             catch (error: Exception) {

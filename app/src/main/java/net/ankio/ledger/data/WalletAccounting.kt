@@ -151,10 +151,11 @@ internal object WalletAccounting {
             }
         }
     }
-    fun remember(db:SQLiteDatabase,token:String?,kind:String,resultUid:String) {
+    fun remember(db:SQLiteDatabase,token:String?,kind:String,resultUid:String,effect:RecognitionCommitEffect?=null) {
         if(token==null)return
         db.insertOrThrow("wallet_submissions",null,ContentValues().apply {
             put("token",token);put("kind",kind);put("result_uid",resultUid);put("created_at",System.currentTimeMillis())
+            effect?.let { put("recognition_effect", it.name) }
         })
     }
     fun validateChanges(db: SQLiteDatabase, deltas: Map<String,Long>) {

@@ -6,13 +6,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import net.ankio.ledger.ocr.RecognitionException
-import net.ankio.ledger.ocr.MerchantIconCropper
-import net.ankio.ledger.ocr.MerchantIconRegion
-import net.ankio.ledger.ocr.RecognitionResult
-import net.ankio.ledger.core.LocalOcrBillParser
 import net.ankio.ledger.core.LocalOcrLine
 import net.ankio.ledger.core.RecognitionPolicy
+import net.ankio.ledger.core.TransactionPageParser
+import net.ankio.ledger.core.TransactionPageScope
 
 /** Bundled recognition of the exact stored screenshot. This client has no network dependency. */
 class LocalRecognitionClient(context: android.content.Context) {
@@ -58,17 +55,12 @@ class LocalRecognitionClient(context: android.content.Context) {
                     LocalOcrLine(line.text, box?.left ?: 0, box?.top ?: 0, box?.right ?: 0, box?.bottom ?: 0)
                 }
                 val parseAt=android.os.SystemClock.elapsedRealtime()
-                val candidates = net.ankio.ledger.core.TransactionPageParser.parse(lines, ocr.width, ocr.height, time, livePaymentAt, policy, origin)
+                val page = TransactionPageParser.parsePage(lines, ocr.width, ocr.height, time, livePaymentAt, policy, origin)
                 val timings=mapOf("ocr" to ocrMillis,"parse" to android.os.SystemClock.elapsedRealtime()-parseAt)
-                if (candidates.any { it.id != net.ankio.ledger.core.CandidateId.SINGLE })
-                    return@run RecognitionResult(ocr.rawText.take(16_384),candidates,screenshot=submitted,phaseTimingsMs=timings)
-                val bill = candidates.singleOrNull()?.bill
-                // Completed refunds, including a zero net amount, continue to storage association.
-                // Only closed, pending or failed transactions stop this pipeline.
-                net.ankio.ledger.core.TransactionRejection.reason(ocr.rawText)?.let { reason ->
-                    return@run RecognitionResult(ocr.rawText.take(16_384),null,screenshot=submitted,skipReason=reason,phaseTimingsMs=timings)
-                }
-                if (bill == null) return@run RecognitionResult(ocr.rawText.take(16_384), null, screenshot = submitted,phaseTimingsMs=timings)
+                val rawText = ocr.rawText.take(16_384)
+                val bill = page.candidates.singleOrNull()?.bill
+                if (bill == null || page.scope == TransactionPageScope.ISOLATED_BLOCKS)
+                    return@run RecognitionResult(rawText, page, screenshot = submitted, phaseTimingsMs = timings)
                 checkAllowed()
                 val icon = LocalIconLocator.locate(bitmap, ocr, bill.merchant)
                 // A plausible image near unrelated text must not become this merchant's shared icon.
@@ -78,7 +70,7 @@ class LocalRecognitionClient(context: android.content.Context) {
                     it.right * 1000.0 / bitmap.width, it.bottom * 1000.0 / bitmap.height) }
                 val crop = region?.let { MerchantIconCropper.evaluate(bitmap, it,verifiedBox=true) }
                 checkAllowed()
-                RecognitionResult(ocr.rawText.take(16_384), bill, submitted, region, crop?.bytes,
+                RecognitionResult(rawText, page, submitted, region, crop?.bytes,
                     if (crop?.bytes != null) "saved" else if (crop != null) "crop_rejected" else "not_located",
                     "method=local_geometry_and_ocr_v1; reason=${if (icon.selected != null && selected == null) "merchant_anchor_mismatch" else icon.reason}; ${crop?.details.orEmpty()}",phaseTimingsMs=timings)
             } finally {
