@@ -290,6 +290,20 @@ async function installRulesFixture(page){
   assert.equal(await page.locator('[data-builtin-rule-row="builtin:expense:transit"]').isVisible(),true);
   await page.screenshot({path:path.join(output,'02-rules-empty-sheet.png')});
 
+  const startRule = async () => {
+   await page.locator('#reset-rule-form').click();
+   assert.equal(await page.locator('#classification-rules-list').count(),0);
+   assert.equal(await page.locator('#rule-tester-card').count(),0);
+  };
+  const backFromSavedRuleTest = async () => {
+   assert.equal(await page.locator('#sheet-title').innerText(),'测试分类规则');
+   assert.equal(await page.locator('#rule-editor-card, #classification-rules-list').count(),0);
+   assert.equal(await page.locator('#test-use-draft').count(),0);
+   await page.locator('#rule-page-back').click();
+  };
+  assert.equal(await page.locator('#rule-editor-card, #rule-tester-card').count(),0);
+  await startRule();
+
   // 3. Validation: empty name, whitespace-only keyword, control character keyword, cross-direction target category, and empty second condition keyword
   await page.locator('#rule-name').fill('');
   await page.locator('#rule-keyword').fill('星巴克');
@@ -360,6 +374,9 @@ async function installRulesFixture(page){
    conditions:[{field:'MERCHANT',operator:'CONTAINS',value:'合成平台'},{field:'ORDER_CONTENT',operator:'NOT_CONTAINS',value:'打车'}]
   });
 
+  await backFromSavedRuleTest();
+  await startRule();
+
   // Rule 2: Compound Rule with ANY and Source = null (不限来源)
   await page.locator('#rule-name').fill('交通出行任一满足');
   await page.locator('#rule-category').selectOption('cat:expense:transit');
@@ -375,6 +392,9 @@ async function installRulesFixture(page){
   await page.locator('#save-rule').click();
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),2);
 
+  await backFromSavedRuleTest();
+  await startRule();
+
   // Rule 3: Single condition rule with EQUALS
   await page.locator('#rule-name').fill('星巴克专星送');
   await page.locator('#rule-category').selectOption('cat:expense:shopping');
@@ -382,6 +402,8 @@ async function installRulesFixture(page){
   await page.locator('#rule-keyword').fill('星巴克专星送');
   await page.locator('#save-rule').click();
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),3);
+
+  await backFromSavedRuleTest();
 
   // Verify summaries rendered in DOM: clean Chinese, no enum leaks
   assert.equal(await page.locator('[data-rule-summary="rule:custom:1"]').innerText(),'微信现场 · 全部满足：商家包含「合成平台」 且 订单内容不包含「打车」');
@@ -392,7 +414,10 @@ async function installRulesFixture(page){
 
   // 5. Negative condition & missing field verification (Ticket 07 requirement: 缺字段不命中不包含)
   // Verify UI hint note is present and accurate
+  await startRule();
   assert.match(await page.locator('.rule-hint-note').innerText(),/缺少某字段时不命中该字段的所有条件（包括“不包含”）/);
+
+  await page.locator('#rule-page-back').click();
 
   // Verify simulation of missing field logic
   const negativeMatchCheck=await page.evaluate(()=>{
@@ -450,9 +475,9 @@ async function installRulesFixture(page){
   assert.equal(await page.evaluate(()=>window.calls.copyBuiltin.length),1);
   assert.equal(await page.locator('#rule-name').inputValue(),'内置餐饮（副本）');
   assert.match(await page.locator('#rule-editor-title').innerText(),/复制规则预填/);
-  assert.equal(await page.locator('#cancel-rule-edit').innerText(),'取消预填');
+  assert.equal(await page.locator('#cancel-rule-edit').innerText(),'取消');
   await page.locator('#cancel-rule-edit').click();
-  assert.equal(await page.locator('#rule-name').inputValue(),'');
+  assert.equal(await page.locator('#rule-name').count(),0);
   assert.equal(await page.evaluate(()=>window.calls.saveRule.length),saveCountBeforeCopy,'Canceling draft must not save any rule');
 
   // Copy builtin rule -> Edit & Save as custom rule
@@ -467,17 +492,19 @@ async function installRulesFixture(page){
   const copySaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
   assert.equal(copySaved.name,'内置餐饮副本扩展');
   assert.equal(copySaved.id,undefined,'Copy draft must be saved as new custom rule without builtin id');
+  await backFromSavedRuleTest();
   assert.equal(await page.locator('[data-rule-row="rule:custom:4"]').isVisible(),true);
   assert.equal(await page.locator('[data-builtin-rule-row="builtin:expense:dining"]').isVisible(),true,'Builtin rule must remain unmodified');
   await page.screenshot({path:path.join(output,'05-rules-builtin-and-copy.png')});
 
   // 8. Direction switch to INCOME tab: shows income custom rules and income builtin rules
+  await page.locator('[data-rule-dir="INCOME"]').click();
+  assert.equal(await page.locator('#builtin-rules-title').innerText(),'内置收入规则 (1)');
+  assert.equal(await page.locator('[data-builtin-rule-row="builtin:income:salary"]').isVisible(),true);
+  await startRule();
   await page.locator('#rule-direction').selectOption('INCOME');
   const incomeCategoryOptions=await page.locator('#rule-category option').evaluateAll(els=>els.map(e=>e.value));
   assert.deepEqual(incomeCategoryOptions,['cat:income:salary','cat:income:bonus','cat:income:gift','cat:income:refund','cat:income:other']);
-  assert.equal(await page.locator('#builtin-rules-title').innerText(),'内置收入规则 (1)');
-  assert.equal(await page.locator('[data-builtin-rule-row="builtin:income:salary"]').isVisible(),true);
-
   await page.locator('#rule-name').fill('兼职稿费自动归类');
   await page.locator('#rule-category').selectOption('cat:income:bonus');
   await page.locator('#rule-source').selectOption('IMAGE:alipay');
@@ -489,11 +516,13 @@ async function installRulesFixture(page){
   await page.locator('[data-condition-operator="1"]').selectOption('CONTAINS');
   await page.locator('[data-condition-keyword="1"]').fill('稿费');
   await page.locator('#save-rule').click();
+  await backFromSavedRuleTest();
   assert.equal(await page.locator('[data-rule-row="rule:custom:5"]').isVisible(),true);
   assert.equal(await page.locator('[data-rule-summary="rule:custom:5"]').innerText(),'支付宝凭证图片 · 全部满足：商家包含「出版社」 且 订单内容包含「稿费」');
   await page.screenshot({path:path.join(output,'06-rules-income-tab.png')});
 
   // 9. Backend error display: preserve user inputs on error
+  await startRule();
   await page.evaluate(()=>{window.simError.saveRule={code:'RULE_TARGET',error:'请选择存在且收支方向一致的目标分类'}});
   await page.locator('#rule-name').fill('保留输入测试商户');
   await page.locator('#rule-keyword').fill('测试商户');
@@ -502,15 +531,19 @@ async function installRulesFixture(page){
   assert.equal(await page.locator('#rule-form-error').innerText(),'请选择存在且收支方向一致的目标分类');
   assert.equal(await page.locator('#rule-name').inputValue(),'保留输入测试商户','Inputs must not be lost on backend error');
 
+  await page.locator('#rule-page-back').click();
+
   // Cleanly delete income rule
   await page.locator('[data-delete-rule="rule:custom:5"]').click();
   assert.equal(await page.locator('#classification-rules-empty').isVisible(),true);
 
   // 10. Switch back to EXPENSE tab, test XSS/special characters safety, and category rename live refresh
   await page.locator('[data-rule-dir="EXPENSE"]').click();
+  await startRule();
   await page.locator('#rule-name').fill('<img src=x onerror=alert(1)> & "特殊店"');
   await page.locator('#rule-keyword').fill('<b>COSTA & "Coffee"</b>');
   await page.locator('#save-rule').click();
+  await backFromSavedRuleTest();
   const xssSafe=await page.evaluate(()=>{
    const list=document.querySelector('#classification-rules-list');
    return !list.querySelector('img')&&!list.querySelector('[data-rule-summary] b')&&list.textContent.includes('<img src=x onerror=alert(1)> & "特殊店"')&&list.textContent.includes('<b>COSTA & "Coffee"</b>');
@@ -518,22 +551,28 @@ async function installRulesFixture(page){
   assert.equal(xssSafe,true,'Rule name and keyword must be safely escaped without injecting DOM elements');
 
   // Punctuation, symbols, emojis, and formatting whitespace
+  await startRule();
   await page.locator('#rule-name').fill('全角加号商户');
   await page.locator('#rule-keyword').fill('＋');
   await page.locator('#save-rule').click();
+  await backFromSavedRuleTest();
   const plusSaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
   assert.equal(plusSaved.conditions[0].value,'＋','Raw symbol "＋" must be preserved exactly');
   assert.equal(await page.evaluate(()=>normRuleKeyword('＋')),'+','normRuleKeyword NFKC normalizes ＋ to +');
 
+  await startRule();
   await page.locator('#rule-name').fill('奶茶表情商户');
   await page.locator('#rule-keyword').fill('🧋');
   await page.locator('#save-rule').click();
+  await backFromSavedRuleTest();
   const emojiSaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
   assert.equal(emojiSaved.conditions[0].value,'🧋','Raw emoji "🧋" must be preserved exactly');
 
+  await startRule();
   await page.locator('#rule-name').fill('制表符商户');
   await page.locator('#rule-keyword').fill('合成\tＡ＋Ｂ');
   await page.locator('#save-rule').click();
+  await backFromSavedRuleTest();
   const tabSaved=await page.evaluate(()=>window.calls.saveRule.at(-1));
   assert.equal(tabSaved.conditions[0].value,'合成\tＡ＋Ｂ','Tab formatting whitespace inside keyword must be preserved');
 

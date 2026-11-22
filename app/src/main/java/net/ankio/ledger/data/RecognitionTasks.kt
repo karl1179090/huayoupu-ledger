@@ -2,8 +2,10 @@ package net.ankio.ledger.data
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import net.ankio.ledger.capture.ChannelSettings
 import net.ankio.ledger.core.Source
 import net.ankio.ledger.capture.ShakeAuthorization
 import org.json.JSONArray
@@ -12,37 +14,70 @@ import java.util.UUID
 
 /** Recognition attempts are durable local data, independently of a valid financial transaction. */
 class RecognitionTasks(context:Context,private val name:String="recognition.db",private val screenshots:ScreenshotStore=ScreenshotStore.get(context),
-    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,8) {
+    private val classificationStore:LedgerStore?=(context.applicationContext as? net.ankio.ledger.LedgerApp)?.store):SQLiteOpenHelper(context,name,null,9) {
     internal fun stageBackupImage(id:Long,directory:java.io.File)=screenshots.stageFile(imageOwner(id),directory)
     internal fun backupImageHash(id:Long)=screenshots.fingerprint(imageOwner(id))
     internal fun restoreImage(db:SQLiteDatabase,id:Long,image:ByteArray,at:Long,status:String) { screenshots.requireRestoreDatabase(db);screenshots.put(imageOwner(id),image,at,status) }
     internal fun fullBackup():JSONArray {
-        val rows=readableDatabase.rawQuery("SELECT * FROM tasks ORDER BY id",null).use { c -> JSONArray().apply { while(c.moveToNext()) {
-            val row=JSONObject()
-            RecognitionTaskBackup.columns.forEach { column -> val index=c.getColumnIndexOrThrow(column)
-                row.put(column,if(c.isNull(index))JSONObject.NULL else if(column in setOf("created_at","recognition_at"))c.getLong(index) else c.getString(index)) }
-            val id=c.getLong(c.getColumnIndexOrThrow("id"))
-            row.put("localId",id).put("localRecordId",if(c.isNull(c.getColumnIndexOrThrow("record_id")))JSONObject.NULL else c.getLong(c.getColumnIndexOrThrow("record_id")))
-            screenshots.referenceInfo(imageOwner(id))?.let { row.put("imageCreatedAt",it.first).put("imageState",it.second) }
-            row.put("imageHash",screenshots.fingerprint(imageOwner(id))?.takeIf { screenshots.contains(imageOwner(id)) } ?: JSONObject.NULL)
-            put(row)
-        } } }
+        val db = readableDatabase
+        val columns = RecognitionTaskBackup.columns.filterNot { it == "classification_snapshot" }
+        // A full-size frozen configuration and node evidence require separate CursorWindows.
+        val rows = db.rawQuery("SELECT id,record_id,${columns.joinToString(",")} FROM tasks ORDER BY id", null).use { c ->
+            db.rawQuery("SELECT id,classification_snapshot FROM tasks ORDER BY id", null).use { snapshots ->
+                JSONArray().apply {
+                    while (c.moveToNext()) {
+                        val id = c.getLong(0)
+                        check(snapshots.moveToNext() && snapshots.getLong(0) == id)
+                        val row = JSONObject().put("classification_snapshot", snapshots.getString(1))
+                        columns.forEach { column ->
+                            val index = c.getColumnIndexOrThrow(column)
+                            row.put(column, if (c.isNull(index)) JSONObject.NULL else if (column in setOf("created_at", "recognition_at")) c.getLong(index) else c.getString(index))
+                        }
+                        row.put("localId", id).put("localRecordId", if (c.isNull(1)) JSONObject.NULL else c.getLong(1))
+                        screenshots.referenceInfo(imageOwner(id))?.let { row.put("imageCreatedAt", it.first).put("imageState", it.second) }
+                        row.put("imageHash", screenshots.fingerprint(imageOwner(id))?.takeIf { screenshots.contains(imageOwner(id)) } ?: JSONObject.NULL)
+                        put(row)
+                    }
+                }
+            }
+        }
         for(i in 0 until rows.length()) { val row=rows.getJSONObject(i)
-            val uid=(if(row.isNull("localRecordId"))null else classificationStore?.recordUidForBackup(row.getLong("localRecordId")))
-                ?: classificationStore?.committedCapture("recognition:${row.getString("operation_uid")}")?.recordUid
+            val localId = row.optLong("localRecordId", 0L).takeIf { it > 0 }
+            val receipt = classificationStore?.committedCapture("recognition:${row.getString("operation_uid")}")
+            if (localId != null && receipt?.record != null && receipt.record.id != localId) {
+                val projected = RecognitionCommitRecovery.project(receipt.effect, receipt.record)
+                row.put("status", projected.status).put("message", projected.feedback.message)
+            }
+            val uid = receipt?.recordUid ?: localId?.let { classificationStore?.recordUidForBackup(it) }
             row.remove("localRecordId");row.put("recordUid",uid ?: JSONObject.NULL)
         };return rows
     }
     // Read the immutable ledger migration baseline before SQLiteOpenHelper acquires its own lock.
     private val migrationBaseline=classificationStore?.classificationMigrationBaseline() ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
     private var classificationsReconciled=false
-    private fun reconcileClassificationSnapshots(db:SQLiteDatabase) {
-        val snapshots=db.rawQuery("SELECT operation_uid,classification_snapshot,status FROM tasks",null).use { c ->
-            buildList { while(c.moveToNext())add(Triple("recognition:${c.getString(0)}",ClassificationCodec.readSnapshot(c.getString(1)),c.getString(2))) }
+    /** Keep the same store -> task helper -> media lock order as complete restore. */
+    internal fun <T> withClassificationEvidence(action:()->T):T = synchronized(this) { synchronized(screenshots,action) }
+    internal fun reconcileClassificationSnapshots(ledger:SQLiteDatabase,restored:Boolean=false,pauseCapture:Boolean=false) {
+        val tasks=if(restored)ledger else readableDatabase
+        val table=if(restored)"recognition.tasks" else "tasks"
+        val states=taskStates(tasks,table,"status IN ('CAPTURING','QUEUED','RECOGNIZING','FAILED','CANCELLED')")
+        val grants=if(pauseCapture)null else authorizationSettings.captureGrants()
+        val active=states.filter { state ->
+            if(state.status in ACTIVE_STATUSES) !pauseCapture || !state.nativeCapture else canRetryBatch(ledger,state,grants)
+        }.associate { it.operationKey to it.id }
+        ClassificationStorage.reconcile(ledger,name,active) { id ->
+            tasks.rawQuery("SELECT classification_snapshot FROM $table WHERE id=?",arrayOf(id.toString())).use {
+                check(it.moveToFirst());ClassificationCodec.readSnapshot(it.getString(0))
+            }
         }
-        val reservations=snapshots.map { (key,snapshot,status) -> StoredClassificationSnapshot(key,snapshot,
-            retainsClassificationSnapshot(status,status=="CANCELLED" && hasResumableBatch(key)),name) }
-        classificationStore?.reconcileClassificationSnapshots(name,reservations);classificationsReconciled=true
+    }
+    private fun reconcileAtStartup() {
+        classificationStore?.let { store -> withClassificationEvidence {
+            val db=store.writableDatabase
+            db.beginTransaction()
+            try { reconcileClassificationSnapshots(db);db.setTransactionSuccessful() } finally { db.endTransaction() }
+        } }
+        classificationsReconciled=true
     }
     private fun imageOwner(id:Long)="task:$name:$id"
     override fun onOpen(db:SQLiteDatabase) {
@@ -68,7 +103,8 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, origin TEXT NOT NULL,
         created_at INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL,
         record_id INTEGER, image BLOB, diagnostic TEXT NOT NULL DEFAULT '{}', shake_authorization TEXT,operation_uid TEXT NOT NULL,classification_snapshot TEXT NOT NULL,
-        recognition_at INTEGER,recognition_zone TEXT,trusted_original_capture_date TEXT,node_snapshot TEXT,node_image_hash TEXT,recognition_evidence TEXT)""")
+        recognition_at INTEGER,recognition_zone TEXT,trusted_original_capture_date TEXT,node_snapshot TEXT,node_image_hash TEXT,recognition_evidence TEXT,
+        automatic_authorization_generation INTEGER)""")
         db.execSQL("CREATE UNIQUE INDEX tasks_operation_uid ON tasks(operation_uid)")
     }
     override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int) {
@@ -95,6 +131,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             db.execSQL("ALTER TABLE tasks ADD COLUMN node_image_hash TEXT")
             db.execSQL("ALTER TABLE tasks ADD COLUMN recognition_evidence TEXT")
         }
+        if(oldVersion<9)db.execSQL("ALTER TABLE tasks ADD COLUMN automatic_authorization_generation INTEGER")
     }
     /** Null until the engine actually begins processing; old records/tasks are never backfilled. */
     fun recognitionTime(id:Long):net.ankio.ledger.core.RecognitionTimeContext? = readableDatabase.rawQuery(
@@ -148,10 +185,11 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         writableDatabase.update("tasks",ContentValues().apply { put("diagnostic",json.toString()) },"id=?",arrayOf(id.toString()))
     }
     private var firstSessionTaskId:Long?=null
-    fun create(source:Source,origin:String,authorization:ShakeAuthorization?=null):Long = synchronized(classificationStore ?: this) {
+    fun create(source:Source,origin:String,authorization:ShakeAuthorization?=null,automaticGeneration:Long?=null):Long = synchronized(classificationStore ?: this) {
         require(authorization==null || source==Source.OCR && origin==authorization.origin)
+        require(automaticGeneration==null || source==Source.OCR && origin.startsWith("payment_auto:") && automaticGeneration>=0)
         val db=writableDatabase
-        if(!classificationsReconciled)reconcileClassificationSnapshots(db)
+        if(!classificationsReconciled)reconcileAtStartup()
         val operation=UUID.randomUUID().toString();val key="recognition:$operation"
         val snapshot=classificationStore?.holdClassificationSnapshot(key,taskDatabase=name) ?: net.ankio.ledger.core.ClassificationDefaults.migrationBaseline
         try {
@@ -160,6 +198,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
                 put("status","CAPTURING");put("message","正在获取账单截图");put("operation_uid",operation)
                 put("classification_snapshot",ClassificationCodec.snapshot(snapshot).toString())
                 if(authorization!=null)put("shake_authorization",authorization.encode())
+                if(automaticGeneration!=null)put("automatic_authorization_generation",automaticGeneration)
             }).also { if(firstSessionTaskId==null)firstSessionTaskId=it }
         } catch(error:Throwable) { classificationStore?.forgetClassificationSnapshot(key);throw error }
     }
@@ -172,18 +211,21 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         if(!it.moveToFirst() || it.getString(0)!=Source.OCR.name)return@use null
         ShakeAuthorization.decode(if(it.isNull(2))null else it.getString(2))?.takeIf { authorization -> it.getString(1)==authorization.origin }
     }
-    fun update(id:Long,status:String,message:String,recordId:Long?=null):Boolean = synchronized(classificationStore ?: this) {
+    fun update(id:Long,status:String,message:String,recordId:Long?=null,replaceRecordLink:Boolean=false):Boolean = synchronized(classificationStore ?: this) {
         require(status in STATUSES)
         val updated=writableDatabase.update("tasks",ContentValues().apply {
-            put("status",status);put("message",message.take(500));if(recordId!=null) put("record_id",recordId)
+            put("status",status);put("message",message.take(500));if(recordId!=null || replaceRecordLink) put("record_id",recordId)
         },"id=?"+(if(status in setOf("FAILED","CANCELLED")) " AND status IN ('CAPTURING','QUEUED','RECOGNIZING')" else ""),arrayOf(id.toString()))==1
-        if(updated) {
-            val resumable=status=="CANCELLED" && hasResumableBatch(id)
-            if(!retainsClassificationSnapshot(status,resumable))operationKey(id)?.let { classificationStore?.releaseClassificationSnapshot(it) }
+        if(updated)withClassificationEvidence {
+            val state=taskState(id)
+            val resumable=classificationStore?.let { store -> state?.let { canRetryBatch(store.readableDatabase,it,authorizationSettings.captureGrants()) } }==true
             // A cancelled partial batch still owns resumable evidence; retain it under the failed-task policy.
-            val imageState=if(resumable)"FAILED" else status
+            val imageState=if(resumable && status=="CANCELLED")"FAILED" else status
             screenshots.state(imageOwner(id),imageState)
-            if(status !in setOf("CAPTURING","QUEUED","RECOGNIZING"))screenshots.cleanup()
+            if(status !in ACTIVE_STATUSES) {
+                screenshots.cleanup()
+                if(!resumable || !screenshots.contains(imageOwner(id)))state?.let { classificationStore?.releaseClassificationSnapshot(it.operationKey) }
+            }
         }
         if(updated)app?.executionLog?.event("model","task",status,JSONObject().put("taskId",id).put("recordId",recordId))
         updated
@@ -376,12 +418,18 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             .put("recognitionEvidence",recognitionEvidence(c.getLong(0)) ?: JSONObject.NULL)) }
     }
         // Close the task cursor before reading ledger.db; task DB locks never nest a store lock.
-        for(index in 0 until rows.length()) {
-            val row=rows.getJSONObject(index)
-            val batch=classificationStore?.recognitionBatch("recognition:${row.getString("operationUID")}")
-            if(batch!=null)row.put("batch",batch.json().put("canRetry",!batch.complete &&
-                row.getString("status") in setOf("FAILED","CANCELLED") && row.getBoolean("hasScreenshot")))
-        }
+        classificationStore?.let { store -> synchronized(store) {
+            val grants=authorizationSettings.captureGrants()
+            for(index in 0 until rows.length()) {
+                val row=rows.getJSONObject(index)
+                val batch=store.recognitionBatch("recognition:${row.getString("operationUID")}") ?: continue
+                val canRetry=taskState(row.getLong("id"))?.let { canRetryBatch(store.readableDatabase,it,grants,!batch.complete) }==true
+                if (batch.complete && row.getString("status") == "REVIEW") {
+                    row.put("status",batch.taskStatus).put("message",batch.message)
+                }
+                row.put("batch",batch.json().put("canRetry",canRetry))
+            }
+        } }
         return rows
     }
     fun diagnosticExport():JSONArray=readableDatabase.rawQuery("SELECT id,source,created_at,status,diagnostic FROM tasks ORDER BY id DESC LIMIT 100",null).use { c ->
@@ -389,25 +437,60 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
             .put("createdAt",c.getLong(2)).put("status",c.getString(3)).put("diagnostic",JSONObject(c.getString(4)))) }
     }
     fun image(id:Long):ByteArray? { readableDatabase;return screenshots.image(imageOwner(id)) }
-    /** Durable retry prerequisites only; the queue still checks live capture permission and authorization. */
-    internal fun hasResumableBatch(id:Long):Boolean=operationKey(id)?.let(::hasResumableBatch) ?: false
-    private fun hasResumableBatch(key:String):Boolean {
-        val task=readableDatabase.rawQuery("SELECT id,source,origin,shake_authorization FROM tasks WHERE operation_uid=?",arrayOf(key.removePrefix("recognition:"))).use { c ->
-            if(!c.moveToFirst())return false
-            val authorization=ShakeAuthorization.decode(if(c.isNull(3))null else c.getString(3))
-            c.getLong(0) to retryableBatchSource(Source.valueOf(c.getString(1)),c.getString(2),
-                authorization?.let { it.origin==c.getString(2) && authorizationSettings.shakeGenerationMatches(it) }==true)
-        }
-        return task.second && screenshots.contains(imageOwner(task.first)) &&
-            classificationStore?.let { RecognitionBatchStore.hasUnfinished(it.readableDatabase,key) }==true
+    private data class TaskState(val id:Long,val source:Source,val origin:String,val status:String,val operationKey:String,
+        val authorization:ShakeAuthorization?,val automaticGeneration:Long?) {
+        val imageImport get()=source==Source.IMAGE && origin=="image"
+        val automaticPackage get()=origin.removePrefix("payment_auto:").takeIf { source==Source.OCR && origin.startsWith("payment_auto:") }
+        val manualCapture get()=origin.startsWith("shake:") || origin.startsWith("shortcut:")
+        val nativeCapture get()=manualCapture || automaticPackage!=null
+        fun hasOriginalGrant(grants:ChannelSettings.CaptureGrants?):Boolean = imageImport || grants!=null && (
+            source==Source.OCR && authorization?.takeIf { it.origin==origin }?.let(grants::allows)==true ||
+            automaticPackage?.let { pkg -> automaticGeneration?.let { grants.allowsAutomatic(pkg,it) } }==true)
     }
-    /** Revocation can follow a manual cancellation; those rows are outside the live queue. */
-    internal fun reconcileCancelledBatchReservations(originPrefix:String,packageName:String?=null) = synchronized(classificationStore ?: this) {
-        val ids=readableDatabase.rawQuery("SELECT id FROM tasks WHERE status='CANCELLED' AND origin "+
-            (if(packageName==null)"LIKE ?" else "=?"),arrayOf(originPrefix+(packageName ?: "%"))).use { c ->
-            buildList { while(c.moveToNext())add(c.getLong(0)) }
+    private fun taskState(c:Cursor)=TaskState(c.getLong(0),Source.valueOf(c.getString(1)),c.getString(2),c.getString(3),
+        "recognition:${c.getString(4)}",ShakeAuthorization.decode(c.getString(5)),if(c.isNull(6))null else c.getLong(6))
+    private fun taskStates(db:SQLiteDatabase,table:String,where:String,args:Array<String>?=null):List<TaskState> =
+        db.rawQuery("SELECT id,source,origin,status,operation_uid,shake_authorization,automatic_authorization_generation FROM $table WHERE $where",args)
+            .use { c -> buildList { while(c.moveToNext())add(taskState(c)) } }
+    private fun taskState(id:Long):TaskState?=taskStates(readableDatabase,"tasks","id=?",arrayOf(id.toString())).singleOrNull()
+
+    /** Live permission and queue capacity are checked by the queue before changing state. */
+    private fun canRetryBatch(db:SQLiteDatabase,state:TaskState,grants:ChannelSettings.CaptureGrants?,unfinished:Boolean?=null):Boolean =
+        state.status in BATCH_RETRY_STATUSES && state.hasOriginalGrant(grants) &&
+            (unfinished ?: RecognitionBatchStore.hasUnfinished(db,state.operationKey)) && screenshots.contains(imageOwner(state.id))
+
+    internal fun queueBatchRetry(id:Long):Boolean {
+        val store=classificationStore ?: return false
+        return synchronized(store) { withClassificationEvidence {
+            val state=taskState(id) ?: return@withClassificationEvidence false
+            val db=store.writableDatabase
+            if(!canRetryBatch(db,state,authorizationSettings.captureGrants()))return@withClassificationEvidence false
+            ClassificationStorage.activate(db,state.operationKey,name) { requireNotNull(classificationSnapshot(id)) }
+            update(id,"QUEUED","正在重试未完成项")
+        } }
+    }
+
+    /** Old queued single recognition can still run under current consent. Frozen batches need their original grant. */
+    internal fun automaticQueueGrantValid(id:Long):Boolean {
+        val store=classificationStore ?: return false
+        return synchronized(store) {
+            val state=taskState(id) ?: return@synchronized false
+            if(state.automaticPackage==null)return@synchronized false
+            if(state.automaticGeneration==null) !RecognitionBatchStore.hasUnfinished(store.readableDatabase,state.operationKey)
+            else state.hasOriginalGrant(authorizationSettings.captureGrants())
         }
-        ids.filterNot(::hasResumableBatch).mapNotNull(::operationKey).forEach { classificationStore?.releaseClassificationSnapshot(it) }
+    }
+
+    /** Revocation also affects terminal tasks outside the live queue. */
+    internal fun reconcileRevokedBatchReservations(originPrefix:String,packageName:String?=null) {
+        val store=classificationStore ?: return
+        synchronized(store) { withClassificationEvidence {
+            val states=taskStates(readableDatabase,"tasks","status IN ('FAILED','CANCELLED') AND origin "+
+                (if(packageName==null)"LIKE ?" else "=?"),arrayOf(originPrefix+(packageName ?: "%")))
+            val db=store.readableDatabase
+            val grants=authorizationSettings.captureGrants()
+            states.filterNot { canRetryBatch(db,it,grants) }.forEach { store.releaseClassificationSnapshot(it.operationKey) }
+        } }
     }
     fun delete(id:Long) = synchronized(classificationStore ?: this) {
         val key=operationKey(id)
@@ -420,15 +503,13 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
         writableDatabase.delete("tasks","record_id=?",arrayOf(id.toString()))
         keys.forEach { classificationStore?.releaseClassificationSnapshot(it) };ids.forEach { screenshots.release(imageOwner(it)) }
     }
-    fun recoverInterrupted(preserveCurrentSession:Boolean=false) = synchronized(classificationStore ?: this) {
-        reconcileClassificationSnapshots(writableDatabase)
-        // Old queue entries never had app-specific consent. Reject them even while
-        // accessibility is disconnected, before resume's permission gate can return.
-        (pendingShake()+pendingShortcut()).forEach { id ->
-            val authorization=shakeAuthorization(id)
-            if(authorization==null || app?.channels?.shakeAuthorized(authorization)==false)
-                update(id,"CANCELLED","请重新选择应用后摇一摇，未新增账单")
-        }
+    fun recoverInterrupted(preserveCurrentSession:Boolean=false,capturePausedForRestore:Boolean=false) = synchronized(classificationStore ?: this) {
+        reconcileAtStartup()
+        // Use persisted grants before the queue's live permission gate and without acquiring channels under the store.
+        val captures=taskStates(readableDatabase,"tasks","status IN ('CAPTURING','QUEUED','RECOGNIZING') AND (origin LIKE 'shake:%' OR origin LIKE 'shortcut:%' OR origin LIKE 'payment_auto:%')")
+        val grants=authorizationSettings.captureGrants()
+        captures.filter { task -> capturePausedForRestore || if(task.manualCapture) !task.hasOriginalGrant(grants) else !automaticQueueGrantValid(task.id) }
+            .forEach { update(it.id,"CANCELLED","识别授权已关闭，未新增账单") }
         // Startup recovery may run after the first new screenshot request. Never
         // classify work created by this helper instance as a previous-process failure.
         val boundary=firstSessionTaskId.takeIf { preserveCurrentSession }
@@ -447,10 +528,7 @@ class RecognitionTasks(context:Context,private val name:String="recognition.db",
     init { classificationStore?.bindBackupTasks(this) }
     companion object {
         val STATUSES=setOf("CAPTURING","QUEUED","RECOGNIZING","SUCCEEDED","REVIEW","FAILED","NO_BILL","DUPLICATE","CANCELLED","SKIPPED")
-        internal fun retainsClassificationSnapshot(status:String,resumableBatch:Boolean)=
-            status in setOf("CAPTURING","QUEUED","RECOGNIZING","FAILED") || status=="CANCELLED" && resumableBatch
-        internal fun retryableBatchSource(source:Source,origin:String,hasShakeAuthorization:Boolean)=
-            source==Source.IMAGE && origin=="image" || source==Source.OCR && (origin.startsWith("payment_auto:") ||
-                (origin.startsWith("shake:") || origin.startsWith("shortcut:")) && hasShakeAuthorization)
+        private val ACTIVE_STATUSES=setOf("CAPTURING","QUEUED","RECOGNIZING")
+        private val BATCH_RETRY_STATUSES=setOf("FAILED","CANCELLED")
     }
 }

@@ -37,9 +37,11 @@ internal object BackupRestore {
                 val local=localAccounts[uid];val incoming=importedAccounts[uid]
                 if(local!=null && incoming!=null && local.type!=incoming.type)throw WalletException("RESTORE_ACCOUNT_CONFLICT","已有同标识账户类型冲突，请先处理钱包")
             }
-            val imported=store.merge(accepted,backup.accounts,backup.categories,backup.categoryDirectory,backup.recordCategoryIds);var excluded=0
+            val categoryMapping = CategoryDirectory.merge(db, backup.categoryDirectory)
+            val imported = store.mergeHistory(db, accepted, backup.accounts, backup.categories, backup.categoryDirectory, backup.recordCategoryIds, categoryMapping)
+            var excluded=0
             AtomicBackupTransaction.checkpoint("ledger")
-            backup.classification?.let { ClassificationStorage.restore(db,it,CategoryDirectory.merge(db,backup.categoryDirectory)) }
+            backup.classification?.let { ClassificationStorage.restore(db, it, categoryMapping) }
             accepted.forEach { record->
                 val original=links[record.uid]
                 if(original==null) {

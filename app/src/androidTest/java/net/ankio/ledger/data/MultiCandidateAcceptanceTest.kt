@@ -261,7 +261,7 @@ class MultiCandidateAcceptanceTest {
             override suspend fun recognize(image:ByteArray,onPrepared:(ByteArray)->Unit,stillAllowed:()->Boolean,
                 livePaymentAt:Long?,policy:RecognitionPolicy,origin:String,recognitionTime:()->RecognitionTimeContext):RecognitionResult {
                 onPrepared(image);return RecognitionResult(lines.joinToString("\n") { it.text },
-                    TransactionPageParser.parse(lines,1080,1600,recognitionTime(),livePaymentAt,policy,origin))
+                    TransactionPageParser.parsePage(lines,1080,1600,recognitionTime(),livePaymentAt,policy,origin))
             }
         }
         var ids=listOf<Long>()
@@ -277,6 +277,17 @@ class MultiCandidateAcceptanceTest {
             assertTrue(records.values.all { it.bill.merchant.isEmpty() && it.bill.receipt!!.time!!.recognitionAt==app.tasks.recognitionTime(task)!!.recognitionAt })
             val row=app.tasks.snapshot().let { rows -> (0 until rows.length()).map { rows.getJSONObject(it) }.single { it.getLong("id")==task } }
             assertFalse(row.getJSONObject("batch").getBoolean("canRetry"))
+
+            val review=records.getValue(5678L)
+            val token=UUID.randomUUID().toString()
+            val confirmed=app.store.saveEdited(review,a.uid,true,submissionToken=token)
+            assertEquals(RecordState.POSTED,confirmed.state)
+            assertEquals(confirmed,app.store.saveEdited(review,a.uid,true,submissionToken=token))
+            assertEquals(93088L,app.store.getAccount(a.id)!!.amountCents)
+            assertEquals(BatchCounts(3,0,0,0),app.store.recognitionBatch(operation)!!.counts)
+            val updated=app.tasks.snapshot().let { rows -> (0 until rows.length()).map { rows.getJSONObject(it) }.single { it.getLong("id")==task } }
+            assertEquals("SUCCEEDED",updated.getString("status"))
+            assertEquals(0,updated.getJSONObject("batch").getJSONObject("counts").getInt("review"))
         } finally {
             ids.forEach { app.store.delete(it) };app.store.writableDatabase.delete("recognition_batches","operation_key=?",arrayOf(operation))
             app.tasks.delete(task);app.store.setDefaultWallet(old)
@@ -362,7 +373,7 @@ class MultiCandidateAcceptanceTest {
                 store.writableDatabase.execSQL("DROP TABLE recognition_batches");store.writableDatabase.version=14
             }
             LedgerStore(app,name).use { store ->
-                assertEquals(16,store.readableDatabase.version);assertEquals(before,store.get(before.id))
+                assertEquals(17,store.readableDatabase.version);assertEquals(before,store.get(before.id))
                 assertEquals(snapshot,store.walletSnapshot());assertEquals(0,store.recognitionBatchBackup().length())
             }
         } finally { app.deleteDatabase(name) }

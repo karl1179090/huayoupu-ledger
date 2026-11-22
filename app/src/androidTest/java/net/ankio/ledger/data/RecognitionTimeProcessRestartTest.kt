@@ -38,11 +38,13 @@ class RecognitionTimeProcessRestartTest {
     @Test fun bResumeAfterProcessDeathWithoutMovingDateOrChargingTwice()=runBlocking {
         app.taskRecovery.await()
         val task=state.getLong("task",0);assertTrue("Run phase a first",task>0)
-        if(InstrumentationRegistry.getArguments().getString("expectProcessRestart")=="true")assertNotEquals(state.getInt("pid",0),Process.myPid())
+        val sameProcess = state.getInt("pid", 0) == Process.myPid()
         val wallet=app.store.getAccountByUid(state.getString("wallet",null)!!)!!
         val operation=app.tasks.operationKey(task)!!
         val id="SYNTHETIC-TIME-RESTART-$task"
         try {
+            if (InstrumentationRegistry.getArguments().getString("expectProcessRestart") == "true") assertFalse(sameProcess)
+            if (sameProcess) app.tasks.recoverInterrupted()
             assertEquals("QUEUED",app.tasks.status(task))
             assertEquals(frozen,app.tasks.recognitionTime(task))
             val raw="支付成功\n付款金额：7.00元\n交易单号：$id"

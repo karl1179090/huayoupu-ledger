@@ -92,8 +92,7 @@ class MixedReceiptProcessRestartTest {
             val json=LedgerBackup.encode(app.store,ChannelSettings(app)).toByteArray()
             val zip=java.io.ByteArrayOutputStream().use { LedgerArchive.write(app.store,ChannelSettings(app),it);it.toByteArray() }
             for(bytes in listOf(json,zip)) {
-                val name="synthetic-mixed-posted-${UUID.randomUUID()}.db"
-                try { LedgerStore(app,name).use { target -> LedgerArchive.read(bytes.inputStream(),app.cacheDir).use { prepared ->
+                withCompleteRestoreTarget(app, "synthetic-mixed-posted") { target -> LedgerArchive.read(bytes.inputStream(),app.cacheDir).use { prepared ->
                     LedgerArchive.restore(target,prepared)
                     val restored=target.all().single { it.uid==saved.uid }
                     assertEquals(receipt,restored.bill.receipt);assertEquals(saved.walletEffects,restored.walletEffects)
@@ -102,7 +101,7 @@ class MixedReceiptProcessRestartTest {
                     val movements=target.walletSnapshot().movements
                     assertEquals(0,LedgerArchive.restore(target,prepared));assertEquals(movements,target.walletSnapshot().movements)
                     assertEquals(balances,target.accounts().associate { it.uid to it.amountCents })
-                } } } finally { app.deleteDatabase(name) }
+                } }
             }
             val directory=java.io.File(app.cacheDir,"synthetic-t11-evidence").apply { mkdirs() }
             java.io.File(directory,"process.json").writeText(JSONObject().put("firstPid",firstPid).put("secondPid",Process.myPid())

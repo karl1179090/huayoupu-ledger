@@ -72,39 +72,44 @@ class ExpenseWidgetLauncherTest {
         val before=ExpenseWidgetProvider.ids(app).toSet()
         assertTrue("Use a clean isolated launcher (no pre-existing expense widgets)",before.isEmpty())
         val visibleImportUid=java.util.UUID.randomUUID().toString()
-        val prefix="SYNTHETIC-LAUNCHER-${java.util.UUID.randomUUID()}-"
+        val fixtureOrigin = "synthetic:widget-launcher:${java.util.UUID.randomUUID()}"
+        fun fixtureUid(label: String) = java.util.UUID.nameUUIDFromBytes("$fixtureOrigin:$label".toByteArray(Charsets.UTF_8)).toString()
+        val lateFile = java.io.File(app.cacheDir, "synthetic-widget-visible-$visibleImportUid.csv")
         val baseline=net.ankio.ledger.data.LedgerStatistics(app.store).query(net.ankio.ledger.core.ExpensePeriod.YEAR).totals.expense
         val weekBaseline=net.ankio.ledger.data.LedgerStatistics(app.store).query(net.ankio.ledger.core.ExpensePeriod.WEEK).totals.expense
         val monday=java.time.LocalDate.now().with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY))
-        fun fixture(uid:String,cents:Long,direction:net.ankio.ledger.core.Direction,day:Int):net.ankio.ledger.data.LedgerRecord {
+        fun fixture(label:String,cents:Long,direction:net.ankio.ledger.core.Direction,day:Int):net.ankio.ledger.data.LedgerRecord {
+            val uid = fixtureUid(label)
             val at=monday.plusDays(day.toLong()).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
-            return net.ankio.ledger.data.LedgerRecord(uid=prefix+uid,capture=net.ankio.ledger.core.Capture(net.ankio.ledger.core.Source.MANUAL,"csv","合成组件W05",at),
+            return net.ankio.ledger.data.LedgerRecord(uid=uid,capture=net.ankio.ledger.core.Capture(net.ankio.ledger.core.Source.MANUAL,"csv","合成组件W05",at),
                 bill=net.ankio.ledger.core.ParsedBill(cents,direction,"合成组件W05",if(direction==net.ankio.ledger.core.Direction.TRANSFER)"转账" else "餐饮",at,null,true,"",true,
-                    refund=if(uid=="w05-refund")net.ankio.ledger.core.RefundInfo("wechat",10000,3000) else null),state=net.ankio.ledger.core.RecordState.POSTED,
-                transfer=if(direction==net.ankio.ledger.core.Direction.TRANSFER)net.ankio.ledger.data.RecordTransferDetails(prefix+uid,feeCents=100,feeMode=net.ankio.ledger.core.FeeMode.EXTRA,fromReference="{\"version\":1,\"name\":\"合成转出\"}",toReference="{\"version\":1,\"name\":\"合成转入\"}") else null)
+                    refund=if(label=="w05-refund")net.ankio.ledger.core.RefundInfo("wechat",10000,3000) else null),state=net.ankio.ledger.core.RecordState.POSTED,
+                transfer=if(direction==net.ankio.ledger.core.Direction.TRANSFER)net.ankio.ledger.data.RecordTransferDetails(uid,feeCents=100,feeMode=net.ankio.ledger.core.FeeMode.EXTRA,fromReference="{\"version\":1,\"name\":\"合成转出\"}",toReference="{\"version\":1,\"name\":\"合成转入\"}") else null)
         }
-        app.store.importTransactions(listOf(fixture("w05-refund",7000,net.ankio.ledger.core.Direction.EXPENSE,0),fixture("w05-transfer",10000,net.ankio.ledger.core.Direction.TRANSFER,2),fixture("w05-history",2000,net.ankio.ledger.core.Direction.EXPENSE,4)))
+        val importFixtures = listOf(fixture("w05-refund",7000,net.ankio.ledger.core.Direction.EXPENSE,0),
+            fixture("w05-transfer",10000,net.ankio.ledger.core.Direction.TRANSFER,2),fixture("w05-history",2000,net.ankio.ledger.core.Direction.EXPENSE,4))
         val db=app.store.writableDatabase
         fun addPrecisionRows() {
         synchronized(app.store) {db.beginTransaction();try {
-            db.compileStatement("INSERT INTO records(uid,source,origin,raw_text,received_at,amount,direction,merchant,category,occurred_at,reliable,time_explicit,state,reason,note) VALUES(?,'MANUAL','synthetic','',?,?,'EXPENSE','合成组件精度','合成组件精度',?,1,1,'POSTED','','')").use {statement->
-                statement.bindLong(2,System.currentTimeMillis());statement.bindLong(3,net.ankio.ledger.core.Money.MAX_CENTS)
-                repeat(100_000) {index->statement.bindString(1,prefix+index);statement.bindLong(4,java.time.LocalDate.now().withDayOfYear(15).plusMonths((index%12).toLong()).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());statement.executeInsert()}
+            db.compileStatement("INSERT INTO records(uid,source,origin,raw_text,received_at,amount,direction,merchant,category,occurred_at,reliable,time_explicit,state,reason,note) VALUES(?,'MANUAL',?,'',?,?,'EXPENSE','合成组件精度','合成组件精度',?,1,1,'POSTED','','')").use {statement->
+                statement.bindString(2,fixtureOrigin);statement.bindLong(3,System.currentTimeMillis());statement.bindLong(4,net.ankio.ledger.core.Money.MAX_CENTS)
+                repeat(100_000) {index->statement.bindString(1,fixtureUid("precision-$index"));statement.bindLong(5,java.time.LocalDate.now().withDayOfYear(15).plusMonths((index%12).toLong()).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());statement.executeInsert()}
             };db.setTransactionSuccessful()
         } finally {db.endTransaction()}}
         }
         val ordinaryExtra=83_750L
-        synchronized(app.store) {db.beginTransaction();try {
-            db.compileStatement("INSERT INTO records(uid,source,origin,raw_text,received_at,amount,direction,merchant,category,occurred_at,reliable,time_explicit,state,reason,note) VALUES(?,'MANUAL','synthetic','',?,?,'EXPENSE','合成普通年','合成普通年',?,1,1,'POSTED','','')").use {statement->
-                statement.bindLong(2,System.currentTimeMillis())
-                repeat(12) {index->if(index!=10) {statement.bindString(1,prefix+"ordinary-$index");statement.bindLong(3,(index+1)*1250L);statement.bindLong(4,java.time.LocalDate.now().withDayOfYear(15).plusMonths(index.toLong()).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());statement.executeInsert()}}
-            };db.setTransactionSuccessful()
-        } finally {db.endTransaction()}}
-        app.changed(true)
         val expected=net.ankio.ledger.core.Money.format(Math.addExact(Math.addExact(Math.addExact(baseline,ordinaryExtra),9100),100_000*net.ankio.ledger.core.Money.MAX_CENTS))
         val instrumentation=InstrumentationRegistry.getInstrumentation()
-        instrumentation.startActivitySync(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         try {
+            app.store.importTransactions(importFixtures)
+            synchronized(app.store) {db.beginTransaction();try {
+                db.compileStatement("INSERT INTO records(uid,source,origin,raw_text,received_at,amount,direction,merchant,category,occurred_at,reliable,time_explicit,state,reason,note) VALUES(?,'MANUAL',?,'',?,?,'EXPENSE','合成普通年','合成普通年',?,1,1,'POSTED','','')").use {statement->
+                    statement.bindString(2,fixtureOrigin);statement.bindLong(3,System.currentTimeMillis())
+                    repeat(12) {index->if(index!=10) {statement.bindString(1,fixtureUid("ordinary-$index"));statement.bindLong(4,(index+1)*1250L);statement.bindLong(5,java.time.LocalDate.now().withDayOfYear(15).plusMonths(index.toLong()).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());statement.executeInsert()}}
+                };db.setTransactionSuccessful()
+            } finally {db.endTransaction()}}
+            app.changed(true)
+            instrumentation.startActivitySync(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             SystemClock.sleep(600)
             instrumentation.runOnMainSync {assertTrue(manager.requestPinAppWidget(ComponentName(app,ExpenseWidgetProvider::class.java),null,null))}
             waitFor {
@@ -141,7 +146,7 @@ class ExpenseWidgetLauncherTest {
             // Observe actual launcher text after a real native CSV confirmation, in addition to publish metrics.
             val lateAt=System.currentTimeMillis()
             val late=net.ankio.ledger.data.LedgerRecord(uid=visibleImportUid,capture=net.ankio.ledger.core.Capture(net.ankio.ledger.core.Source.MANUAL,"csv","合成桌面可见刷新",lateAt),bill=net.ankio.ledger.core.ParsedBill(1,net.ankio.ledger.core.Direction.EXPENSE,"合成桌面可见刷新","购物",lateAt,null,true,"",true),state=net.ankio.ledger.core.RecordState.POSTED)
-            val lateFile=java.io.File(app.cacheDir,"synthetic-widget-visible.csv").apply {outputStream().use {net.ankio.ledger.data.LedgerCsvExport.write(listOf(late),net.ankio.ledger.data.LedgerCsvExport.Format.GENERAL,it)}}
+            lateFile.outputStream().use { net.ankio.ledger.data.LedgerCsvExport.write(listOf(late), net.ankio.ledger.data.LedgerCsvExport.Format.GENERAL, it) }
             app.startActivity(Intent(app,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
             waitFor {windowRoot?.packageName==app.packageName}
             // Configuration changes may replace the activity while the launcher is foreground.
@@ -168,7 +173,6 @@ class ExpenseWidgetLauncherTest {
             println("S7_VISIBLE nativeImportConfirmToLauncherTextMs=$visibleMs nativePublishMs=$publishMs")
             // Evidence collection includes sleeps, screenshots and tree export; exclude it from refresh latency.
             capture("launcher-import-visible")
-            lateFile.delete()
             shell("settings put system font_scale 1.5");shell("cmd uimode night yes")
             waitFor {app.resources.configuration.fontScale==1.5f && app.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK==android.content.res.Configuration.UI_MODE_NIGHT_YES}
             val themeAt=SystemClock.elapsedRealtime()
@@ -202,8 +206,36 @@ class ExpenseWidgetLauncherTest {
             capture("statistics-route")
             shell("input keyevent KEYCODE_HOME")
         } finally {
-            shell("settings delete system font_scale");shell("cmd uimode night no")
-            synchronized(app.store){app.store.readableDatabase.rawQuery("SELECT id FROM records WHERE uid=?",arrayOf(visibleImportUid)).use {if(it.moveToFirst())app.store.delete(it.getLong(0))};app.store.readableDatabase.rawQuery("SELECT id FROM records WHERE uid LIKE ?",arrayOf(prefix+"w05-%")).use {cursor->val ids=mutableListOf<Long>();while(cursor.moveToNext())ids.add(cursor.getLong(0));ids.forEach(app.store::delete)};app.store.writableDatabase.delete("records","uid LIKE ?",arrayOf(prefix+"%"))};app.changed(true)
+            try {
+                shell("settings delete system font_scale");shell("cmd uimode night no")
+            } finally {
+                lateFile.delete()
+                synchronized(app.store) {
+                    db.beginTransaction()
+                    try {
+                        val uids = (importFixtures.map { it.uid } + visibleImportUid).toTypedArray()
+                        val matches = "IN (${uids.joinToString(",") { "?" }})"
+                        val batches = db.rawQuery("SELECT DISTINCT batch_uid FROM import_batch_records WHERE record_uid $matches", uids).use { cursor ->
+                            buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+                        }
+                        val ids = db.rawQuery("SELECT id FROM records WHERE uid $matches", uids).use { cursor ->
+                            buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) }
+                        }
+                        ids.forEach { app.store.delete(it) }
+                        db.delete("record_deletions", "record_id IN (SELECT id FROM records WHERE origin=?)", arrayOf(fixtureOrigin))
+                        db.delete("records", "origin=?", arrayOf(fixtureOrigin))
+                        db.delete("wallet_movements", "record_uid $matches", uids)
+                        db.delete("wallet_submissions", "result_uid $matches", uids)
+                        db.delete("import_batch_records", "record_uid $matches", uids)
+                        batches.forEach { batch ->
+                            db.delete("import_batches", "batch_uid=?", arrayOf(batch))
+                            db.delete("import_audit_history", "batch_uid=?", arrayOf(batch))
+                        }
+                        db.setTransactionSuccessful()
+                    } finally { db.endTransaction() }
+                }
+                app.changed(true)
+            }
         }
     }
 }

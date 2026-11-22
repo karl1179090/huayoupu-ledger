@@ -24,6 +24,7 @@ open class ScreenCaptureService:AccessibilityService() {
     private var shortcutCapture:Job?=null
     @Volatile private var requestId=0L
     private val banner by lazy { RecognitionBanner(this) }
+    private val billEditor by lazy { RecognitionBillEditor(this) }
     private val knownWindows=java.util.concurrent.ConcurrentHashMap<Int,String>()
     private val knownWindowTypes=java.util.concurrent.ConcurrentHashMap<Int,Int>()
     private data class ForegroundMetadata(val windowId:Int?,val generation:Long)
@@ -256,6 +257,7 @@ open class ScreenCaptureService:AccessibilityService() {
         }
     }
     fun checkPaymentPages() { refreshScope();paymentMonitor.schedule() }
+    internal fun pausePaymentChecks() { paymentMonitor.stop() }
     internal fun automaticCaptureAvailable()=!busy.get() && ledger.captureQueue.hasCapacity()
     fun paymentDiagnostics()=paymentMonitor.diagnostics()
         .put("feedback",banner.diagnostics())
@@ -279,6 +281,14 @@ open class ScreenCaptureService:AccessibilityService() {
     internal fun captureOnShake(trigger:ShakeTrigger)=capture(trigger)
     /** Allow only the shortcut/gesture window to disappear; never renew a stale trigger. */
     internal fun captureFromShortcut() {
+        if (billEditor.showing) {
+            feedback("请先关闭账单编辑小窗")
+            return
+        }
+        if (!ledger.recognitionWork.accepting) {
+            feedback("识别暂不可用，请稍后重试")
+            return
+        }
         shortcutCapture?.cancel()
         val trigger=ShakeTrigger.now()
         val consent=synchronized(ledger.channels) {
@@ -288,9 +298,11 @@ open class ScreenCaptureService:AccessibilityService() {
         shortcutCapture=ledger.recognitionWork.launch(Dispatchers.Main) {
             delay(180)
             while(trigger.freshAt(SystemClock.elapsedRealtime())) {
-                if(current!==this@ScreenCaptureService || !screenUnlocked() ||
-                    !ledger.channels.permitted(ChannelSettings.Channel.OCR) ||
-                    ledger.channels.shortcutGeneration()!=consent.first)return@launch
+                if(current!==this@ScreenCaptureService || !screenUnlocked())return@launch
+                if(!ledger.channels.permitted(ChannelSettings.Channel.OCR) || ledger.channels.shortcutGeneration()!=consent.first) {
+                    feedback("快捷方式识别授权已关闭")
+                    return@launch
+                }
                 val observed=observeShakeWindow()
                 if(!trigger.freshAt(SystemClock.elapsedRealtime()))break
                 val pkg=observed.packageName
@@ -309,7 +321,13 @@ open class ScreenCaptureService:AccessibilityService() {
     }
     internal fun captureAutomatic(page:PaymentMatch)=capture(ShakeTrigger.now(),page)
     private fun capture(trigger:ShakeTrigger,page:PaymentMatch?=null,expectedWindow:ShakeWindowObservation?=null,shortcut:Boolean=false) {
-        if(!ledger.recognitionWork.accepting)return
+        fun shortcutFailure(message:String) { if(shortcut && current===this && screenUnlocked())feedback(message) }
+        if(!ledger.recognitionWork.accepting || billEditor.showing) {
+            shortcutFailure(if(billEditor.showing)"请先关闭账单编辑小窗" else "识别暂不可用，请稍后重试")
+            return
+        }
+        val windowChanged = "账单页面已切换，请重试"
+        val authorizationChanged = "快捷方式识别授权已关闭"
         // Diagnostic application acquires only explicit comparison pairs, never financial tasks.
         if(net.ankio.ledger.BuildConfig.NODE_DIAGNOSTIC)return
         val automatic=page!=null
@@ -322,9 +340,15 @@ open class ScreenCaptureService:AccessibilityService() {
                 .put("detail",detail.take(200)).toString()
         }
         note("received")
-        if(!trigger.freshAt(SystemClock.elapsedRealtime()))return
+        if(!trigger.freshAt(SystemClock.elapsedRealtime())) {
+            shortcutFailure("等待账单页面超时，请重试")
+            return
+        }
         val enabled=if(automatic)ledger.channels.autoAllowed(page!!.packageName) else shortcut || ledger.channels.enabled(channel)
-        if((!shortcut && !CaptureRuntime.running) || !enabled || shortcut && (current!==this || !ledger.channels.permitted(channel)))return
+        if((!shortcut && !CaptureRuntime.running) || !enabled || shortcut && (current!==this || !ledger.channels.permitted(channel))) {
+            shortcutFailure(authorizationChanged)
+            return
+        }
         if(!automatic && (ledger.channels.selectedShakePackages().isEmpty() || !screenUnlocked()))return
         val consent=if(automatic)null else synchronized(ledger.channels) {
             (if(shortcut)ledger.channels.shortcutGeneration() else ledger.channels.shakeMasterGeneration()) to ledger.channels.selectedShakePackages().associateWith(ledger.channels::shakeApplicationGeneration)
@@ -337,16 +361,24 @@ open class ScreenCaptureService:AccessibilityService() {
         // scope. The bounded Binder worker keeps an unavailable window from blocking sensors.
         val initialObservation=if(automatic)null else {
             val result=runBlocking { windowSnapshot(120) }
-            val metadata=result.value?:run { note("initial_metadata_unavailable",detail=result.outcome);return }
-            val selected=selectCaptureWindow(metadata)?:run { note("initial_window_unavailable");return }
+            val metadata=result.value?:run {
+                note("initial_metadata_unavailable",detail=result.outcome)
+                shortcutFailure(if(result.outcome=="query_timeout")"读取账单页面超时，请重试" else "暂时无法读取账单页面，请重试")
+                return
+            }
+            val selected=selectCaptureWindow(metadata)?:run {
+                note("initial_window_unavailable")
+                shortcutFailure("未找到可识别的账单页面")
+                return
+            }
             if(expectedWindow!=null && (selected.id!=expectedWindow.windowId || initialSwitch!=expectedWindow.switchGeneration)) {
-                note("shortcut_window_changed",selected.id);return
+                note("shortcut_window_changed",selected.id);shortcutFailure(windowChanged);return
             }
             if(selected.type!=AccessibilityWindowInfo.TYPE_APPLICATION || foregroundSwitch.get()!=initialSwitch || !trigger.freshAt(SystemClock.elapsedRealtime())) {
-                note("initial_window_changed",selected.id,"type=${selected.type}; expectedSwitch=$initialSwitch");return
+                note("initial_window_changed",selected.id,"type=${selected.type}; expectedSwitch=$initialSwitch");shortcutFailure(windowChanged);return
             }
             val owner=captureForegroundPackage(metadata,null,knownWindows.toMap())
-            if(owner!=null && (owner !in consent!!.second || !(if(shortcut)ledger.channels.shortcutAllowed(owner) else ledger.channels.shakeAllowed(owner)))) { note("application_not_selected",selected.id);return }
+            if(owner!=null && (owner !in consent!!.second || !(if(shortcut)ledger.channels.shortcutAllowed(owner) else ledger.channels.shakeAllowed(owner)))) { note("application_not_selected",selected.id);shortcutFailure("请在已选应用的账单详情页重试");return }
             note("initial_window_bound",selected.id)
             ShakeWindowObservation(selected.id,initialSwitch,owner)
         }
@@ -364,14 +396,23 @@ open class ScreenCaptureService:AccessibilityService() {
                 else if(firstObservation) { firstObservation=false;initialObservation!! }
                 else foregroundObservation { windowDetails.add(it) }.also { observations.add(it.packageName?:"unavailable") }
             }) { pkg -> pkg in consent!!.second && (if(shortcut)ledger.channels.shortcutAllowed(pkg) else ledger.channels.shakeAllowed(pkg)) }?:if(!automatic) {
-                note("owner_rejected",initialObservation?.windowId);return@launch
+                note("owner_rejected",initialObservation?.windowId);shortcutFailure(windowChanged);return@launch
             } else null
             val pkg=page?.packageName?:observed?.packageName?:return@launch
-            val authorization=if(automatic)null else (if(shortcut)ledger.channels.shortcutAuthorization(pkg) else ledger.channels.shakeAuthorization(pkg))?:return@launch
+            val authorization=if(automatic)null else (if(shortcut)ledger.channels.shortcutAuthorization(pkg) else ledger.channels.shakeAuthorization(pkg))?:run {
+                shortcutFailure(authorizationChanged)
+                return@launch
+            }
             if(!automatic && (authorization!!.masterGeneration!=generation || authorization.applicationGeneration!=consent!!.second[pkg] ||
-                    observed!!.switchGeneration!=initialSwitch || !screenUnlocked()))return@launch
-            if(!trigger.freshAt(SystemClock.elapsedRealtime()) || requestId!=initialRequest || ledger.recognitionSession.generation!=recognitionGeneration)return@launch
-            if(!ledger.captureQueue.hasCapacity()) { if(!automatic)feedback("待识别账单较多，请稍候再摇一摇");return@launch }
+                    observed!!.switchGeneration!=initialSwitch || !screenUnlocked())) {
+                shortcutFailure(if(observed?.switchGeneration!=initialSwitch)windowChanged else authorizationChanged)
+                return@launch
+            }
+            if(!trigger.freshAt(SystemClock.elapsedRealtime()) || requestId!=initialRequest || ledger.recognitionSession.generation!=recognitionGeneration) {
+                shortcutFailure("识别请求已失效，请重试")
+                return@launch
+            }
+            if(!ledger.captureQueue.hasCapacity()) { if(!automatic)feedback("待识别账单较多，请稍后重试");return@launch }
             if(!busy.compareAndSet(false,true)) { if(!automatic)feedback("正在获取上一张账单，请稍候");return@launch }
             activeAutomatic=automatic;activeShortcut=shortcut;activePackage=pkg
             val id=++requestId
@@ -391,7 +432,7 @@ open class ScreenCaptureService:AccessibilityService() {
                 while(true) {
                     val now=SystemClock.elapsedRealtime()
                     val remaining=screenshotCooldownRemaining(Build.VERSION.SDK_INT,lastScreenshotAt,now)
-                    if(!allowed() || !trigger.freshAt(now) || !trigger.freshAt(now+remaining))throw CancellationException("本次摇动已失效")
+                    if(!allowed() || !trigger.freshAt(now) || !trigger.freshAt(now+remaining))throw CancellationException("等待截图超时，请重试")
                     if(remaining==0L)break
                     note("waiting_for_screenshot_interval",observed?.windowId)
                     delay(remaining)
@@ -415,7 +456,8 @@ open class ScreenCaptureService:AccessibilityService() {
                 if(revalidated?.snapshot?.sameTransaction(snapshot)!=true)throw ScreenshotAcquisitionException(ScreenshotFailureReason.WINDOW_CHANGED,"页面内容已变化，未获取本次截图")
                 if(!allowed() || currentTarget(pkg,target.id,observed?.switchGeneration)==null)throw CancellationException("采集窗口已经改变")
                 note("screenshot_authorized",target.id)
-                task=ledger.tasks.create(Source.OCR,if(automatic)"payment_auto:$pkg" else authorization!!.origin,authorization)
+                task=ledger.tasks.create(Source.OCR,if(automatic)"payment_auto:$pkg" else authorization!!.origin,authorization,
+                    automaticGeneration=generation.takeIf { automatic })
                 if(automatic)ledger.tasks.diagnose(task,"payment_identity","payment_page:$paymentBoot:${page!!.eventIdentity}")
                 ledger.tasks.diagnose(task,"trigger",(if(automatic)"payment_auto; " else "")+trigger.details(startAtMs))
                 ledger.changed()
@@ -461,11 +503,9 @@ open class ScreenCaptureService:AccessibilityService() {
                     else ledger.tasks.queuedWithoutScreenshot(task,snapshot,requireNotNull(fallback),requireNotNull(missingReason))
                 if(!queued)throw CancellationException("识别记录已删除")
                 ledger.tasks.diagnose(task,"window_details",windowDetails.toList().takeLast(2).joinToString(" | "))
-                val feedbackTask=task
-                enqueued=ledger.captureQueue.enqueue(task,pkg,automatic,{processor}) { message,loading ->
-                    feedback(message,loading,if(!loading && (message.startsWith("已记账") || message=="退款已更新"))ledger.tasks.recordId(feedbackTask) else null)
-                }
-                if(!enqueued)throw RecognitionException("识别任务较多，请稍后重新摇一摇补录")
+                if(shortcut)feedback("正在识别…",loading=true)
+                enqueued=ledger.captureQueue.enqueue(task,pkg,automatic,{processor})
+                if(!enqueued)throw RecognitionException("识别任务较多，请稍后重试")
                 note("queued",target.id)
                 ledger.changed()
             } catch(blocked:PrivacyBlocked) {
@@ -480,6 +520,8 @@ open class ScreenCaptureService:AccessibilityService() {
                 note("cancelled",observed?.windowId)
                 if(page!=null && !enqueued)paymentMonitor.rejectFrame(page)
                 if(!enqueued)task?.let { ledger.tasks.update(it,"CANCELLED","识别已停止，未新增账单");ledger.changed() }
+                if(!enqueued && requestId==id)shortcutFailure(
+                    if(allowed()) cancelled.message ?: "识别请求已失效，请重试" else authorizationChanged)
             } catch(error:Exception) {
                 note("failed",observed?.windowId,(error as? RecognitionException)?.userMessage?:error.javaClass.simpleName)
                 if(page!=null && !enqueued)paymentMonitor.rejectFrame(page)
@@ -490,7 +532,7 @@ open class ScreenCaptureService:AccessibilityService() {
                     ledger.tasks.diagnose(it,"window_details",windowDetails.toList().takeLast(2).joinToString(" | "))
                     ledger.tasks.update(it,"FAILED",message);ledger.changed()
                 }
-                if(allowed())feedback(message)
+                if(allowed())feedback(message) else if(requestId==id)shortcutFailure(authorizationChanged)
             } finally {
                 bitmap?.recycle()
                 if(requestId==id) { busy.set(false);activeAutomatic=null;activeShortcut=false;activePackage=null;job=null;paymentMonitor.schedule() }
@@ -593,9 +635,25 @@ open class ScreenCaptureService:AccessibilityService() {
     }
     internal fun showReadinessFeedback(message:String) { if(current===this)banner.show(message) }
     /** Also used by disk-backed jobs resumed without a new foreground capture callback. */
-    internal fun showQueuedFeedback(message:String,loading:Boolean,recordId:Long?)=feedback(message,loading,recordId)
-    override fun onInterrupt() { shortcutCapture?.cancel();shortcutCapture=null;cancelAcquisition() }
+    internal fun showQueuedFeedback(message:String,loading:Boolean,recordId:Long?,editInPlace:Boolean=false) {
+        ledger.channels.status(message)
+        ledger.changed()
+        if (current !== this) return
+        val category = if (editInPlace && recordId != null) ledger.store.get(recordId)?.let { record ->
+            ledger.store.categoryFor(record)?.name ?: record.bill.category
+        } else null
+        banner.show(message, loading, recordId=recordId, category=category,
+            onEdit=if (category != null && recordId != null) ({
+                if (screenUnlocked() && current === this) {
+                    if (busy.get()) feedback("正在获取账单，请稍候")
+                    else billEditor.show(recordId)
+                }
+            }) else null)
+    }
+    internal fun dismissQueuedFeedback()=banner.close()
+    override fun onInterrupt() { billEditor.close();shortcutCapture?.cancel();shortcutCapture=null;cancelAcquisition() }
     private fun releaseConnection() {
+        billEditor.close()
         shortcutCapture?.cancel();shortcutCapture=null
         cancelAcquisition()
         connectionRestore?.cancel();connectionRestore=null

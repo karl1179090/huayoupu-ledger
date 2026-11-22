@@ -13,6 +13,7 @@ import net.ankio.ledger.data.*
 class LedgerApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        val capturePausePending=recoverPendingBackupCapturePause()
         net.ankio.ledger.capture.CaptureShortcuts.publish(this)
         getSystemService(android.app.NotificationManager::class.java).apply {
             // Remove the previous version's runtime/result channels during upgrade.
@@ -21,7 +22,8 @@ class LedgerApp : Application() {
         recognitionWork.launch {
             try {
                 RecognitionCommitRecovery.recoverAll(tasks,store)
-                tasks.recoverInterrupted(preserveCurrentSession=true)
+                tasks.recoverInterrupted(preserveCurrentSession=true,capturePausedForRestore=capturePausePending)
+                if(capturePausePending)clearBackupCapturePause()
                 taskRecovery.complete(Unit)
             } catch (error: Throwable) {
                 taskRecovery.completeExceptionally(error)
@@ -60,7 +62,7 @@ class LedgerApp : Application() {
             }
             store.discardRejectedDrafts().forEach { (id,message) -> tasks.skipRefundReceipt(id,message) }
             store.discardStandaloneRefundReceipts().forEach { tasks.skipRefundReceipt(it) }
-            store.reconcilePendingRefunds().forEach { (from,to) -> tasks.reassignRecord(from,to) }
+            store.reconcilePendingRefunds().forEach { (from,to) -> RecognitionCommitRecovery.reassignRefund(tasks,store,from,to) }
             store.reconcilePendingDuplicates().forEach { (from,to) ->
                 val cents=store.get(to)?.bill?.amountCents
                 tasks.reassignRecord(from,to,if(cents==null)"已记账" else "已记账 ¥${net.ankio.ledger.core.Money.format(cents)}")
@@ -76,6 +78,95 @@ class LedgerApp : Application() {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val recognitionWork=net.ankio.ledger.capture.RecognitionWork(scope)
     private val backupMutex=kotlinx.coroutines.sync.Mutex()
+    private val backupCaptureState get()=getSharedPreferences("backup_capture_state",MODE_PRIVATE)
+
+    internal suspend fun restoreCompleteBackup(prepare:()->LedgerArchive.PreparedBackup,onCommitted:(RestoreSummary)->Unit={}):RestoreSummary {
+        backupMutex.lock()
+        try {
+            val pending=recognitionWork.pauseAdmission()
+            var committed=false
+            try {
+                withContext(Dispatchers.Main) { net.ankio.ledger.capture.ScreenCaptureService.current?.pausePaymentChecks() }
+                taskRecovery.await()
+                return withContext(Dispatchers.IO) {
+                    AtomicBackupTransaction.checkpoint("opening")
+                    prepare().use { prepared ->
+                        LedgerArchive.checkClassificationMerge(store,prepared)
+                        AtomicBackupTransaction.checkpoint("classificationPreflight")
+                        pending.values.awaitAll()
+                        val queuedImages=try {
+                            tasks.writableDatabase;screenshots.writableDatabase
+                            tasks.pendingQueued().map { it.first }.filter(tasks::isImageImport)
+                        } catch(error:Exception) { throw RestorePreparationException(error) }
+
+                        // From here the committed ledger decides whether the persisted capture grants must be revoked.
+                        withContext(NonCancellable) {
+                            check(backupCaptureState.edit().putBoolean("check_commit",true).commit())
+                            val summary=try { LedgerArchive.restoreDetailed(store,prepared,pauseCaptureOnCommit=true) }
+                            catch(error:RestoreOutcomeUncertainException) {
+                                runCatching { pauseCaptureAfterBackup() }.onFailure(error::addSuppressed)
+                                throw error
+                            } catch(error:Exception) {
+                                if(runCatching { !AtomicBackupTransaction.capturePausePending(store) }.getOrDefault(false))clearBackupCaptureCheck()
+                                throw error
+                            }
+                            committed=true
+                            try { onCommitted(summary) } finally { pauseCaptureAfterBackup() }
+                            AtomicBackupTransaction.checkpoint("applicationCleanup")
+                            runCatching {
+                                RecognitionCommitRecovery.recoverAll(tasks,store)
+                                queuedImages.forEach { tasks.update(it,"CANCELLED","识别已停止，可以重新导入截图") }
+                                tasks.recoverInterrupted(capturePausedForRestore=true)
+                                clearBackupCapturePause()
+                            }.onFailure { android.util.Log.e("LedgerBackup","Restore committed; task feedback will recover at next startup",it) }
+                            summary
+                        }
+                    }
+                }
+            } catch(error:Exception) {
+                if(!committed && error !is ClassificationCapacityException && error !is RestoreOutcomeUncertainException && error !is CancellationException) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        runCatching { pauseCaptureAfterBackup(clearSelections=false,cancelQueued=true) }.onFailure(error::addSuppressed)
+                    }
+                }
+                throw error
+            } finally {
+                recognitionWork.reopen(requireDrained=false)
+                withContext(NonCancellable + Dispatchers.Main) {
+                    runCatching { net.ankio.ledger.capture.ScreenCaptureService.current?.checkPaymentPages();captureQueue.resume() }
+                        .onFailure { android.util.Log.e("LedgerBackup","Queue will resume at next startup",it) }
+                }
+            }
+        } finally { backupMutex.unlock() }
+    }
+
+    private suspend fun pauseCaptureAfterBackup(clearSelections:Boolean=true,cancelQueued:Boolean=false) {
+        channels.pauseForRestore(clearSelections)
+        recognitionSession.invalidate()
+        withContext(Dispatchers.Main) {
+            try {
+                if(cancelQueued) {
+                    val service=net.ankio.ledger.capture.ScreenCaptureService.current
+                    if(service==null)captureQueue.cancelAll() else service.cancelRecognition()
+                }
+            } finally { net.ankio.ledger.capture.CaptureRuntime.stopSafely() }
+        }
+    }
+    private fun recoverPendingBackupCapturePause():Boolean {
+        if(!backupCaptureState.getBoolean("check_commit",false))return false
+        val pending=runCatching { AtomicBackupTransaction.capturePausePending(store) }.getOrElse { true }
+        if(pending)channels.pauseForRestore() else clearBackupCaptureCheck()
+        return pending
+    }
+    private fun clearBackupCapturePause() {
+        AtomicBackupTransaction.clearCapturePause(store)
+        clearBackupCaptureCheck()
+    }
+    private fun clearBackupCaptureCheck() {
+        if(!backupCaptureState.edit().remove("check_commit").commit())
+            android.util.Log.e("LedgerBackup","Could not clear the pending capture pause check")
+    }
+
     suspend fun <T> restoreQuiescent(action:()->T):T {
         backupMutex.lock()
         try {

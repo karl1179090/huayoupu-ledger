@@ -89,7 +89,7 @@ internal class PaymentPageMonitor(private val service:ScreenCaptureService,priva
         schedule()
     }
     @Synchronized fun schedule() {
-        if(!ready())return
+        if(!service.ledger.recognitionWork.accepting || !ready())return
         checkRequests++;checks.trySend(Unit)
         if(check?.isActive==true)return
         // A new window can arrive during the final query of an earlier pass.

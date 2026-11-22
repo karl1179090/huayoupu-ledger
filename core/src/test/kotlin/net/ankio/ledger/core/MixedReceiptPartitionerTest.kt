@@ -29,6 +29,63 @@ class MixedReceiptPartitionerTest {
         assertFalse(candidate.rawText!!.contains("交易已关闭"))
     }
 
+    @Test fun separateFailedDebitAfterTheSuccessDoesNotVetoIt() {
+        val page = lines("服务开通通知") + lines("付款成功", "付款方式：招商银行储蓄卡(0012)", "交易金额：12.34元",
+            "商户名称：合成餐厅", "付款失败", "交易金额：99.00元", top = 200)
+        val parsed = TransactionPageParser.parsePage(page, 1080, 1800, time, origin = "image")
+        val candidate = parsed.candidates.single()
+        assertEquals(1234L, candidate.bill.amountCents)
+        assertEquals("0012", candidate.bill.paymentMethod!!.cardLast4)
+        assertFalse(candidate.rawText!!.contains("付款失败"))
+        assertEquals(TransactionReceiptResult.Rejected("付款未成功，不予记账"), parsed.receipts.last().result)
+    }
+
+    @Test fun failureWithoutItsOwnFieldsOrCardGapStillRejectsTheSameReceipt() {
+        val page = lines("服务开通通知") + lines("付款成功", "付款方式：招商银行储蓄卡(0012)", "交易金额：12.34元",
+            "商户名称：合成餐厅", "付款失败", top = 200)
+        val parsed = TransactionPageParser.parsePage(page, 1080, 1800, time, origin = "image")
+        assertTrue(parsed.candidates.isEmpty())
+        assertEquals("付款未成功，不予记账", parsed.skipReason)
+        assertTrue(parsed.receipts.single().rawText.contains("12.34"))
+    }
+
+    @Test fun mixedSideBySideCardsWithStaggeredHeadingsCannotPairAmountAndAccount() {
+        val service = lines("服务开通通知", top = 20)
+        val left = lines("付款成功", "交易金额：12.34元", top = 200).map { it.copy(left = 50, right = 460) }
+        val right = lines("付款成功", "付款方式：招商银行储蓄卡(0012)", top = 255).map { it.copy(left = 550, right = 960) }
+        for (page in listOf(service + left + right, service + left + right.take(1) + LocalOcrLine(right.last().text))) {
+            val parsed = TransactionPageParser.parsePage(page, 1080, 1800, time, origin = "image")
+            assertEquals(TransactionPageScope.ISOLATED_BLOCKS, parsed.scope)
+            assertTrue(parsed.candidates.isEmpty())
+        }
+    }
+
+    @Test fun tightlySpacedViewerCardsKeepTheSuccessfulCardSeparateFromAFailedHeading() {
+        val viewer = lines("图片查看器", top = 20)
+        val first = lines("招商银行", "交易成功提醒", "交易类型：网上快捷支付", "交易金额：12.34元", "交易卡号：尾号0012", top = 200)
+        val second = lines("招商银行", "交易失败提醒", "交易金额：99.00元", "交易卡号：尾号9901", top = 450)
+        val parsed = TransactionPageParser.parsePage(viewer + first + second, 1080, 1800, time, origin = "image")
+        val candidate = parsed.candidates.single()
+        assertEquals("NESTED_BANK", candidate.bill.receipt!!.blockOrigin!!.kind)
+        assertEquals(1234L, candidate.bill.amountCents)
+        assertEquals("0012", candidate.bill.paymentMethod!!.cardLast4)
+        assertEquals(first.joinToString("\n") { it.text }, candidate.rawText)
+        assertEquals(TransactionReceiptResult.Rejected("付款未成功，不予记账"), parsed.receipts.last().result)
+    }
+
+    @Test fun tightlySpacedViewerCardsCannotUseAnotherCardsTailToCompleteAnAmountOnlyReceipt() {
+        val viewer = lines("图片查看器", top = 20)
+        val first = lines("招商银行", "交易提醒", "交易金额：12.34元", top = 200)
+        val second = lines("招商银行", "交易提醒", "交易卡号：尾号0012", top = 350)
+        val parsed = TransactionPageParser.parsePage(viewer + first + second, 1080, 1800, time, origin = "image")
+        val candidate = parsed.candidates.single()
+        assertEquals(1234L, candidate.bill.amountCents)
+        assertNull(candidate.bill.direction)
+        assertNull(candidate.bill.paymentMethod!!.cardLast4)
+        assertFalse(candidate.bill.reliable)
+        assertEquals(TransactionReceiptResult.Unrecognized, parsed.receipts.last().result)
+    }
+
     @Test fun nestedBankSummaryKeepsOnlyItsOwnAmountAndFallsBackToFrozenRecognitionTime() {
         val outer=lines("图片查看器","账单记录时间：2020-01-01 08:00","交易时间：2020-01-02 09:00",top=30)
         val inner=lines("招商银行","交易金额：23.45元","交易说明：日常用品","账户余额：9999.00元","积分：12345",top=400)
@@ -83,9 +140,13 @@ class MixedReceiptPartitionerTest {
     }
 
     @Test fun serviceOnlyPageCannotCreateConsumptionFromARecommendedPaymentExample() {
-        val page=lines("服务开通通知","优先从零钱支付","开通服务每月99.00元")+
+        val page=lines("服务开通通知","优先从零钱支付","开通服务每月99.00元","交易已关闭")+
             lines("为你推荐","支付成功","交易金额：888.00元","商户名称：合成火锅广告","通过零钱扣款",top=600)
         assertTrue(parse(page).isEmpty())
+        val parsed = TransactionPageParser.parsePage(page, 1080, 1800, time, origin = "image")
+        assertEquals(TransactionPageScope.ISOLATED_BLOCKS, parsed.scope)
+        assertTrue(parsed.receipts.isEmpty())
+        assertNull(parsed.skipReason)
     }
 
     @Test fun unsupportedMixedGeometryCannotEscapeTheActualAccountGate() {

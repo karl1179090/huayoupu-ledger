@@ -8,13 +8,16 @@ import org.json.JSONObject
 data class BatchItemResult(val candidateId:CandidateId,val operationKey:String,val status:String,val reason:String,
     val amountCents:Long?,val direction:Direction?,val merchant:String,val accountingDate:String?,
     val recordUID:String?=null,val recordId:Long?=null)
-data class BatchCounts(val added:Int,val skipped:Int,val review:Int,val failed:Int)
+data class BatchCounts(val added:Int,val skipped:Int,val review:Int,val failed:Int,val updated:Int=0) {
+    val message get() = "新增 $added · 跳过 $skipped · 待确认 $review · 失败 $failed" +
+        if (updated > 0) " · 退款更新 $updated" else ""
+}
 data class RecognitionBatchResult(val operationUID:String,val items:List<BatchItemResult>) {
     val complete get()=items.none { it.status in setOf("PENDING","FAILED") }
     val counts get()=BatchCounts(items.count { it.status=="ADDED" },items.count { it.status=="SKIPPED" },
-        items.count { it.status=="REVIEW" },items.count { it.status=="FAILED" })
-    val message get()="新增 ${counts.added} · 跳过 ${counts.skipped} · 待确认 ${counts.review} · 失败 ${counts.failed}"
-    val taskStatus get()=when { !complete->"FAILED";counts.review>0->"REVIEW";counts.added>0->"SUCCEEDED";else->"SKIPPED" }
+        items.count { it.status=="REVIEW" },items.count { it.status=="FAILED" },items.count { it.status=="UPDATED" })
+    val message get()=counts.message
+    val taskStatus get()=when { !complete->"FAILED";counts.review>0->"REVIEW";counts.added>0 || counts.updated>0->"SUCCEEDED";else->"SKIPPED" }
     /** Cancellation cannot erase already saved POSTED/REVIEW records or their frozen outcomes. */
     fun stoppedMessage(fallback:String):String {
         if(items.none { it.recordUID!=null })return fallback
@@ -28,7 +31,7 @@ data class RecognitionBatchResult(val operationUID:String,val items:List<BatchIt
         return "$message · $explanation"
     }
     fun json()=JSONObject().put("operationUID",operationUID).put("complete",complete)
-        .put("counts",JSONObject().put("added",counts.added).put("skipped",counts.skipped).put("review",counts.review).put("failed",counts.failed))
+        .put("counts",JSONObject().put("added",counts.added).put("skipped",counts.skipped).put("review",counts.review).put("failed",counts.failed).put("updated",counts.updated))
         .put("items",JSONArray(items.map { item -> JSONObject().put("candidateId",item.candidateId.value)
             .put("operationKey",item.operationKey).put("status",item.status).put("reason",item.reason)
             .put("amountCents",item.amountCents ?: JSONObject.NULL).put("direction",item.direction?.name ?: JSONObject.NULL)
@@ -86,13 +89,13 @@ internal object RecognitionBatchCodec {
         val items=(0 until array.length()).map { index -> val item=array.getJSONObject(index)
             val id=CandidateId(text(item,"candidateId"));val key=text(item,"operationKey")
             require(key.isNotBlank() && key.length<=160 && id!=CandidateId.SINGLE && key==candidateOperationKey(operation,id))
-            val status=text(item,"status");require(status in setOf("PENDING","ADDED","SKIPPED","REVIEW","FAILED"))
+            val status=text(item,"status");require(status in setOf("PENDING","ADDED","UPDATED","SKIPPED","REVIEW","FAILED"))
             val bill=readBill(item.getJSONObject("bill"))
             require(bill.amountCents==null || bill.amountCents in 0..Money.MAX_CENTS)
             require(bill.occurredAt>0 && bill.merchant.length<=512 && bill.reason.length<=2048)
             val raw=optional(item,"rawText");require(raw==null || raw.length<=32768)
             require(text(item,"reason").length<=2048)
-            require(status !in setOf("ADDED","REVIEW") || optional(item,"recordUID")!=null)
+            require(status !in setOf("ADDED","UPDATED","REVIEW") || optional(item,"recordUID")!=null)
             require(status !in setOf("PENDING","FAILED") || optional(item,"recordUID")==null)
             require(optional(item,"historyRecordUID")==null || status=="SKIPPED")
             listOfNotNull(optional(item,"historyRecordUID"),optional(item,"recordUID")).forEach { require(java.util.UUID.fromString(it).toString()==it) }

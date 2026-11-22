@@ -2,7 +2,7 @@ package net.ankio.ledger.core
 
 /** A deliberately narrow, single bank notification adapter. Hosting-app and balance text are not account evidence. */
 object BankReceiptParser {
-    private val heading = Regex("交易成功提醒|交易提醒|动账通知|消费提醒|账户变动通知")
+    private val heading = Regex("交易(?:成功|失败|处理中)?提醒|动账通知|消费提醒|账户变动通知")
     private val typeLabel = Regex("^(?:交易类型|交易方式)[：:]?")
     private val accountLabel = Regex("^(?:交易卡号|交易账号|交易账户|卡号|账号|账户(?!余额|变动|信息)|卡尾号|尾号)[：:]?")
     private val amountLabel = Regex("^(?:交易金额|消费金额|支出金额|收入金额|发生金额|金额)[：:]?")
@@ -22,9 +22,16 @@ object BankReceiptParser {
         return BankCodes.normalize(name)
     }
 
+    internal fun isHeading(raw: String): Boolean {
+        val text = normalize(raw).filterNot(Char::isWhitespace)
+        val marker = heading.find(text) ?: return false
+        return marker.value == text || marker.range.last == text.lastIndex &&
+            (issuerCode(text) != null || text.substring(0, marker.range.first).trimEnd('：', ':').endsWith("银行"))
+    }
+
     fun matches(lines: List<LocalOcrLine>): Boolean = lines.any {
         val text=normalize(it.text).filterNot(Char::isWhitespace)
-        heading.matches(text) || BankCodes.find(text).isNotEmpty() && heading.containsMatchIn(text)
+        isHeading(text) || BankCodes.find(text).isNotEmpty() && heading.containsMatchIn(text)
     }
 
     fun parse(lines: List<LocalOcrLine>, capturedAt: Long, origin: String,
@@ -32,7 +39,7 @@ object BankReceiptParser {
         val scoped = ReceiptEvidenceParser.businessLines(lines)
         val text=scoped.joinToString("\n") { it.text }
         if(TransactionRejection.reason(text)!=null || Regex("待付款|待支付|支付中|付款中|交易处理中").containsMatchIn(text))return null
-        val boundary=Regex("^(?:交易(?:卡号|账号|账户|金额|类型|方式|时间|日期|单号|成功提醒)|扣款账户|付款账户|卡号|账号|账户|余额|尾号|商户名称|商家名称|服务商|优惠|优先|返回|完成)")
+        val boundary=Regex("^(?:交易(?:卡号|账号|账户|金额|类型|方式|时间|日期|单号|(?:成功|失败|处理中)?提醒)|扣款账户|付款账户|卡号|账号|账户|余额|尾号|商户名称|商家名称|服务商|优惠|优先|返回|完成)")
         fun fields(label: Regex) = scoped.mapIndexedNotNull { index, line ->
             val text = normalize(line.text).trim()
             val match = label.find(text) ?: return@mapIndexedNotNull null
@@ -70,7 +77,8 @@ object BankReceiptParser {
         }.distinctBy { listOf(it.medium,it.bankCode,it.cardLast4,it.ambiguous) }
         val typeAccounts=types.filter { inlineTailHint.containsMatchIn(it) }
         val accounts=values(accountLabel)+typeAccounts+methods.map { normalize(it.rawValue).filterNot(Char::isWhitespace) }.filter(String::isNotBlank)
-        val banks=(issuerHeaders.map { it.first } + fields(Regex("^(?:银行作者|凭证来源|出具机构|出具方)[：:]?")).flatMap { BankCodes.find(it.value) } +
+        val issuerFields=fields(Regex("^(?:银行作者|凭证来源|出具机构|出具方)[：:]?"))
+        val banks=(issuerHeaders.map { it.first } + issuerFields.flatMap { BankCodes.find(it.value) } +
             values(accountLabel).flatMap(BankCodes::find) + methods.mapNotNull { it.bankCode }).toSet()
         val tails=(accounts.flatMap { tail.findAll(it).map { match -> match.groupValues[1].ifBlank { match.groupValues[2] } }.toList() } +
             methods.mapNotNull { it.cardLast4 }).distinct()
@@ -78,7 +86,11 @@ object BankReceiptParser {
         val unsupportedOrConflicting=methods.any { it.ambiguous || it.medium!="BANK_CARD" } ||
             issuerHeaders.any { Regex("信用卡|贷记卡").containsMatchIn(it.second.text) }
         val malformedTypeTail=typeAccounts.any { inlineTypeTail.matchEntire(it)==null }
-        val ambiguous=malformedTail || malformedTypeTail || unsupportedOrConflicting || banks.size!=1 || tails.size>1 || scoped.count { heading.containsMatchIn(it.text) }>1
+        val unknownIssuer=scoped.firstOrNull { !it.text.contains(':') && !it.text.contains('：') && it.text.trim().endsWith("银行") && it.text.length in 1..512 }
+        val unknownNamedIssuer = issuerFields.any { it.value.trim().endsWith("银行") && BankCodes.find(it.value).isEmpty() }
+        val bankUnresolved = unknownNamedIssuer || banks.isEmpty() && (tails.isEmpty() || unknownIssuer != null)
+        val ambiguous = malformedTail || malformedTypeTail || unsupportedOrConflicting || banks.size > 1 ||
+            bankUnresolved || tails.size > 1 || scoped.count { heading.containsMatchIn(it.text) } > 1
         val reasons = buildList {
             if (amount == null) add("交易金额不明确")
             if (direction == null) add("请确认银行交易收支方向")
@@ -92,7 +104,6 @@ object BankReceiptParser {
             ambiguous=ambiguous)
         val bankCode=banks.singleOrNull()
         val issuer=issuerHeaders.firstOrNull { it.first==bankCode }?.second
-        val unknownIssuer=scoped.firstOrNull { !it.text.contains(':') && !it.text.contains('：') && it.text.trim().endsWith("银行") && it.text.length in 1..512 }
         val receipt = base.copy(
             receiptIssuer=issuer?.let { line -> BankCodes.entries.firstOrNull { it.code==bankCode }?.label?.let { ReceiptField(it,line.text.take(2048)) } }
                 ?: base.receiptIssuer ?: unknownIssuer?.let { ReceiptField(it.text.trim(),it.text) },

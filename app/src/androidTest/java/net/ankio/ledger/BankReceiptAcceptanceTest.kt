@@ -53,7 +53,7 @@ class BankReceiptAcceptanceTest {
                     time.recognitionAt,policy=policy,origin=origin,timeContext=time))
             }
         }
-        return CaptureProcessor(app, OcrClient(app, backend)).processPrepared("synthetic-bank".toByteArray(),
+        return CaptureProcessor(app, OcrClient(app, backend)).processPrepared(syntheticBackupImage(180),
             source, origin, task) { true }.also { if(it is IngestResult.Saved) {
                 if(records.add(it.record.id)) {
                     assertEquals(app.tasks.recognitionTime(task)!!.recognitionAt,it.record.capture.receivedAt)
@@ -166,8 +166,7 @@ class BankReceiptAcceptanceTest {
         val json = LedgerBackup.encode(app.store, channels).toByteArray()
         val zip = ByteArrayOutputStream().also { LedgerArchive.write(app.store, channels, it) }.toByteArray()
         for (bytes in listOf(json, zip)) {
-            val name = "bank-restore-${UUID.randomUUID()}.db"
-            try { LedgerStore(app, name).use { target ->
+            withCompleteRestoreTarget(app, "bank-restore") { target ->
                 LedgerArchive.read(bytes.inputStream(), app.cacheDir).use { prepared ->
                     LedgerArchive.restore(target, prepared)
                     val restored = target.all().single { it.uid==saved.uid }
@@ -180,7 +179,7 @@ class BankReceiptAcceptanceTest {
                     assertEquals(movements, target.walletSnapshot().movements)
                     assertEquals(balances(), target.accounts().associate { it.uid to it.amountCents })
                 }
-            } } finally { app.deleteDatabase(name) }
+            }
         }
     }
 
@@ -279,8 +278,7 @@ class BankReceiptAcceptanceTest {
         val json=LedgerBackup.encode(app.store,channels).toByteArray()
         val zip=ByteArrayOutputStream().also { LedgerArchive.write(app.store,channels,it) }.toByteArray()
         for(bytes in listOf(json,zip)) {
-            val name="pending-bank-${UUID.randomUUID()}.db"
-            try { LedgerStore(app,name).use { target ->
+            withCompleteRestoreTarget(app, "pending-bank") { target ->
                 LedgerArchive.read(bytes.inputStream(),app.cacheDir).use { prepared ->
                     LedgerArchive.restore(target,prepared)
                     val restored=target.all().single { it.uid==saved.uid }
@@ -298,7 +296,7 @@ class BankReceiptAcceptanceTest {
                     assertEquals(posted,target.saveEdited(confirm,card.uid,true,submissionToken=token))
                     assertEquals(before+(card.uid to 8800L),target.accounts().associate { it.uid to it.amountCents })
                 }
-            } } finally { app.deleteDatabase(name) }
+            }
         }
         assertEquals(before,balances())
     }
@@ -333,8 +331,7 @@ class BankReceiptAcceptanceTest {
         val mutations=listOf<(JSONObject)->Unit>({ it.put("cardLast4","007") },{ it.put("bankCode","unknown-bank") },
             { it.put("direction","TRANSFER") },{ it.put("ambiguous",1) },{ it.put("extra",true) },
             { it.getJSONObject("transactionType").put("blockId","other") })
-        val name="invalid-bank-backup-${UUID.randomUUID()}.db"
-        try { LedgerStore(app,name).use { target ->
+        withCompleteRestoreTarget(app, "invalid-bank-backup") { target ->
             for(mutation in mutations) {
                 val json=JSONObject(original);val rows=json.getJSONArray("records")
                 val row=(0 until rows.length()).map(rows::getJSONObject).single { it.getString("uid")==saved.uid }
@@ -343,7 +340,7 @@ class BankReceiptAcceptanceTest {
                 assertTrue(target.all().isEmpty())
                 assertTrue(target.accounts().isEmpty())
             }
-        } } finally { app.deleteDatabase(name) }
+        }
     }
 
     @Test fun actualBalanceSupplementConflictingWithBankEvidenceRequiresReviewButRespectsManualLock() = runBlocking {

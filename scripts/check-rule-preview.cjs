@@ -595,7 +595,7 @@ async function installRulePreviewFixture(page){
   // 2. Click '据此创建规则' -> Opens Rule Editor prefilled from bill
   await page.locator('#create-rule-from-bill').click();
   await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
-  assert.equal(await page.locator('#sheet-title').innerText(),'自动分类规则');
+  assert.equal(await page.locator('#sheet-title').innerText(),'新增分类规则');
   assert.match(await page.locator('#rule-editor-title').innerText(),/从账单创建规则/);
   // Check prefilled values
   assert.equal(await page.locator('#rule-name').inputValue(),'星巴克咖啡（静安寺店）');
@@ -610,12 +610,15 @@ async function installRulePreviewFixture(page){
   assert.equal(await page.locator('[data-condition-operator="1"]').inputValue(),'EQUALS');
   assert.equal(await page.locator('[data-condition-keyword="1"]').inputValue(),'美式咖啡');
 
+  assert.equal(await page.locator('#rule-tester-card, #classification-rules-list').count(),0);
+  await page.screenshot({path:path.join(output,'02-rule-editor-prefilled-from-bill.png')});
+  await page.locator('#open-tester-btn').click();
+  assert.equal(await page.locator('#rule-editor-card, #classification-rules-list').count(),0);
+
   // Verify scope note clarifies append position for new draft
   assert.match(await page.locator('#rule-tester-scope').innerText(),/新规则草稿按保存后的追加位置（自定义规则末尾）测试/);
   // Verify draft toggle is checked
   assert.equal(await page.locator('#test-use-draft').isChecked(),true);
-
-  await page.screenshot({path:path.join(output,'02-rule-editor-prefilled-from-bill.png')});
 
   // 3. Manual Test with draft: Run Test and verify matched decision
   // In manual mode: merchant is prefilled from draft input
@@ -653,11 +656,16 @@ async function installRulePreviewFixture(page){
 
   // 4. Missing field negative condition (缺字段负向不命中)
   // Edit the rule to have a condition ORDER_CONTENT NOT_CONTAINS "外卖"
+  await page.locator('#rule-page-back').click();
+  assert.equal(await page.locator('#rule-name').inputValue(),'星巴克咖啡（静安寺店）');
   await page.locator('#add-rule-condition').click();
   assert.equal(await page.locator('[data-condition-row]').count(),3);
   await page.locator('[data-condition-field="2"]').selectOption('ORDER_CONTENT');
   await page.locator('[data-condition-operator="2"]').selectOption('NOT_CONTAINS');
   await page.locator('[data-condition-keyword="2"]').fill('外卖');
+
+  await page.locator('[data-condition-keyword="0"]').fill('西西弗书店');
+  await page.locator('#open-tester-btn').click();
 
   // In manual test input: remove order content items so ORDER_CONTENT is missing
   const removeBtns=page.locator('[data-remove-test-order]');
@@ -669,8 +677,6 @@ async function installRulePreviewFixture(page){
 
   // Set merchant to something that doesn't match rule:custom:1
   await page.locator('#test-merchant').fill('西西弗书店');
-  // Update draft rule merchant condition to match
-  await page.locator('[data-condition-keyword="0"]').fill('西西弗书店');
 
   // Run test
   const prevPreviewCallsNeg=await page.evaluate(()=>window.calls.previewClassification.length);
@@ -830,8 +836,8 @@ async function installRulePreviewFixture(page){
   await page.locator('#classification-rules-settings').click();
   await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
 
-  // Verify: in 新增规则 mode, editingRule is null, formConditions has empty keyword, testingWithDraft is false
-  assert.equal(await page.locator('#test-use-draft').isChecked(),false);
+  await page.locator('#header-open-tester-btn').click();
+  assert.equal(await page.locator('#test-use-draft').count(),0);
   // Enter a merchant name and run test directly
   await page.locator('#test-merchant').fill('星巴克咖啡（徐家汇店）');
   const prevPreviewCallsDirect=await page.evaluate(()=>window.calls.previewClassification.length);
@@ -905,6 +911,10 @@ async function installRulePreviewFixture(page){
   await page.locator('#rule-name').fill('星巴克臻选咖啡');
   await page.locator('#save-rule').click();
 
+  assert.equal(await page.locator('#sheet-title').innerText(),'测试分类规则');
+  assert.equal(await page.locator('#test-use-draft').count(),0);
+  assert.equal(await page.locator('#rule-editor-card').count(),0);
+
   // Toast / notification feedback
   await page.waitForFunction(()=>document.querySelector('.toast')?.classList.contains('show'));
   assert.match(await page.locator('.toast').innerText(),/规则已保存，仅影响后续新识别任务/);
@@ -927,6 +937,8 @@ async function installRulePreviewFixture(page){
   // Open rules sheet to check tester card layout in 320px + large text
   await page.evaluate(()=>openClassificationRules('EXPENSE'));
   await page.waitForFunction(()=>{const s=document.querySelector('#sheet');return s.open&&!s.classList.contains('fluid-pending')&&!s._morph});
+
+  await page.locator('#header-open-tester-btn').click();
 
   // Assert no horizontal overflow
   const noOverflow=await page.evaluate(()=>{

@@ -15,6 +15,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import net.ankio.ledger.capture.ChannelSettings
 import net.ankio.ledger.core.*
+import net.ankio.ledger.data.AtomicBackupTransaction
 import net.ankio.ledger.data.IngestResult
 import net.ankio.ledger.data.LedgerAccount
 import net.ankio.ledger.data.LedgerArchive
@@ -25,6 +26,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** Independent checks through the real WebView bridge and document-result confirmation. */
 @RunWith(AndroidJUnit4::class)
@@ -126,6 +129,7 @@ class WalletUiAcceptanceTest {
         val previousSelected=channels.selectedShakePackages()
         val fixturePackage=InstrumentationRegistry.getInstrumentation().context.packageName
         val file=File(app.cacheDir,"acceptance-restore-${UUID.randomUUID()}.zip")
+        val opening=CountDownLatch(1);val allowRead=CountDownLatch(1)
         var task=0L
         try {
             if(corrupt)file.writeText("synthetic damaged archive")
@@ -135,32 +139,39 @@ class WalletUiAcceptanceTest {
                 web.run("window.__restoreMessage='';window.__oldNotify=notify;notify=message=>{window.__restoreMessage=message;window.__oldNotify(message)}")
                 channels.setAutoPackage("com.tencent.mm",true);channels.setAutomaticEnabled(true)
                 channels.setShakePackage(fixturePackage,true);channels.set(ChannelSettings.Channel.OCR,true)
+                val chosenAutomatic=channels.selectedAutoPackages();val chosenShake=channels.selectedShakePackages()
                 val oldAuthorization=channels.shakeAuthorization(fixturePackage)!!
                 task=app.tasks.create(Source.OCR,"shake:$fixturePackage",oldAuthorization)
                 val session=app.recognitionSession.generation
+                AtomicBackupTransaction.processProbe={ phase ->
+                    if(phase=="opening") { opening.countDown();check(allowRead.await(10,TimeUnit.SECONDS)) }
+                }
                 scenario.onActivity { activity ->
                     MainActivity::class.java.getDeclaredMethod("onActivityResult",Int::class.javaPrimitiveType,Int::class.javaPrimitiveType,Intent::class.java)
                         .apply { isAccessible=true }.invoke(activity,MainActivity.RESTORE_REQUEST,Activity.RESULT_OK,Intent().setData(Uri.fromFile(file)))
                     WindowInspector.getGlobalWindowViews().flatMap(::views).filterIsInstance<Button>()
                         .single { it.text.toString()=="恢复" }.performClick()
                 }
-                // AlertController dispatches the positive listener through its Handler;
-                // performClick returning does not mean the listener has run yet.
-                InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-                assertFalse("The restore confirmation callback must pause automatic capture",channels.automaticEnabled())
-                assertFalse(channels.enabled(ChannelSettings.Channel.OCR))
-                assertTrue(app.recognitionSession.generation>session)
+                try {
+                    assertTrue(opening.await(10,TimeUnit.SECONDS))
+                    assertFalse(app.recognitionWork.accepting)
+                    assertFalse(app.recognitionWork.admit(false) { true })
+                    assertTrue(channels.automaticEnabled());assertTrue(channels.enabled(ChannelSettings.Channel.OCR))
+                    assertTrue(channels.shakeAuthorized(oldAuthorization));assertEquals(session,app.recognitionSession.generation)
+                } finally { allowRead.countDown() }
                 web.await(if(corrupt)"window.__restoreMessage.includes('恢复失败')" else "window.__restoreMessage.includes('请重新选择摇一摇应用')")
-                assertFalse(channels.automaticEnabled());assertFalse(channels.captureEnabled())
-                assertEquals(setOf("com.tencent.mm"),channels.selectedAutoPackages().intersect(setOf("com.tencent.mm")))
+                assertTrue(app.recognitionWork.accepting);assertTrue(app.recognitionSession.generation>session)
+                assertFalse(channels.automaticEnabled());assertFalse(channels.enabled(ChannelSettings.Channel.OCR));assertFalse(channels.captureEnabled())
+                assertEquals(if(corrupt)chosenAutomatic else emptySet<String>(),channels.selectedAutoPackages())
+                assertEquals(if(corrupt)chosenShake else emptySet<String>(),channels.selectedShakePackages())
                 assertFalse(channels.shakeAuthorized(oldAuthorization))
                 assertEquals("CANCELLED",app.tasks.status(task))
-                if(!corrupt)assertTrue(channels.selectedShakePackages().isEmpty())
                 // A user may later reselect the same app; the pre-restore task stays revoked.
                 channels.setShakePackage(fixturePackage,true);channels.set(ChannelSettings.Channel.OCR,true)
                 assertFalse(channels.shakeAuthorized(oldAuthorization))
             }
         } finally {
+            allowRead.countDown();AtomicBackupTransaction.processProbe=null
             channels.set(ChannelSettings.Channel.OCR,false);channels.setAutomaticEnabled(false)
             if(task>0)app.tasks.delete(task)
             channels.selectedShakePackages().filter { it !in previousSelected }.forEach { channels.setShakePackage(it,false) }

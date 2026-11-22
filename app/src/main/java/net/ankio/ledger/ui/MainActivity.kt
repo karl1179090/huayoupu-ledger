@@ -176,32 +176,20 @@ class MainActivity : Activity() {
             is ImageImportState.Finished -> {
                 ledger.importer.state.value = ImageImportState.Idle
                 refresh()
-                when (val result = state.result) {
-                    is IngestResult.Saved -> {
-                        val persisted=ledger.store.get(result.record.id)
-                        if(persisted==null) {
-                            dispatch("importStatus", "{\"working\":false}")
-                            message("账单已移除")
-                            return
-                        }
-                        previewBytes = ledger.importer.previewBytes
-                        if (previewBytes != null) dispatch("preview", JSONObject().put("url", "$localOrigin/capture.png?v=${System.nanoTime()}").toString())
-                        dispatch("openRecord", persisted.id.toString())
-                        val amount=persisted.bill.amountCents
-                        if(persisted.state==RecordState.POSTED && amount!=null) {
-                            ledger.captureHealth.successful(persisted.id,"image")
-                            message("已记账 ¥${net.ankio.ledger.core.Money.format(amount)}")
-                        } else message("金额待核对")
-                    }
-                    IngestResult.DuplicateSkipped -> { dispatch("importStatus", "{\"working\":false}"); message("识别完成，请查看账本") }
-                    IngestResult.Ignored -> { dispatch("importStatus", "{\"working\":false}"); message("没有识别到账单文字，可换图或手动记账") }
-                    is IngestResult.Skipped -> { dispatch("importStatus", "{\"working\":false}");message(result.message) }
-                    is IngestResult.Batch -> {
-                        dispatch("importStatus", "{\"working\":false}")
-                        dispatch("recognitionBatch",result.result.json().toString())
-                        message(result.result.message)
-                    }
+                val result = state.result
+                val feedback = RecognitionCommitRecovery.immediate(ledger.tasks, ledger.store, state.taskId, result)
+                dispatch("importStatus", "{\"working\":false}")
+                if (result is IngestResult.Batch) {
+                    val batch = ledger.store.recognitionBatch("recognition:${result.result.operationUID}") ?: result.result
+                    dispatch("recognitionBatch", batch.json().toString())
+                } else if (feedback?.recordId != null) {
+                    previewBytes = ledger.importer.previewBytes
+                    if (previewBytes != null) dispatch("preview", JSONObject().put("url", "$localOrigin/capture.png?v=${System.nanoTime()}").toString())
+                    dispatch("openRecord", feedback.recordId.toString())
+                    if (feedback.posted) ledger.captureHealth.successful(feedback.recordId, "image")
                 }
+                if (result == IngestResult.Ignored) message("没有识别到账单文字，可换图或手动记账")
+                else feedback?.let { message(it.message) }
             }
             is ImageImportState.Failed -> {
                 ledger.importer.state.value = ImageImportState.Idle
@@ -395,40 +383,18 @@ class MainActivity : Activity() {
             RESTORE_REQUEST -> AlertDialog.Builder(this).setTitle("恢复本地备份？")
                 .setMessage("将合并备份中的账单、账户、分类与分类规则、排队识别任务与结果及识别截图。已有账单不会覆盖；采集保持暂停，系统授权需要重新确认。支持 v1～v10 备份；钱包余额以快照恢复，资金影响不会重放。旧版备份可能没有截图。")
                 .setPositiveButton("恢复") { _,_ ->
-                    // Pause both independent channels before taking the ledger write lock.
-                    // A late native OCR response must lose its session before restore starts.
-                    try {
-                        ledger.channels.set(ChannelSettings.Channel.OCR,false)
-                        ledger.channels.setAutomaticEnabled(false)
-                        ledger.recognitionSession.invalidate()
-                        ScreenCaptureService.current?.cancelRecognition()
-                        ledger.captureQueue.cancelAll()
-                        CaptureRuntime.stopSafely()
-                        ledger.changed()
-                    } catch(cancelled:CancellationException) { throw cancelled }
-                    catch(_:Exception) {
-                        message("暂停采集失败，备份未恢复，现有账单未修改")
-                        return@setPositiveButton
-                    }
                     uiScope.launch {
                         dispatch("fileOperation",JSONObject.quote("正在校验并恢复备份"))
                         var restoredSummary: RestoreSummary? = null
                         try {
-                            withContext(Dispatchers.IO) {
+                            ledger.restoreCompleteBackup(prepare={
                                 (contentResolver.openInputStream(uri) ?: error("无法读取")).use { input ->
-                                    LedgerArchive.read(input,cacheDir).use { prepared ->
-                                        ledger.restoreQuiescent {
-                                            LedgerArchive.restoreDetailed(ledger.store,prepared).also { restoredSummary = it }
-                                        }
-                                    }
+                                    LedgerArchive.read(input,cacheDir)
                                 }
-                                // Restoring data must never silently start collection or restore cloud consent.
-                                ChannelSettings.Channel.entries.forEach { ledger.channels.set(it,false) }
-                                ledger.channels.resetShakeSelectionForRestore()
-                            }
+                            }) { restoredSummary=it }
+                            val count = restoredSummary ?: return@launch
                             CaptureRuntime.stopSafely()
                             ledger.changed(true)
-                            val count = restoredSummary!!
                             message("${restoreSummaryMessage(count)}采集保持暂停，请重新选择摇一摇应用")
                         } catch(cancelled:CancellationException) { throw cancelled }
                         catch(e:Exception) {
@@ -439,6 +405,10 @@ class MainActivity : Activity() {
                                 message("已恢复新增 ${summary.imported} 笔，刷新/暂停状态需核对")
                             } else if(isRestoreOutcomeUncertain(e)) {
                                 message("恢复结果需要核对，建议重新打开应用核对")
+                            } else if(e is RestorePreparationException) {
+                                message("暂停采集失败，备份未恢复，现有账单未修改")
+                            } else if (e is ClassificationCapacityException) {
+                                message("恢复失败，${e.message}")
                             } else {
                                 message("恢复失败，备份无效或已损坏，现有账单未修改")
                             }

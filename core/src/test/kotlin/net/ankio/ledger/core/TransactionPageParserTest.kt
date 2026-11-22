@@ -31,11 +31,39 @@ class TransactionPageParserTest {
         assertTrue(parsed.all { it.bill.receipt!!.time!!.source=="RECOGNITION_FALLBACK" })
     }
     @Test fun failedCardCannotRejectAnotherCardOrDonateItsFields() {
-        val failed=card("12.34","0007","2026-11-01",100)+LocalOcrLine("交易失败",30,450,700,480)
-        val parsed=TransactionPageParser.parse(failed+card("56.78","0008","2026-11-02",600),1080,1600,time,origin="image")
-        assertEquals(1,parsed.size);assertEquals(5678L,parsed.single().bill.amountCents)
-        assertEquals("0008",parsed.single().bill.paymentMethod!!.cardLast4)
-        assertFalse(parsed.single().rawText!!.contains("交易失败"))
+        val failed = card("12.34", "0007", "2026-11-01", 100).map {
+            if (it.text == "交易成功提醒") it.copy(text = "交易失败提醒") else it
+        }
+        val page = TransactionPageParser.parsePage(failed + card("56.78", "0008", "2026-11-02", 600), 1080, 1600, time, origin = "image")
+        assertEquals(TransactionPageScope.ISOLATED_BLOCKS, page.scope)
+        val rejected = page.receipts.first()
+        assertTrue(rejected.rawText.contains("尾号0007"))
+        assertEquals(TransactionReceiptResult.Rejected("付款未成功，不予记账"), rejected.result)
+        assertNull(page.skipReason)
+        val candidate = page.candidates.single()
+        assertEquals(5678L, candidate.bill.amountCents)
+        assertEquals("0008", candidate.bill.paymentMethod!!.cardLast4)
+        assertEquals("2026-11-02", candidate.bill.receipt!!.time!!.localDate)
+        assertFalse(candidate.rawText!!.contains("交易失败"))
+    }
+
+    @Test fun overlappingHeadingsCannotAttachTheFirstCardsAccountToTheSecondCardsAmount() {
+        val left = card("12.34", "0007", "2026-11-01", 100).filterNot { "交易卡号" in it.text }
+        val right = card("56.78", "0008", "2026-11-02", 100).filterNot { "交易金额" in it.text }
+            .map { it.copy(left = 500, right = 900) }
+        val page = TransactionPageParser.parsePage(left + right, 1080, 1600, time, origin = "image")
+        assertTrue(page.candidates.isEmpty())
+    }
+
+    @Test fun recommendationStatusDoesNotRejectAnUnpartitionedPayment() {
+        val lines = listOf("付款成功", "交易金额：12.34元", "商户名称：合成餐厅", "为你推荐", "交易失败", "交易金额：99.00元")
+            .map(::LocalOcrLine)
+        val page = TransactionPageParser.parsePage(lines, 1080, 1600, time, origin = "image")
+        assertEquals(TransactionPageScope.PAGE, page.scope)
+        val candidate = page.candidates.single()
+        assertEquals(1234L, candidate.bill.amountCents)
+        assertFalse(candidate.rawText!!.contains("交易失败"))
+        assertNull(page.skipReason)
     }
 
     @Test fun bankPortalHeadersAndInlineTailsRemainInTheirOwnTransactionBlocks() {

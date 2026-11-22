@@ -10,7 +10,9 @@ import net.ankio.ledger.ocr.OcrClient
 import net.ankio.ledger.core.Capture
 import net.ankio.ledger.core.Source
 import net.ankio.ledger.core.RecognitionPolicy
+import net.ankio.ledger.core.TransactionPageScope
 import net.ankio.ledger.data.IngestResult
+import net.ankio.ledger.data.RecognitionCommitRecovery
 
 /** Shared local persistence pipeline; the bundled recognizer reads the exact stored image. */
 class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient = app.recognizer,
@@ -65,9 +67,6 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
     private fun policy(taskId:Long?) = if(taskId?.let(app.tasks::automatic)==true)
         RecognitionPolicy.AUTOMATIC_PAYMENT else RecognitionPolicy.USER_INITIATED
 
-    private fun recordedMessage(cents:Long?,transfer:Boolean=false)=if(cents==null)"已记账" else
-        "已记账 ¥${net.ankio.ledger.core.Money.format(cents)}${if(transfer)"（钱包转账）" else ""}"
-
     private suspend fun processRecognition(source:Source,origin:String,taskId:Long?,beforeAccept:suspend ()->Unit,allowed:()->Boolean,
         recognize:suspend (()->Boolean,()->net.ankio.ledger.core.RecognitionTimeContext)->net.ankio.ledger.ocr.RecognitionResult):IngestResult {
         require(source == Source.OCR || source == Source.IMAGE)
@@ -82,7 +81,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                     app.changed();return IngestResult.Batch(batch)
                 }
             }
-            if(taskId!=null && net.ankio.ledger.data.RecognitionCommitRecovery.recover(app.tasks,app.store,taskId)) {
+            if(taskId!=null && RecognitionCommitRecovery.recover(app.tasks,app.store,taskId)) {
                 app.changed();return IngestResult.DuplicateSkipped
             }
             val identity=taskId?.let(app.tasks::paymentIdentity)
@@ -92,7 +91,7 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                 val record=(app.store.committedPaymentEvent(identity)?.record
                     ?:app.tasks.recordForPaymentIdentity(identity)?.let(app.store::get)
                     ?:app.tasks.legacyFrameRecords(taskId).firstNotNullOfOrNull(app.store::get))
-                app.tasks.update(taskId,"DUPLICATE",recordedMessage(record?.bill?.amountCents,record?.bill?.direction==net.ankio.ledger.core.Direction.TRANSFER),record?.id)
+                RecognitionCommitRecovery.project(null, record).write(app.tasks, taskId)
                 app.tasks.diagnose(taskId,"stage","duplicate_before_model")
                 app.changed();return IngestResult.DuplicateSkipped
             }
@@ -101,27 +100,25 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
             var frozenTime:net.ankio.ledger.core.RecognitionTimeContext?=null
             val recognitionTime = { frozenTime ?: (taskId?.let { app.tasks.beginRecognition(it,recognitionClock) }
                 ?: recognitionClock()).also { frozenTime=it } }
-            val extracted = recognize(guard,recognitionTime)
+            val recognized = recognize(guard,recognitionTime)
             val provenance=taskId?.let(app.tasks::recognitionEvidence)?.let(net.ankio.ledger.data.RecognitionEvidenceCodec::decode)
-            val recognized=if(provenance==null)extracted else extracted.copy(candidates=extracted.candidates.map { candidate ->
+            val candidates = if (provenance == null) recognized.candidates else recognized.candidates.map { candidate ->
                 candidate.copy(bill=candidate.bill.copy(receipt=(candidate.bill.receipt ?: net.ankio.ledger.core.ReceiptEvidence()).copy(recognition=provenance)))
-            })
+            }
             currentCoroutineContext().ensureActive()
             beforeAccept()
             if(!guard())throw CancellationException("识别已停止")
-            val multi=recognized.candidates.any { it.id!=net.ankio.ledger.core.CandidateId.SINGLE }
-            if(multi) {
+            if (recognized.parsedPage.scope == TransactionPageScope.ISOLATED_BLOCKS && candidates.isNotEmpty()) {
                 val time=recognitionTime()
                 val key=operationKey ?: "recognition:${java.util.UUID.randomUUID()}"
                 val saveAt=android.os.SystemClock.elapsedRealtime()
                 val batch=app.coordinator.acceptBatch(Capture(source,origin,recognized.rawText,time.recognitionAt),
-                    recognized.candidates,key,time.zoneId,recognized.screenshot,classification,policy(taskId),guard)
+                    candidates,key,time.zoneId,recognized.screenshot,classification,policy(taskId),guard)
                 taskId?.let { app.tasks.phaseTiming(it,"save",android.os.SystemClock.elapsedRealtime()-saveAt)
                     app.tasks.update(it,batch.taskStatus,batch.message);app.tasks.diagnose(it,"stage","finished") }
                 app.changed();return IngestResult.Batch(batch)
             }
-            val skip=recognized.skipReason ?: net.ankio.ledger.core.TransactionRejection.reason(recognized.rawText)
-            skip?.let { message ->
+            recognized.skipReason?.let { message ->
                 taskId?.let { app.tasks.update(it,"SKIPPED",message);app.tasks.diagnose(it,"stage","skipped_transaction") }
                 app.changed();return IngestResult.Skipped(message)
             }
@@ -133,7 +130,9 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
             // The acquisition clock may corroborate the same live payment later; it never supplies missing accounting time.
             val capturedAt=taskId?.let(app.tasks::livePaymentAt) ?: recognitionTime().recognitionAt
             val saveAt=android.os.SystemClock.elapsedRealtime()
-            val result=app.coordinator.acceptCandidate(Capture(source, origin, recognized.rawText, capturedAt), recognized.candidates.singleOrNull(), recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), classificationSnapshot=classification, allowed=guard).outcome
+            val candidate = candidates.singleOrNull()
+            val capture = Capture(source, origin, candidate?.rawText ?: recognized.rawText, capturedAt)
+            val result=app.coordinator.acceptCandidate(capture, candidate, recognized.screenshot, recognized.merchantIcon, eventKey=identity, operationKey=operationKey, policy=policy(taskId), classificationSnapshot=classification, allowed=guard).outcome
             taskId?.let { app.tasks.phaseTiming(it,"save",android.os.SystemClock.elapsedRealtime()-saveAt) }
             if(result==IngestResult.Ignored&&!guard())throw CancellationException("识别已停止")
             taskId?.let { id ->
@@ -147,31 +146,14 @@ class CaptureProcessor(private val app: LedgerApp, private val client: OcrClient
                         if(result.record.state==net.ankio.ledger.core.RecordState.REVIEW)put("reviewReason",result.record.reason.take(220))
                     } else put("outcome",if(result==IngestResult.DuplicateSkipped)"duplicate_skipped" else "no_bill")
                 }.toString())
-                when(result) {
-                    is IngestResult.Saved -> {
-                        val conflict=result.record.state==net.ankio.ledger.core.RecordState.POSTED && result.record.wallet?.reviewCode?.startsWith("TRANSFER_")==true
-                        val review=result.record.state==net.ankio.ledger.core.RecordState.REVIEW || conflict
-                        val message=if(conflict)net.ankio.ledger.data.TransferRecognitionEnricher.message(result.record.wallet?.reviewCode)
-                            else if(review)result.record.reason else if(recognized.bill?.refund!=null || recognized.bill?.standaloneRefund!=null) "退款已更新"
-                            else recordedMessage(result.record.bill.amountCents,result.record.bill.direction==net.ankio.ledger.core.Direction.TRANSFER)
-                        app.tasks.update(id,if(review)"REVIEW" else "SUCCEEDED",message,result.record.id)
+                if (!RecognitionCommitRecovery.recover(app.tasks, app.store, id)) {
+                    when (result) {
+                        is IngestResult.Saved -> RecognitionCommitRecovery.project(result.effect, app.store.get(result.record.id)).write(app.tasks, id)
+                        IngestResult.DuplicateSkipped -> RecognitionCommitRecovery.project(null, null).write(app.tasks, id)
+                        IngestResult.Ignored -> app.tasks.update(id, "NO_BILL", "未识别到单笔账单，可换到账单详情页重试")
+                        is IngestResult.Skipped -> app.tasks.update(id, "SKIPPED", result.message)
+                        is IngestResult.Batch -> app.tasks.update(id, result.result.taskStatus, result.result.message)
                     }
-                    IngestResult.DuplicateSkipped -> {
-                        val capture=Capture(source,origin,recognized.rawText,capturedAt)
-                        // The primary legacy field may still be a Taobao order ID;
-                        // resolve an Alipay/WeChat alias through the scoped index first.
-                        val original=operationKey?.let(app.store::committedCapture)?.record
-                            ?:identity?.let(app.store::committedPaymentEvent)?.record
-                            ?:recognized.bill?.let { app.store.matchingIdentity(capture,it) } ?: run {
-                            val exact=recognized.bill?.let { bill -> net.ankio.ledger.core.DuplicateDetector.find(capture,bill,app.store.all().map { it.existing() }) } as? net.ankio.ledger.core.Duplicate.Exact
-                            exact?.id?.let(app.store::get)
-                        }
-                        app.tasks.update(id,"DUPLICATE",recordedMessage(original?.bill?.amountCents ?: recognized.bill?.amountCents,
-                            original?.bill?.direction==net.ankio.ledger.core.Direction.TRANSFER),original?.id)
-                    }
-                    IngestResult.Ignored -> app.tasks.update(id,"NO_BILL","未识别到单笔账单，可换到账单详情页重试")
-                    is IngestResult.Skipped -> app.tasks.update(id,"SKIPPED",result.message)
-                    is IngestResult.Batch -> app.tasks.update(id,result.result.taskStatus,result.result.message)
                 }
                 app.tasks.diagnose(id,"stage","finished")
                 app.changed()
